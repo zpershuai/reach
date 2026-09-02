@@ -71,7 +71,7 @@ export const fsWriteResultSchema = z.object({
 });
 
 export const fsEditParamsSchema = workspacePathSchema.extend({
-  oldString: z.string(),
+  oldString: nonEmptyString,
   newString: z.string(),
   replaceAll: z.boolean().default(false),
   ifMatch: optionalRevision,

@@ -134,7 +134,7 @@ export class WorkspaceFilesystem {
     const cursor = this.resumeCursor<{ path: string; line: number; content: string }>("fs.grep", query, params.cursor);
     if (cursor) return this.page(cursor, params.maxMatches) as FsGrepResult;
     const root = await this.resolveEntry(params.path);
-    const files = await walkFiles(root, root, [], MAX_GLOB_RESULTS);
+    const files = await walkFiles(root, root, [], Number.MAX_SAFE_INTEGER);
     let scanned = 0;
     let truncated = false;
     const matches: { path: string; line: number; content: string }[] = [];
@@ -147,10 +147,9 @@ export class WorkspaceFilesystem {
       if (stats.isSymbolicLink()) continue;
       const remaining = MAX_GREP_BYTES - scanned;
       if (remaining <= 0) { truncated = true; break; }
-      const data = await fs.readFile(absolute);
-      const scannedData = data.subarray(0, remaining);
+      const scannedData = await readAtMost(absolute, Math.min(stats.size, remaining));
       scanned += scannedData.length;
-      if (data.length > remaining) truncated = true;
+      if (stats.size > remaining) truncated = true;
       for (const [offset, line] of splitLines(scannedData.toString("utf8")).entries()) {
         expression.lastIndex = 0;
         if (!expression.test(line)) continue;
@@ -236,9 +235,10 @@ function splitLines(content: string): string[] { const lines = content.split(/\r
 function countOccurrences(content: string, needle: string): number { if (needle === "") return 0; return content.split(needle).length - 1; }
 function stableQuery(params: object, omit: string[]): string { return JSON.stringify(Object.fromEntries(Object.entries(params).filter(([key]) => !omit.includes(key)).sort(([a], [b]) => a.localeCompare(b)))); }
 function normalizePath(parent: string, name: string): string { return parent === "." ? name : `${parent.replace(/\/$/, "")}/${name}`; }
-function truncateUtf8(value: string, maxBytes: number): string { const bytes = Buffer.from(value); return bytes.length <= maxBytes ? value : bytes.subarray(0, maxBytes).toString("utf8"); }
+function truncateUtf8(value: string, maxBytes: number): string { let bytes = Buffer.from(value); while (bytes.length > maxBytes) bytes = bytes.subarray(0, bytes.length - 1); return bytes.toString("utf8"); }
 
 async function fileContentIfExists(file: string): Promise<string | undefined> { try { return await fs.readFile(file, "utf8"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
+async function readAtMost(path: string, length: number): Promise<Buffer> { const handle = await fs.open(path, "r"); try { const data = Buffer.alloc(length); const { bytesRead } = await handle.read(data, 0, length, 0); return data.subarray(0, bytesRead); } finally { await handle.close(); } }
 async function readIgnorePatterns(root: string): Promise<string[]> { try { return (await fs.readFile(resolve(root, ".gitignore"), "utf8")).split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("!")); } catch { return []; } }
 async function walkFiles(root: string, current: string, ignored: string[], limit: number): Promise<string[]> {
   const files: string[] = [];

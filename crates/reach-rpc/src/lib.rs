@@ -190,7 +190,7 @@ pub fn parse_fs_write_params(input: &str) -> Result<FsWriteParams, ContractError
 }
 pub fn parse_fs_edit_params(input: &str) -> Result<FsEditParams, ContractError> {
     let value = parse_json(input)?; let params: FsEditParams = serde_json::from_value(value).map_err(|_| ContractError)?;
-    validate_workspace_path(&params.workspace, &params.path)?; validate_revision(params.if_match.as_deref())?; Ok(params)
+    validate_workspace_path(&params.workspace, &params.path)?; if !is_non_empty(&params.old_string) { return Err(ContractError); } validate_revision(params.if_match.as_deref())?; Ok(params)
 }
 pub fn parse_fs_list_params(input: &str) -> Result<FsListParams, ContractError> {
     let value = parse_json(input)?; let params: FsListParams = serde_json::from_value(value).map_err(|_| ContractError)?;
