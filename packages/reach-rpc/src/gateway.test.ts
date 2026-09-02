@@ -4,12 +4,16 @@ import test from "node:test";
 import WebSocket from "ws";
 import {
   createGateway,
+  type GatewayOptions,
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
 } from "./gateway.js";
 
-async function withGateway(check: (baseUrl: string) => Promise<void>): Promise<void> {
-  const server = createGateway();
+async function withGateway(
+  check: (baseUrl: string) => Promise<void>,
+  options: GatewayOptions = {},
+): Promise<void> {
+  const server = createGateway(options);
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
 
@@ -103,5 +107,55 @@ test("session-wanted control rejects invalid payloads", async () => {
     });
 
     assert.equal(response.status, 400);
+  });
+});
+
+test("job completion closes the session and restores the idle heartbeat", async () => {
+  const events: string[] = [];
+  let resolveSessionClosed: () => void = () => {};
+  const sessionClosed = new Promise<void>((resolve) => {
+    resolveSessionClosed = resolve;
+  });
+  await withGateway(async (baseUrl) => {
+    const control = await fetch(`${baseUrl}/session-wanted`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wanted: true }),
+    });
+    assert.equal(control.status, 200);
+
+    const heartbeat = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine-1" } }),
+    });
+    const session = await heartbeat.json() as { wssUrl: string; token: string };
+
+    const engine = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+    await once(engine, "open");
+    engine.send(JSON.stringify({ type: "job.done" }));
+    await Promise.all([once(engine, "close"), sessionClosed]);
+
+    assert.deepEqual(events, [
+      "Reach session connected",
+      "Reach session job done",
+      "Reach session closed",
+    ]);
+
+    const idleHeartbeat = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine-1" } }),
+    });
+    assert.deepEqual(await idleHeartbeat.json(), {
+      intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+    });
+  }, {
+    logger: (message) => {
+      events.push(message);
+      if (message === "Reach session closed") {
+        resolveSessionClosed();
+      }
+    },
   });
 });

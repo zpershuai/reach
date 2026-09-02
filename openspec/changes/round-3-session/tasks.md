@@ -1,7 +1,7 @@
 ## 1. Gateway session lifecycle
 
 - [x] 1.1 Extend the heartbeat response and local gateway with one-time session credentials plus authenticated WebSocket upgrade, and verify gateway tests retain 120/5 heartbeat behavior and cover credential rejection.
-- [ ] 1.2 Close an accepted WebSocket after a `job.done` signal, emit connect/close log events, and verify the gateway test observes both events and an idle heartbeat afterward.
+- [x] 1.2 Close an accepted WebSocket after a `job.done` signal, emit connect/close log events, and verify the gateway test observes both events and an idle heartbeat afterward.
 
 ## 2. Rust engine and integration proof
 
