@@ -233,3 +233,18 @@ test("grep treats patterns literally and bounds incremental work and output", as
     assert.equal(bounded.truncated, true);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test("glob counts matching files rather than traversed nonmatches", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  try {
+    const noise = join(root, "a-noise");
+    await fs.mkdir(noise);
+    for (let index = 0; index < 10_001; index += 1) {
+      await fs.writeFile(join(noise, `file-${index}.tmp`), "x");
+    }
+    await fs.writeFile(join(root, "z-later.match"), "x");
+    const result = await workspace.glob({ workspace: "fixture", path: ".", pattern: "*.match", maxResults: 10, respectGitignore: true });
+    assert.deepEqual(result.matches, ["z-later.match"]);
+    assert.equal(result.truncated, false);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});

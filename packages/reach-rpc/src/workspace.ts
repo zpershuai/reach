@@ -130,9 +130,17 @@ export class WorkspaceFilesystem {
     if (cursor) return this.page(cursor, params.maxResults) as FsGlobResult;
     const root = await this.resolveEntry(this.rootFor(params.workspace), params.path);
     const ignored = params.respectGitignore ? await readIgnorePatterns(root) : [];
-    const files = await walkFiles(root, root, ignored, MAX_GLOB_RESULTS + 1);
-    const matches = files.filter((file) => globMatches(params.pattern, file));
-    return this.startPage("fs.glob", query, "matches", matches.slice(0, MAX_GLOB_RESULTS), params.maxResults, matches.length > MAX_GLOB_RESULTS) as FsGlobResult;
+    const matches: string[] = [];
+    let truncated = false;
+    for await (const file of walkFileEntries(root, root, ignored)) {
+      if (!globMatches(params.pattern, file)) continue;
+      if (matches.length === MAX_GLOB_RESULTS) {
+        truncated = true;
+        break;
+      }
+      matches.push(file);
+    }
+    return this.startPage("fs.glob", query, "matches", matches, params.maxResults, truncated) as FsGlobResult;
   }
 
   async grep(params: FsGrepParams): Promise<FsGrepResult> {
@@ -249,14 +257,6 @@ function truncateUtf8(value: string, maxBytes: number): string { let bytes = Buf
 async function fileContentIfExists(file: string): Promise<string | undefined> { try { return await fs.readFile(file, "utf8"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
 async function readAtMost(path: string, length: number): Promise<Buffer> { const handle = await fs.open(path, "r"); try { const data = Buffer.alloc(length); const { bytesRead } = await handle.read(data, 0, length, 0); return data.subarray(0, bytesRead); } finally { await handle.close(); } }
 async function readIgnorePatterns(root: string): Promise<string[]> { try { return (await fs.readFile(resolve(root, ".gitignore"), "utf8")).split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("!")); } catch { return []; } }
-async function walkFiles(root: string, current: string, ignored: string[], limit: number): Promise<string[]> {
-  const files: string[] = [];
-  for await (const file of walkFileEntries(root, current, ignored)) {
-    if (files.length >= limit) break;
-    files.push(file);
-  }
-  return files;
-}
 async function* walkFileEntries(root: string, current: string, ignored: string[]): AsyncGenerator<string> {
   const entries = await fs.readdir(current, { withFileTypes: true });
   entries.sort((left, right) => left.name.localeCompare(right.name));
