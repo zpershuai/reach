@@ -248,3 +248,27 @@ test("glob counts matching files rather than traversed nonmatches", async () => 
     assert.equal(result.truncated, false);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test("descriptor-relative mutations reject symlink traversal and replacement", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  const outside = await fs.mkdtemp(join(tmpdir(), "reach-outside-"));
+  try {
+    await fs.symlink(outside, join(root, "link"));
+    await assert.rejects(
+      () => workspace.write({ workspace: "fixture", path: "link/escaped.txt", content: "unsafe", mode: "create" }),
+      (error: unknown) => error instanceof FilesystemError && error.code === "WORKSPACE_ACCESS_DENIED",
+    );
+    assert.equal(await fs.stat(join(outside, "escaped.txt")).catch(() => undefined), undefined);
+    await fs.mkdir(join(root, "replaceable"));
+    await fs.rm(join(root, "replaceable"), { recursive: true });
+    await fs.symlink(outside, join(root, "replaceable"));
+    await assert.rejects(
+      () => workspace.write({ workspace: "fixture", path: "replaceable/nope.txt", content: "unsafe", mode: "create" }),
+      (error: unknown) => error instanceof FilesystemError && error.code === "WORKSPACE_ACCESS_DENIED",
+    );
+    assert.equal(await fs.stat(join(outside, "nope.txt")).catch(() => undefined), undefined);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+    await fs.rm(outside, { recursive: true, force: true });
+  }
+});

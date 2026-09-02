@@ -22,7 +22,7 @@
 
 ## 6. Descriptor-safe mutations
 
-- [ ] 6.1 Implement verified descriptor-relative parent traversal, no-follow component checks, component-by-component mkdir, and same-directory temporary rename; verify symlink swap/traversal attempts cannot modify an external target.
+- [x] 6.1 Implement verified descriptor-relative parent traversal, no-follow component checks, component-by-component mkdir, and same-directory temporary rename; verify symlink swap/traversal attempts cannot modify an external target.
 
 ## 7. Verification and delivery
 

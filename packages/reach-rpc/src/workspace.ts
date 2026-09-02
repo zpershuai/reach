@@ -1,7 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
+import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
-import { basename, dirname, relative, resolve, sep } from "node:path";
+import { basename, relative, resolve, sep } from "node:path";
 import {
   type FsEditParams,
   type FsEditResult,
@@ -98,20 +99,20 @@ export class WorkspaceFilesystem {
   async write(params: FsWriteParams): Promise<FsWriteResult> {
     return this.serializeWrite(async () => {
       if (Buffer.byteLength(params.content) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
-      const file = await this.resolveMutationPath(this.rootFor(params.workspace), params.path);
-      const current = await fileContentIfExists(file);
+      const root = this.rootFor(params.workspace);
+      const current = await this.readMutationContent(root, params.path);
       if (current !== undefined && Buffer.byteLength(current) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
       if (params.mode === "create" && current !== undefined) throw new FilesystemError("FILE_EXISTS");
       if (params.ifMatch && params.ifMatch !== revision(current ?? "")) throw new FilesystemError(REVISION_CONFLICT);
-      await this.atomicWrite(file, params.content);
+      await this.atomicWrite(root, params.path, params.content);
       return { path: params.path, bytesWritten: Buffer.byteLength(params.content), revision: revision(params.content) };
     });
   }
 
   async edit(params: FsEditParams): Promise<FsEditResult> {
     return this.serializeWrite(async () => {
-      const file = await this.resolveMutationPath(this.rootFor(params.workspace), params.path);
-      const current = await fileContentIfExists(file);
+      const root = this.rootFor(params.workspace);
+      const current = await this.readMutationContent(root, params.path);
       if (current === undefined) throw new FilesystemError("FILE_NOT_FOUND");
       if (Buffer.byteLength(current) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
       if (params.ifMatch && params.ifMatch !== revision(current)) throw new FilesystemError(REVISION_CONFLICT);
@@ -119,7 +120,8 @@ export class WorkspaceFilesystem {
       if (occurrences === 0) throw new FilesystemError(OLD_STRING_NOT_FOUND);
       if (occurrences > 1 && !params.replaceAll) throw new FilesystemError(OLD_STRING_NOT_UNIQUE);
       const content = params.replaceAll ? current.split(params.oldString).join(params.newString) : current.replace(params.oldString, params.newString);
-      await this.atomicWrite(file, content);
+      if (Buffer.byteLength(content) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
+      await this.atomicWrite(root, params.path, content);
       return { path: params.path, replacements: params.replaceAll ? occurrences : 1, revision: revision(content) };
     });
   }
@@ -186,14 +188,6 @@ export class WorkspaceFilesystem {
     return target;
   }
 
-  private async resolveMutationPath(root: string, input: string): Promise<string> {
-    const target = await this.resolveChecked(root, input);
-    const info = await fs.lstat(target).catch(() => undefined);
-    if (info?.isSymbolicLink()) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
-    await fs.mkdir(dirname(target), { recursive: true });
-    return target;
-  }
-
   private async resolveChecked(configuredRoot: string, input: string): Promise<string> {
     const realRoot = await fs.realpath(configuredRoot).catch(() => configuredRoot);
     const target = resolve(realRoot, input);
@@ -207,10 +201,74 @@ export class WorkspaceFilesystem {
     return target;
   }
 
-  private async atomicWrite(file: string, content: string): Promise<void> {
-    const temporary = resolve(dirname(file), `.${basename(file)}.${randomUUID()}.tmp`);
-    try { await fs.writeFile(temporary, content, { flag: "wx" }); await fs.rename(temporary, file); }
-    finally { await fs.unlink(temporary).catch(() => undefined); }
+  private async readMutationContent(root: string, input: string): Promise<string | undefined> {
+    const { parent, name } = await this.openVerifiedParent(root, input);
+    let file: FileHandle | undefined;
+    try {
+      try {
+        file = await fs.open(this.descriptorPath(parent, name), fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      } catch (error: unknown) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+        throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+      }
+      const stats = await file.stat();
+      if (!stats.isFile()) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+      return await file.readFile({ encoding: "utf8" });
+    } finally {
+      await file?.close();
+      await parent.close();
+    }
+  }
+
+  private async atomicWrite(root: string, input: string, content: string): Promise<void> {
+    const { parent, name } = await this.openVerifiedParent(root, input);
+    const temporary = `.${name}.${randomUUID()}.tmp`;
+    const temporaryPath = this.descriptorPath(parent, temporary);
+    try {
+      const file = await fs.open(temporaryPath, fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | fsConstants.O_NOFOLLOW, 0o600);
+      try { await file.writeFile(content, "utf8"); } finally { await file.close(); }
+      await fs.rename(temporaryPath, this.descriptorPath(parent, name));
+    } finally {
+      await fs.unlink(temporaryPath).catch(() => undefined);
+      await parent.close();
+    }
+  }
+
+  private descriptorPath(directory: FileHandle, name = ""): string {
+    if (process.platform !== "linux") throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    return `/proc/self/fd/${directory.fd}${name ? `/${name}` : ""}`;
+  }
+
+  private async openVerifiedParent(root: string, input: string): Promise<{ parent: FileHandle; name: string }> {
+    if (process.platform !== "linux" || !fsConstants.O_NOFOLLOW) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    const realRoot = await fs.realpath(root).catch(() => { throw new FilesystemError(WORKSPACE_ACCESS_DENIED); });
+    const target = resolve(realRoot, input);
+    if (target === realRoot || !target.startsWith(realRoot + sep)) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    const parts = relative(realRoot, target).split(sep).filter(Boolean);
+    const name = parts.pop();
+    if (!name) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    let parent: FileHandle | undefined;
+    try {
+      parent = await fs.open(realRoot, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+      for (const part of parts) {
+        const childPath = this.descriptorPath(parent, part);
+        let child: FileHandle;
+        try {
+          child = await fs.open(childPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+        } catch (error: unknown) {
+          if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+          await fs.mkdir(childPath);
+          child = await fs.open(childPath, fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW);
+        }
+        await parent.close();
+        parent = child;
+      }
+      return { parent, name };
+    } catch (error) {
+      await parent?.close().catch(() => undefined);
+      if (error instanceof FilesystemError) throw error;
+      throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    }
   }
 
   private async serializeWrite<T>(operation: () => Promise<T>): Promise<T> {
@@ -254,7 +312,6 @@ function stableQuery(params: object, omit: string[]): string { return JSON.strin
 function normalizePath(parent: string, name: string): string { return parent === "." ? name : `${parent.replace(/\/$/, "")}/${name}`; }
 function truncateUtf8(value: string, maxBytes: number): string { let bytes = Buffer.from(value); while (bytes.length > maxBytes) bytes = bytes.subarray(0, bytes.length - 1); return bytes.toString("utf8"); }
 
-async function fileContentIfExists(file: string): Promise<string | undefined> { try { return await fs.readFile(file, "utf8"); } catch (error: unknown) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; } }
 async function readAtMost(path: string, length: number): Promise<Buffer> { const handle = await fs.open(path, "r"); try { const data = Buffer.alloc(length); const { bytesRead } = await handle.read(data, 0, length, 0); return data.subarray(0, bytesRead); } finally { await handle.close(); } }
 async function readIgnorePatterns(root: string): Promise<string[]> { try { return (await fs.readFile(resolve(root, ".gitignore"), "utf8")).split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("!")); } catch { return []; } }
 async function* walkFileEntries(root: string, current: string, ignored: string[]): AsyncGenerator<string> {
