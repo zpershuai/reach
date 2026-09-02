@@ -147,22 +147,26 @@ test("fixture workspace reads, lists, stats, writes, and edits safely", async ()
     const stat = await workspace.stat({ workspace: "fixture", path: "lines.txt" });
     assert.equal(stat.type, "file");
     assert.equal(stat.revision, read.revision);
-    const written = await workspace.write({ workspace: "fixture", path: "new.txt", content: "first", mode: "create" });
-    await assert.rejects(
-      () => workspace.write({ workspace: "fixture", path: "new.txt", content: "stale", mode: "overwrite", ifMatch: "0".repeat(64) }),
-      (error: unknown) => error instanceof FilesystemError && error.code === REVISION_CONFLICT,
-    );
-    const edited = await workspace.edit({ workspace: "fixture", path: "new.txt", oldString: "first", newString: "second", replaceAll: false, ifMatch: written.revision });
-    assert.equal((await fs.readFile(join(root, "new.txt"), "utf8")), "second");
-    assert.notEqual(edited.revision, written.revision);
-    await assert.rejects(
-      () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "repeat", newString: "x", replaceAll: false }),
-      (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_UNIQUE,
-    );
-    await assert.rejects(
-      () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "missing", newString: "x", replaceAll: true }),
-      (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_FOUND,
-    );
+    // Descriptor-relative mutations in the TypeScript reference require Linux.
+    // Model B executes writes on the Rust Engine, which is covered separately.
+    if (process.platform === "linux") {
+      const written = await workspace.write({ workspace: "fixture", path: "new.txt", content: "first", mode: "create" });
+      await assert.rejects(
+        () => workspace.write({ workspace: "fixture", path: "new.txt", content: "stale", mode: "overwrite", ifMatch: "0".repeat(64) }),
+        (error: unknown) => error instanceof FilesystemError && error.code === REVISION_CONFLICT,
+      );
+      const edited = await workspace.edit({ workspace: "fixture", path: "new.txt", oldString: "first", newString: "second", replaceAll: false, ifMatch: written.revision });
+      assert.equal((await fs.readFile(join(root, "new.txt"), "utf8")), "second");
+      assert.notEqual(edited.revision, written.revision);
+      await assert.rejects(
+        () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "repeat", newString: "x", replaceAll: false }),
+        (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_UNIQUE,
+      );
+      await assert.rejects(
+        () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "missing", newString: "x", replaceAll: true }),
+        (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_FOUND,
+      );
+    }
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 

@@ -2,6 +2,13 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
+pub mod workspace;
+
+pub use workspace::{
+    default_workspace_root, parse_workspace_roots, FilesystemError, WorkspaceFilesystem,
+    PERMISSION_DENIED, WORKSPACE_ACCESS_DENIED,
+};
+
 pub const PROTOCOL: &str = "reach-rpc";
 pub const VERSION: &str = "1.0";
 pub const INVALID_PARAMS: &str = "INVALID_PARAMS";
@@ -34,6 +41,44 @@ impl std::error::Error for ContractError {}
 #[serde(rename_all = "camelCase")]
 pub struct Permission {
     pub grant_id: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RequestEnvelope {
+    #[serde(rename = "type")]
+    pub message_type: String,
+    pub protocol: String,
+    pub version: String,
+    pub session_id: String,
+    pub request_id: String,
+    pub method: String,
+    pub params: Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub permission: Option<Permission>,
+}
+
+pub fn parse_request_envelope(input: &str) -> Result<RequestEnvelope, ContractError> {
+    let value: Value = serde_json::from_str(input).map_err(|_| ContractError)?;
+    if value.get("permission").is_some_and(Value::is_null) {
+        return Err(ContractError);
+    }
+    let request: RequestEnvelope = serde_json::from_value(value).map_err(|_| ContractError)?;
+    if request.message_type != "request"
+        || request.protocol != PROTOCOL
+        || request.version != VERSION
+        || !is_non_empty(&request.method)
+        || !is_non_empty(&request.session_id)
+        || !is_non_empty(&request.request_id)
+        || !request.params.is_object()
+        || request
+            .permission
+            .as_ref()
+            .is_some_and(|permission| !is_non_empty(&permission.grant_id))
+    {
+        return Err(ContractError);
+    }
+    Ok(request)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -182,6 +227,16 @@ pub fn parse_fs_read_result(input: &str) -> Result<FsReadResult, ContractError> 
     let result: FsReadResult = serde_json::from_str(input).map_err(|_| ContractError)?;
     validate_result(&result)?;
     Ok(result)
+}
+
+pub fn parse_fs_read_params(input: &str) -> Result<FsReadParams, ContractError> {
+    let value = parse_json(input)?;
+    let params: FsReadParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    validate_workspace_path(&params.workspace, &params.path)?;
+    if params.start_line < 1 || !(1..=MAX_MAX_LINES).contains(&params.max_lines) {
+        return Err(ContractError);
+    }
+    Ok(params)
 }
 
 pub fn parse_fs_write_params(input: &str) -> Result<FsWriteParams, ContractError> {

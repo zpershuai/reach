@@ -5,7 +5,7 @@ Defines the local gateway heartbeat loop that lets the engine report device info
 ## Requirements
 
 ### Requirement: Device heartbeat endpoint
-The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` object. The gateway SHALL return a JSON response containing an integer `intervalSeconds` that tells the engine when to send its next device heartbeat. The response MUST be 120 when no session is wanted and 5 when a session is wanted. When a session is wanted and no WebSocket is live, the response MUST also contain a non-empty `wssUrl` string and a non-empty one-time `token` string that expires 30 seconds after issuance. When no session is wanted or a WebSocket is live, it MUST NOT contain either field. Repeated heartbeats while a token is pending MUST return that pending token without extending its expiry.
+The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` object from a resident Engine service. The gateway SHALL return a JSON response containing an integer `intervalSeconds` that tells the engine when to send its next device heartbeat. The response MUST be 120 when no session is wanted and 5 when a session is wanted. When a session is wanted and no WebSocket is live, the response MUST also contain a non-empty `wssUrl` string, a non-empty one-time `token` string that expires 30 seconds after issuance, and a non-empty `sessionId` string. When no session is wanted or a WebSocket is live, it MUST NOT contain `wssUrl` or `token`. Repeated heartbeats while a token is pending MUST return that pending token and `sessionId` without extending the token expiry. The heartbeat contract assumes the caller is a long-running Engine that will consume issued credentials on its own session loop.
 
 #### Scenario: Idle device heartbeat
 - **WHEN** the engine POSTs device information while no session is wanted
@@ -13,7 +13,7 @@ The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` 
 
 #### Scenario: Session-wanted device heartbeat
 - **WHEN** the engine POSTs device information while a session is wanted and no socket is live
-- **THEN** the gateway returns HTTP 200 with `intervalSeconds` set to 5 plus a `wssUrl` and a token that expires in 30 seconds
+- **THEN** the gateway returns HTTP 200 with `intervalSeconds` set to 5 plus a `wssUrl`, a token that expires in 30 seconds, and a `sessionId`
 
 #### Scenario: Live or consumed session does not mint credentials
 - **WHEN** the token has been consumed or a session WebSocket is live without a new session-wanted request
@@ -24,11 +24,11 @@ The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` 
 - **THEN** the gateway returns HTTP 400
 
 ### Requirement: Session-wanted gateway control
-The gateway SHALL provide a local JSON HTTP POST at `/session-wanted` that accepts a boolean `wanted` value and changes the session-wanted state used by subsequent heartbeat responses. A successful authenticated session upgrade MUST set this state to false. A new token can be issued only after this endpoint has set the state to true after the prior session has ended.
+The gateway SHALL provide a local JSON HTTP POST at `/session-wanted` that accepts a boolean `wanted` value and changes the session-wanted state used by subsequent heartbeat responses from the resident Engine. A successful authenticated session upgrade MUST set this state to false. A new token can be issued only after this endpoint has set the state to true after the prior session has ended.
 
 #### Scenario: Request a session
 - **WHEN** a client POSTs `{ "wanted": true }` to `/session-wanted` after no session is live
-- **THEN** a subsequent valid device heartbeat returns `intervalSeconds` set to 5 and pending session credentials
+- **THEN** a subsequent valid device heartbeat from the Engine returns `intervalSeconds` set to 5 and pending session credentials
 
 #### Scenario: Clear a session request
 - **WHEN** a client POSTs `{ "wanted": false }` to `/session-wanted`

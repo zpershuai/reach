@@ -1,5 +1,7 @@
 # Reach RPC test workspace
 
-`WorkspaceFilesystem` defaults to a named `default` workspace at `~/.reach/workspace`. Callers must use a configured workspace name; unknown names are denied. Tests pass an isolated map such as `{ fixture: temporaryDirectory }`, which never reads or changes the user's home workspace.
+Model B: the TypeScript Gateway is the control plane (`/heartbeat`, `/session-wanted`, `/grants`, `/session`, `/session/rpc`). The Rust Engine owns workspace filesystem execution.
 
-Filesystem writes and edits require a gateway-issued scoped grant. The local gateway exposes `POST /grants` with `workspace`, `path`, and `methods` (`fs.write` and/or `fs.edit`); include the returned `grantId` as `permission.grantId` in the complete `reach-rpc/1.0` request envelope. Requests also require the `sessionId` returned by the session heartbeat.
+`WorkspaceFilesystem` in this package remains a TypeScript reference used by unit tests. Session traffic no longer dispatches through it; configure Engine roots with `REACH_WORKSPACE_ROOTS` or the Engine default `~/.reach/workspace`.
+
+Filesystem writes and edits require a gateway-issued scoped grant via `POST /grants`. Controllers present `permission.grantId` on `POST /session/rpc`; the Gateway validates the grant before forwarding the mutation to the Engine.
