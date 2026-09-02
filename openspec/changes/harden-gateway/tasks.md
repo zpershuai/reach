@@ -26,4 +26,4 @@
 
 ## 7. Verification and delivery
 
-- [ ] 7.1 Run TypeScript and Rust contract/integration tests plus strict OpenSpec validation; update documentation and mark completed hardening tasks only after all checks pass.
+- [x] 7.1 Run TypeScript and Rust contract/integration tests plus strict OpenSpec validation; update documentation and mark completed hardening tasks only after all checks pass.
