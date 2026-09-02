@@ -1,7 +1,7 @@
 ## 1. Contract packages
 
 - [x] 1.1 Create the Rust `reach-rpc` crate with Serde DTOs for the request envelope, `fs.read` parameters, and result; verify `cargo test -p reach-rpc` passes.
-- [ ] 1.2 Create the TypeScript contract package with matching Zod schemas and canonical JSON serialization; verify its test command passes.
+- [x] 1.2 Create the TypeScript contract package with matching Zod schemas and canonical JSON serialization; verify its test command passes.
 
 ## 2. Cross-language fixture
 
