@@ -27,6 +27,14 @@ const sessionWantedRequestSchema = z.object({
   wanted: z.boolean(),
 });
 
+const grantRequestSchema = z.object({
+  workspace: z.string().min(1),
+  path: z.string().min(1),
+  methods: z.array(z.enum(["fs.write", "fs.edit"])).min(1),
+});
+
+const GRANT_TTL_MS = 5 * 60 * 1000;
+
 export interface GatewayOptions {
   logger?: (message: string) => void;
   workspaceRoot?: string;
@@ -34,6 +42,13 @@ export interface GatewayOptions {
 
 interface PendingSession {
   token: string;
+}
+
+interface WriteGrant {
+  workspace: string;
+  path: string;
+  methods: readonly ("fs.write" | "fs.edit")[];
+  expiresAt: number;
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
@@ -66,6 +81,7 @@ function rejectUpgrade(socket: Duplex): void {
 export function createGateway(options: GatewayOptions = {}): Server {
   let sessionWanted = false;
   let pendingSession: PendingSession | undefined;
+  const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
   const sessions = new WebSocketServer({ noServer: true });
 
@@ -113,6 +129,22 @@ export function createGateway(options: GatewayOptions = {}): Server {
       return;
     }
 
+    if (request.url === "/grants") {
+      let grantRequest: z.infer<typeof grantRequestSchema>;
+      try {
+        grantRequest = grantRequestSchema.parse(await readJsonBody(request));
+      } catch {
+        sendJson(response, 400, { error: "invalid grant payload" });
+        return;
+      }
+
+      const grantId = randomUUID();
+      const expiresAt = Date.now() + GRANT_TTL_MS;
+      grants.set(grantId, { ...grantRequest, expiresAt });
+      sendJson(response, 200, { grantId, expiresAt: new Date(expiresAt).toISOString() });
+      return;
+    }
+
     sendJson(response, 404, { error: "not found" });
   });
 
@@ -155,7 +187,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       if (message.type === "request") {
         const requestId = typeof message.requestId === "string" ? message.requestId : undefined;
         try {
-          const result = await dispatchFilesystem(workspace, message.method, message.params, message.permission);
+          const result = await dispatchFilesystem(workspace, grants, message.method, message.params, message.permission);
           webSocket.send(JSON.stringify({ type: "response", requestId, result }));
         } catch (error) {
           const code = error instanceof ContractError ? error.code : error instanceof FilesystemError ? error.code : "INVALID_PARAMS";
@@ -183,6 +215,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
 
 async function dispatchFilesystem(
   workspace: WorkspaceFilesystem,
+  grants: ReadonlyMap<string, WriteGrant>,
   method: unknown,
   params: unknown,
   permission: unknown,
@@ -201,11 +234,35 @@ async function dispatchFilesystem(
   if (name === "fs.stat") return workspace.stat(parseFsStatParams(argumentsValue));
   if (name === "fs.glob") return workspace.glob(parseFsGlobParams(argumentsValue));
   if (name === "fs.grep") return workspace.grep(parseFsGrepParams(argumentsValue));
-  if (name === "fs.write" || name === "fs.edit") {
-    if (!permissionSchema.safeParse(permission).success) throw new FilesystemError("PERMISSION_DENIED");
-    return name === "fs.write"
-      ? workspace.write(parseFsWriteParams(argumentsValue))
-      : workspace.edit(parseFsEditParams(argumentsValue));
+  if (name === "fs.write") {
+    const parsedPermission = permissionSchema.safeParse(permission);
+    const params = parseFsWriteParams(argumentsValue);
+    if (!parsedPermission.success || !hasMatchingGrant(grants, parsedPermission.data.grantId, name, params.workspace, params.path)) {
+      throw new FilesystemError("PERMISSION_DENIED");
+    }
+    return workspace.write(params);
+  }
+  if (name === "fs.edit") {
+    const parsedPermission = permissionSchema.safeParse(permission);
+    const params = parseFsEditParams(argumentsValue);
+    if (!parsedPermission.success || !hasMatchingGrant(grants, parsedPermission.data.grantId, name, params.workspace, params.path)) {
+      throw new FilesystemError("PERMISSION_DENIED");
+    }
+    return workspace.edit(params);
   }
   throw new FilesystemError("METHOD_NOT_FOUND");
+}
+
+function hasMatchingGrant(
+  grants: ReadonlyMap<string, WriteGrant>,
+  grantId: string,
+  method: "fs.write" | "fs.edit",
+  workspace: string,
+  path: string,
+): boolean {
+  const grant = grants.get(grantId);
+  if (!grant || grant.expiresAt <= Date.now()) return false;
+  return grant.workspace === workspace
+    && grant.methods.includes(method)
+    && (path === grant.path || path.startsWith(`${grant.path.replace(/\/$/, "")}/`));
 }

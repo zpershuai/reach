@@ -259,3 +259,39 @@ test("session dispatches filesystem methods directly and through tool.call", asy
     }, { workspaceRoot: root });
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test("gateway-issued grants authorize only their live scoped mutations", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-gateway-grants-"));
+  await fs.writeFile(join(root, "note.txt"), "unchanged");
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+      const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: { id: "engine-1" } }) });
+      const session = await heartbeat.json() as { wssUrl: string; token: string };
+      const engine = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+      await once(engine, "open");
+
+      const issued = await fetch(`${baseUrl}/grants`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace: "fixture", path: "note.txt", methods: ["fs.write"] }),
+      });
+      assert.equal(issued.status, 200);
+      const grant = await issued.json() as { grantId: string; expiresAt: string };
+      assert.match(grant.grantId, /^[0-9a-f-]{36}$/);
+      assert.ok(Date.parse(grant.expiresAt) > Date.now());
+
+      for (const permission of [{ grantId: "forged" }, { grantId: grant.grantId }]) {
+        engine.send(JSON.stringify({ type: "request", requestId: permission.grantId, method: "fs.write", permission, params: { workspace: permission.grantId === "forged" ? "fixture" : "other", path: "note.txt", content: "changed", mode: "overwrite" } }));
+        const reply = await nextJson(engine);
+        assert.equal((reply.error as { code: string }).code, "PERMISSION_DENIED");
+      }
+      assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "unchanged");
+
+      engine.send(JSON.stringify({ type: "request", requestId: "allowed", method: "fs.write", permission: { grantId: grant.grantId }, params: { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" } }));
+      assert.equal((await nextJson(engine)).type, "response");
+      assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
+      engine.close();
+      await once(engine, "close");
+    }, { workspaceRoot: root });
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
