@@ -19,6 +19,10 @@ import { FilesystemError, WorkspaceFilesystem } from "./workspace.js";
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 120;
 export const SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS = 5;
 export const SESSION_TOKEN_TTL_MS = 30_000;
+export const MAX_HTTP_BODY_BYTES = 64 * 1024;
+export const MAX_WEBSOCKET_TEXT_BYTES = 1024 * 1024;
+export const MAX_SESSION_DURATION_MS = 5 * 60 * 1000;
+export const MAX_SESSION_IDLE_MS = 60 * 1000;
 
 const heartbeatRequestSchema = z.object({
   device: z.record(z.unknown()),
@@ -40,6 +44,8 @@ export interface GatewayOptions {
   logger?: (message: string) => void;
   workspaceRoot?: string;
   now?: () => number;
+  sessionDurationMs?: number;
+  sessionIdleMs?: number;
 }
 
 interface PendingSession {
@@ -54,10 +60,17 @@ interface WriteGrant {
   expiresAt: number;
 }
 
+class PayloadTooLargeError extends Error {}
+
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {
+  if (Number(request.headers["content-length"] ?? 0) > MAX_HTTP_BODY_BYTES) throw new PayloadTooLargeError();
   const chunks: Buffer[] = [];
+  let size = 0;
   for await (const chunk of request) {
-    chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+    size += buffer.length;
+    if (size > MAX_HTTP_BODY_BYTES) throw new PayloadTooLargeError();
+    chunks.push(buffer);
   }
 
   try {
@@ -88,6 +101,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
   const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
   const now = options.now ?? Date.now;
+  const sessionDurationMs = options.sessionDurationMs ?? MAX_SESSION_DURATION_MS;
+  const sessionIdleMs = options.sessionIdleMs ?? MAX_SESSION_IDLE_MS;
   const sessions = new WebSocketServer({ noServer: true });
 
   const gateway = createServer(async (request, response) => {
@@ -99,8 +114,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
     if (request.url === "/heartbeat") {
       try {
         heartbeatRequestSchema.parse(await readJsonBody(request));
-      } catch {
-        sendJson(response, 400, { error: "invalid heartbeat payload" });
+      } catch (error) {
+        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
         return;
       }
 
@@ -126,8 +141,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
         // A control request is the explicit re-request boundary: old credentials
         // can never become valid again after it.
         pendingSession = undefined;
-      } catch {
-        sendJson(response, 400, { error: "invalid session-wanted payload" });
+      } catch (error) {
+        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-wanted payload" });
         return;
       }
 
@@ -139,8 +154,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
       let grantRequest: z.infer<typeof grantRequestSchema>;
       try {
         grantRequest = grantRequestSchema.parse(await readJsonBody(request));
-      } catch {
-        sendJson(response, 400, { error: "invalid grant payload" });
+      } catch (error) {
+        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid grant payload" });
         return;
       }
 
@@ -181,15 +196,32 @@ export function createGateway(options: GatewayOptions = {}): Server {
     logger("Reach session connected");
     let jobCompleted = false;
     const workspace = new WorkspaceFilesystem(options.workspaceRoot);
+    const closeForLimit = () => webSocket.close(1008, "session limit exceeded");
+    const hardTimer = setTimeout(closeForLimit, sessionDurationMs);
+    let idleTimer = setTimeout(closeForLimit, sessionIdleMs);
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(closeForLimit, sessionIdleMs);
+    };
 
     webSocket.on("message", async (data, isBinary) => {
-      if (isBinary || jobCompleted) {
+      resetIdleTimer();
+      const text = Buffer.isBuffer(data)
+        ? data
+        : data instanceof ArrayBuffer
+          ? Buffer.from(data)
+          : Buffer.concat(data);
+      if (isBinary || text.length > MAX_WEBSOCKET_TEXT_BYTES) {
+        webSocket.close(1009, "message too large");
+        return;
+      }
+      if (jobCompleted) {
         return;
       }
 
       let message: { type?: unknown; requestId?: unknown; method?: unknown; params?: unknown; permission?: unknown };
       try {
-        message = JSON.parse(data.toString()) as typeof message;
+        message = JSON.parse(text.toString()) as typeof message;
       } catch {
         return;
       }
@@ -215,6 +247,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
     });
 
     webSocket.on("close", () => {
+      clearTimeout(hardTimer);
+      clearTimeout(idleTimer);
       sessionLive = false;
       workspace.close();
       logger("Reach session closed");

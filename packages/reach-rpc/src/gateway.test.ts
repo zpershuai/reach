@@ -12,6 +12,8 @@ import {
   type GatewayOptions,
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
+  MAX_HTTP_BODY_BYTES,
+  MAX_WEBSOCKET_TEXT_BYTES,
 } from "./gateway.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
@@ -174,6 +176,43 @@ test("session credentials are consumed once and require an explicit re-request",
     assert.ok(renewed.token);
     assert.notEqual(renewed.token, first.token);
   });
+});
+
+test("gateway rejects oversized HTTP bodies and closes oversized, idle, and hard-lived sessions", async () => {
+  await withGateway(async (baseUrl) => {
+    const oversized = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { payload: "x".repeat(MAX_HTTP_BODY_BYTES) } }),
+    });
+    assert.equal(oversized.status, 413);
+
+    const openSession = async (): Promise<WebSocket> => {
+      await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+      const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: {} }) });
+      const session = await heartbeat.json() as { wssUrl: string; token: string };
+      const socket = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+      await once(socket, "open");
+      return socket;
+    };
+    const oversizedSocket = await openSession();
+    oversizedSocket.send("x".repeat(MAX_WEBSOCKET_TEXT_BYTES + 1));
+    const [oversizedCode] = await once(oversizedSocket, "close") as [number];
+    assert.equal(oversizedCode, 1009);
+
+    const idleSocket = await openSession();
+    const [idleCode] = await once(idleSocket, "close") as [number];
+    assert.equal(idleCode, 1008);
+  }, { sessionIdleMs: 20, sessionDurationMs: 100 });
+
+  await withGateway(async (baseUrl) => {
+    await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+    const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: {} }) });
+    const session = await heartbeat.json() as { wssUrl: string; token: string };
+    const socket = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+    await once(socket, "open");
+    const [code] = await once(socket, "close") as [number];
+    assert.equal(code, 1008);
+  }, { sessionIdleMs: 100, sessionDurationMs: 20 });
 });
 
 test("job completion closes the session and restores the idle heartbeat", async () => {
