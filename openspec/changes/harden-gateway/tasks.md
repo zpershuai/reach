@@ -17,7 +17,7 @@
 
 ## 5. Bounded filesystem search
 
-- [ ] 5.1 Replace eager grep with incremental literal-substring walking capped at 8 MiB and 10,000 matches, skipping symlinks and truncating lines to 16 KiB; verify hostile patterns and limit behavior.
+- [x] 5.1 Replace eager grep with incremental literal-substring walking capped at 8 MiB and 10,000 matches, skipping symlinks and truncating lines to 16 KiB; verify hostile patterns and limit behavior.
 - [ ] 5.2 Apply glob matching during incremental traversal so the 10,000 cap counts matching files only, retain default gitignore behavior, and verify later matches after many nonmatches are found.
 
 ## 6. Descriptor-safe mutations

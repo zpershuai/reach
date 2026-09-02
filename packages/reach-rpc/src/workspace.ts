@@ -140,13 +140,10 @@ export class WorkspaceFilesystem {
     const cursor = this.resumeCursor<{ path: string; line: number; content: string }>("fs.grep", query, params.cursor);
     if (cursor) return this.page(cursor, params.maxMatches) as FsGrepResult;
     const root = await this.resolveEntry(this.rootFor(params.workspace), params.path);
-    const files = await walkFiles(root, root, [], Number.MAX_SAFE_INTEGER);
     let scanned = 0;
     let truncated = false;
     const matches: { path: string; line: number; content: string }[] = [];
-    let expression: RegExp;
-    try { expression = new RegExp(params.pattern); } catch { throw new FilesystemError("INVALID_PARAMS"); }
-    for (const path of files) {
+    for await (const path of walkFileEntries(root, root, [])) {
       if (params.include.length && !params.include.some((pattern) => globMatches(pattern, path))) continue;
       const absolute = resolve(root, path);
       const stats = await fs.lstat(absolute);
@@ -157,8 +154,7 @@ export class WorkspaceFilesystem {
       scanned += scannedData.length;
       if (stats.size > remaining) truncated = true;
       for (const [offset, line] of splitLines(scannedData.toString("utf8")).entries()) {
-        expression.lastIndex = 0;
-        if (!expression.test(line)) continue;
+        if (!line.includes(params.pattern)) continue;
         matches.push({ path, line: offset + 1, content: truncateUtf8(line, MAX_GREP_LINE_BYTES) });
         if (matches.length === MAX_GREP_MATCHES) { truncated = true; break; }
       }
@@ -255,16 +251,23 @@ async function readAtMost(path: string, length: number): Promise<Buffer> { const
 async function readIgnorePatterns(root: string): Promise<string[]> { try { return (await fs.readFile(resolve(root, ".gitignore"), "utf8")).split(/\r?\n/).map((line) => line.trim()).filter((line) => line && !line.startsWith("#") && !line.startsWith("!")); } catch { return []; } }
 async function walkFiles(root: string, current: string, ignored: string[], limit: number): Promise<string[]> {
   const files: string[] = [];
-  async function visit(directory: string): Promise<void> {
-    for (const entry of await fs.readdir(directory, { withFileTypes: true })) {
-      if (files.length >= limit) return;
-      if (entry.isSymbolicLink()) continue;
-      const absolute = resolve(directory, entry.name); const path = relative(root, absolute).split(sep).join("/");
-      if (ignored.some((pattern) => gitignoreMatches(pattern, path))) continue;
-      if (entry.isDirectory()) await visit(absolute); else if (entry.isFile()) files.push(path);
-    }
+  for await (const file of walkFileEntries(root, current, ignored)) {
+    if (files.length >= limit) break;
+    files.push(file);
   }
-  await visit(current); return files.sort();
+  return files;
+}
+async function* walkFileEntries(root: string, current: string, ignored: string[]): AsyncGenerator<string> {
+  const entries = await fs.readdir(current, { withFileTypes: true });
+  entries.sort((left, right) => left.name.localeCompare(right.name));
+  for (const entry of entries) {
+    if (entry.isSymbolicLink()) continue;
+    const absolute = resolve(current, entry.name);
+    const path = relative(root, absolute).split(sep).join("/");
+    if (ignored.some((pattern) => gitignoreMatches(pattern, path))) continue;
+    if (entry.isDirectory()) yield* walkFileEntries(root, absolute, ignored);
+    else if (entry.isFile()) yield path;
+  }
 }
 function gitignoreMatches(pattern: string, path: string): boolean { const normalized = pattern.replace(/^\//, "").replace(/\/$/, ""); return pattern.endsWith("/") ? path === normalized || path.startsWith(`${normalized}/`) : globMatches(normalized.includes("/") ? normalized : `**/${normalized}`, path) || basename(path) === normalized; }
 function globMatches(pattern: string, path: string): boolean { const source = pattern.split("**/").map((part) => part.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join("(?:.*/)?"); return new RegExp(`^${source}$`).test(path); }

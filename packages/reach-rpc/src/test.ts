@@ -215,3 +215,21 @@ test("workspace names, cursor creation, and file operations stay within hard bou
     assert.equal(cursors.length, 32);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
+
+test("grep treats patterns literally and bounds incremental work and output", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  try {
+    await fs.writeFile(join(root, "literal.txt"), `a[needle]\n${"x".repeat(20 * 1024)}\n`);
+    await fs.writeFile(join(root, "many.txt"), Array.from({ length: 10_001 }, () => "needle").join("\n"));
+    await fs.writeFile(join(root, "large-search.txt"), "needle" + "x".repeat(8 * 1024 * 1024));
+    const literal = await workspace.grep({ workspace: "fixture", path: ".", pattern: "[needle]", include: ["literal.txt"], maxMatches: 10 });
+    assert.equal(literal.matches[0]?.content, "a[needle]");
+    const longLine = await workspace.grep({ workspace: "fixture", path: ".", pattern: "x", include: ["literal.txt"], maxMatches: 10 });
+    assert.equal(Buffer.byteLength(longLine.matches[0]?.content ?? ""), 16 * 1024);
+    const many = await workspace.grep({ workspace: "fixture", path: ".", pattern: "needle", include: ["many.txt"], maxMatches: 10_000 });
+    assert.equal(many.matches.length, 10_000);
+    assert.equal(many.truncated, true);
+    const bounded = await workspace.grep({ workspace: "fixture", path: ".", pattern: "needle", include: ["large-search.txt"], maxMatches: 10 });
+    assert.equal(bounded.truncated, true);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
