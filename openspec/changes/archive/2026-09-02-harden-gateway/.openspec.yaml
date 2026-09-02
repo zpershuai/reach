@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-02
+goal: The eight listed gateway issues have failing-then-passing tests; existing
+  round 1-4 coverage stays green.

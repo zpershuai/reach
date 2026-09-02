@@ -5,7 +5,7 @@ Defines the portable Round 1 Reach RPC wire contract so Rust and TypeScript peer
 ## Requirements
 
 ### Requirement: Reach RPC request envelope
-The system SHALL represent a Round 1 request as a JSON object with required camelCase fields `type`, `protocol`, `version`, `sessionId`, `requestId`, `method`, and `params`. `type` MUST be `request`, `protocol` MUST be `reach-rpc`, and `version` MUST be `1.0`. `sessionId`, `requestId`, and `method` MUST be non-empty strings. A request MAY include `permission`, which, when present, MUST be an object with the non-empty string field `grantId`. Implementations MUST ignore unknown object fields. Missing required fields, invalid field types, invalid literal values, empty required strings, or invalid numeric ranges MUST be rejected as `INVALID_PARAMS`.
+The system SHALL represent a request as a JSON object with required camelCase fields `type`, `protocol`, `version`, `sessionId`, `requestId`, `method`, and `params`. `type` MUST be `request`, `protocol` MUST be `reach-rpc`, and `version` MUST be `1.0`. `sessionId`, `requestId`, and `method` MUST be non-empty strings and `params` MUST be an object. A request MAY include `permission`, which, when present, MUST be an object with the non-empty string field `grantId`. Implementations MUST ignore unknown object fields. Missing required fields, invalid field types, invalid literal values, empty required strings, or invalid numeric ranges MUST be rejected as `INVALID_PARAMS`.
 
 #### Scenario: Parse a valid fs.read envelope
 - **WHEN** a peer receives a request with the required Reach RPC fields and `method` set to `fs.read`
@@ -16,9 +16,8 @@ The system SHALL represent a Round 1 request as a JSON object with required came
 - **THEN** it accepts the request and omits the unrecognized field when serializing the DTO
 
 #### Scenario: Reject an invalid envelope
-- **WHEN** a request omits a required field, has a wrong field type, or uses a protocol other than `reach-rpc`
+- **WHEN** a request omits a required field, has a wrong field type, uses a protocol other than `reach-rpc`, or uses a version other than `1.0`
 - **THEN** it rejects the request as `INVALID_PARAMS`
-
 ### Requirement: fs.read parameters
 The system SHALL define `fs.read` parameters as a JSON object containing non-empty string fields `workspace` and `path`, plus integer `startLine` and `maxLines`. `startLine` MUST be at least 1 and defaults to 1 when omitted. `maxLines` MUST be between 1 and 10,000 inclusive and defaults to 200 when omitted. Implementations MUST reject invalid parameter field types, empty strings, non-integers, and out-of-range integers as `INVALID_PARAMS`. Implementations MUST ignore unknown parameter fields.
 
