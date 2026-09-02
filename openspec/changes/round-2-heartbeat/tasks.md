@@ -5,4 +5,4 @@
 
 ## 2. Local proof
 
-- [ ] 2.1 Build and run the gateway, use curl to prove a device heartbeat returns 120 seconds by default and 5 seconds after requesting a session, and capture the commands in project documentation.
+- [x] 2.1 Build and run the gateway, use curl to prove a device heartbeat returns 120 seconds by default and 5 seconds after requesting a session, and capture the commands in project documentation.
