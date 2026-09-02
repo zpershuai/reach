@@ -6,4 +6,4 @@
 ## 2. Rust engine and integration proof
 
 - [x] 2.1 Add a Rust `session-client` binary that posts device information, consumes the returned session credentials, sends `job.done`, and verify it builds and runs against the local gateway.
-- [ ] 2.2 Add an automated cross-language session test and local run instructions that prove one engine connection followed by gateway closure; verify with `npm test` and `cargo test`.
+- [x] 2.2 Add an automated cross-language session test and local run instructions that prove one engine connection followed by gateway closure; verify with `npm test` and `cargo test`.

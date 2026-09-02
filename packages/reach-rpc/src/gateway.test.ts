@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
 import {
   createGateway,
@@ -8,6 +10,30 @@ import {
   DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
   SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
 } from "./gateway.js";
+
+const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+function runSessionClient(baseUrl: string): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const engine = spawn(
+      "cargo",
+      ["run", "--quiet", "--bin", "session-client", "--", baseUrl],
+      { cwd: repositoryRoot },
+    );
+    let output = "";
+    let errors = "";
+    engine.stdout.on("data", (chunk: Buffer) => { output += chunk; });
+    engine.stderr.on("data", (chunk: Buffer) => { errors += chunk; });
+    engine.once("error", reject);
+    engine.once("close", (code) => {
+      if (code === 0) {
+        resolve(output);
+      } else {
+        reject(new Error(`session client exited ${code}: ${errors}`));
+      }
+    });
+  });
+}
 
 async function withGateway(
   check: (baseUrl: string) => Promise<void>,
@@ -150,6 +176,40 @@ test("job completion closes the session and restores the idle heartbeat", async 
     assert.deepEqual(await idleHeartbeat.json(), {
       intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     });
+  }, {
+    logger: (message) => {
+      events.push(message);
+      if (message === "Reach session closed") {
+        resolveSessionClosed();
+      }
+    },
+  });
+});
+
+test("Rust engine connects once and gateway closes it after job completion", async () => {
+  const events: string[] = [];
+  let resolveSessionClosed: () => void = () => {};
+  const sessionClosed = new Promise<void>((resolve) => {
+    resolveSessionClosed = resolve;
+  });
+
+  await withGateway(async (baseUrl) => {
+    const control = await fetch(`${baseUrl}/session-wanted`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wanted: true }),
+    });
+    assert.equal(control.status, 200);
+
+    const engineOutput = await runSessionClient(baseUrl);
+    await sessionClosed;
+    assert.match(engineOutput, /Reach engine session connected/);
+    assert.match(engineOutput, /Reach engine session closed/);
+    assert.deepEqual(events, [
+      "Reach session connected",
+      "Reach session job done",
+      "Reach session closed",
+    ]);
   }, {
     logger: (message) => {
       events.push(message);
