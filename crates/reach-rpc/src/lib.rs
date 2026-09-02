@@ -222,7 +222,7 @@ fn validate_request(request: &FsReadRequest) -> Result<(), ContractError> {
     if request.message_type != "request"
         || request.protocol != PROTOCOL
         || request.version != VERSION
-        || request.method != "fs.read"
+        || !is_non_empty(&request.method)
         || !is_non_empty(&request.session_id)
         || !is_non_empty(&request.request_id)
         || !is_non_empty(&request.params.workspace)

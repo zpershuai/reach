@@ -17,6 +17,17 @@ export const permissionSchema = z.object({
   grantId: nonEmptyString,
 });
 
+export const requestEnvelopeSchema = z.object({
+  type: z.literal("request"),
+  protocol: z.literal(PROTOCOL),
+  version: z.literal(VERSION),
+  sessionId: nonEmptyString,
+  requestId: nonEmptyString,
+  method: nonEmptyString,
+  params: z.record(z.unknown()),
+  permission: permissionSchema.optional(),
+});
+
 export const fsReadParamsSchema = z.object({
   workspace: nonEmptyString,
   path: nonEmptyString,
@@ -144,6 +155,7 @@ export const fsGrepResultSchema = z.object({
 });
 
 export type Permission = z.infer<typeof permissionSchema>;
+export type RequestEnvelope = z.infer<typeof requestEnvelopeSchema>;
 export type FsReadParams = z.infer<typeof fsReadParamsSchema>;
 export type FsReadRequest = z.infer<typeof fsReadRequestSchema>;
 export type FsReadResult = z.infer<typeof fsReadResultSchema>;
@@ -173,6 +185,12 @@ export function parseFsReadRequest(input: unknown): FsReadRequest {
   if (!parsed.success) {
     throw new ContractError();
   }
+  return parsed.data;
+}
+
+export function parseRequestEnvelope(input: unknown): RequestEnvelope {
+  const parsed = requestEnvelopeSchema.safeParse(input);
+  if (!parsed.success) throw new ContractError();
   return parsed.data;
 }
 

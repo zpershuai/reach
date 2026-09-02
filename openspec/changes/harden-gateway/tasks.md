@@ -9,7 +9,7 @@
 
 ## 3. RPC envelope contract
 
-- [ ] 3.1 Dispatch requests through the existing complete Zod envelope parser, bind session IDs to their connection, align Serde validation, and verify malformed/wrong-version/mismatched-session requests return `INVALID_PARAMS`.
+- [x] 3.1 Dispatch requests through the existing complete Zod envelope parser, bind session IDs to their connection, align Serde validation, and verify malformed/wrong-version/mismatched-session requests return `INVALID_PARAMS`.
 
 ## 4. Workspace roots and file limits
 

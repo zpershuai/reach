@@ -70,6 +70,10 @@ function nextJson(socket: WebSocket): Promise<Record<string, unknown>> {
   });
 }
 
+function request(sessionId: string, requestId: string, method: string, params: unknown, permission?: unknown): Record<string, unknown> {
+  return { type: "request", protocol: "reach-rpc", version: "1.0", sessionId, requestId, method, params, ...(permission === undefined ? {} : { permission }) };
+}
+
 test("heartbeat returns the idle interval for device information", async () => {
   await withGateway(async (baseUrl) => {
     const response = await fetch(`${baseUrl}/heartbeat`, {
@@ -189,7 +193,7 @@ test("gateway rejects oversized HTTP bodies and closes oversized, idle, and hard
     const openSession = async (): Promise<WebSocket> => {
       await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
       const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: {} }) });
-      const session = await heartbeat.json() as { wssUrl: string; token: string };
+      const session = await heartbeat.json() as { wssUrl: string; token: string; sessionId: string };
       const socket = new WebSocket(`${session.wssUrl}?token=${session.token}`);
       await once(socket, "open");
       return socket;
@@ -306,21 +310,21 @@ test("session dispatches filesystem methods directly and through tool.call", asy
     await withGateway(async (baseUrl) => {
       await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
       const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: { id: "engine-1" } }) });
-      const session = await heartbeat.json() as { wssUrl: string; token: string };
+      const session = await heartbeat.json() as { wssUrl: string; token: string; sessionId: string };
       const engine = new WebSocket(`${session.wssUrl}?token=${session.token}`);
       await once(engine, "open");
 
-      engine.send(JSON.stringify({ type: "request", requestId: "direct", method: "fs.read", params: { workspace: "fixture", path: "note.txt", maxLines: 1 } }));
+      engine.send(JSON.stringify(request(session.sessionId, "direct", "fs.read", { workspace: "fixture", path: "note.txt", maxLines: 1 })));
       const direct = await nextJson(engine);
       assert.deepEqual(direct, { type: "response", requestId: "direct", result: { content: "hello", startLine: 1, endLine: 1, totalLines: 2, truncated: true, revision: (direct.result as { revision: string }).revision } });
 
-      engine.send(JSON.stringify({ type: "request", requestId: "tool", method: "tool.call", params: { name: "fs.read", arguments: { workspace: "fixture", path: "note.txt", startLine: 2 } } }));
+      engine.send(JSON.stringify(request(session.sessionId, "tool", "tool.call", { name: "fs.read", arguments: { workspace: "fixture", path: "note.txt", startLine: 2 } })));
       const tool = await nextJson(engine);
       assert.equal((tool.result as { content: string }).content, "world");
 
       const issued = await fetch(`${baseUrl}/grants`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace: "fixture", path: "note.txt", methods: ["fs.write"] }) });
       const grant = await issued.json() as { grantId: string };
-      engine.send(JSON.stringify({ type: "request", requestId: "write", method: "fs.write", permission: { grantId: grant.grantId }, params: { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" } }));
+      engine.send(JSON.stringify(request(session.sessionId, "write", "fs.write", { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" }, { grantId: grant.grantId })));
       assert.equal((await nextJson(engine)).type, "response");
       assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
       engine.send(JSON.stringify({ type: "job.done" }));
@@ -336,7 +340,7 @@ test("gateway-issued grants authorize only their live scoped mutations", async (
     await withGateway(async (baseUrl) => {
       await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
       const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: { id: "engine-1" } }) });
-      const session = await heartbeat.json() as { wssUrl: string; token: string };
+      const session = await heartbeat.json() as { wssUrl: string; token: string; sessionId: string };
       const engine = new WebSocket(`${session.wssUrl}?token=${session.token}`);
       await once(engine, "open");
 
@@ -350,17 +354,38 @@ test("gateway-issued grants authorize only their live scoped mutations", async (
       assert.ok(Date.parse(grant.expiresAt) > Date.now());
 
       for (const permission of [{ grantId: "forged" }, { grantId: grant.grantId }]) {
-        engine.send(JSON.stringify({ type: "request", requestId: permission.grantId, method: "fs.write", permission, params: { workspace: permission.grantId === "forged" ? "fixture" : "other", path: "note.txt", content: "changed", mode: "overwrite" } }));
+        engine.send(JSON.stringify(request(session.sessionId, permission.grantId, "fs.write", { workspace: permission.grantId === "forged" ? "fixture" : "other", path: "note.txt", content: "changed", mode: "overwrite" }, permission)));
         const reply = await nextJson(engine);
         assert.equal((reply.error as { code: string }).code, "PERMISSION_DENIED");
       }
       assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "unchanged");
 
-      engine.send(JSON.stringify({ type: "request", requestId: "allowed", method: "fs.write", permission: { grantId: grant.grantId }, params: { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" } }));
+      engine.send(JSON.stringify(request(session.sessionId, "allowed", "fs.write", { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" }, { grantId: grant.grantId })));
       assert.equal((await nextJson(engine)).type, "response");
       assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
       engine.close();
       await once(engine, "close");
     }, { workspaceRoot: root });
   } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("gateway rejects malformed, wrong-version, and mismatched-session envelopes", async () => {
+  await withGateway(async (baseUrl) => {
+    await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+    const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: {} }) });
+    const session = await heartbeat.json() as { wssUrl: string; token: string; sessionId: string };
+    const engine = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+    await once(engine, "open");
+    for (const payload of [
+      { type: "request", method: "fs.read", params: {} },
+      { ...request(session.sessionId, "wrong-version", "fs.read", { workspace: "default", path: "x" }), version: "2.0" },
+      request("other-session", "wrong-session", "fs.read", { workspace: "default", path: "x" }),
+    ]) {
+      engine.send(JSON.stringify(payload));
+      const reply = await nextJson(engine);
+      assert.equal((reply.error as { code: string }).code, "INVALID_PARAMS");
+    }
+    engine.close();
+    await once(engine, "close");
+  });
 });

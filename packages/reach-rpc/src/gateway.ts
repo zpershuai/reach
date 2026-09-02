@@ -12,6 +12,7 @@ import {
   parseFsReadParams,
   parseFsStatParams,
   parseFsWriteParams,
+  parseRequestEnvelope,
   permissionSchema,
 } from "./index.js";
 import { FilesystemError, WorkspaceFilesystem } from "./workspace.js";
@@ -51,6 +52,7 @@ export interface GatewayOptions {
 interface PendingSession {
   token: string;
   expiresAt: number;
+  sessionId: string;
 }
 
 interface WriteGrant {
@@ -104,6 +106,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
   const sessionDurationMs = options.sessionDurationMs ?? MAX_SESSION_DURATION_MS;
   const sessionIdleMs = options.sessionIdleMs ?? MAX_SESSION_IDLE_MS;
   const sessions = new WebSocketServer({ noServer: true });
+  const sessionIds = new WeakMap<WebSocket, string>();
 
   const gateway = createServer(async (request, response) => {
     if (request.method !== "POST") {
@@ -125,12 +128,13 @@ export function createGateway(options: GatewayOptions = {}): Server {
       }
 
       if (pendingSession && pendingSession.expiresAt <= now()) pendingSession = undefined;
-      pendingSession ??= { token: randomUUID(), expiresAt: now() + SESSION_TOKEN_TTL_MS };
+      pendingSession ??= { token: randomUUID(), expiresAt: now() + SESSION_TOKEN_TTL_MS, sessionId: randomUUID() };
       const host = request.headers.host ?? "127.0.0.1";
       sendJson(response, 200, {
         intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
         wssUrl: `ws://${host}/session`,
         token: pendingSession.token,
+        sessionId: pendingSession.sessionId,
       });
       return;
     }
@@ -184,15 +188,22 @@ export function createGateway(options: GatewayOptions = {}): Server {
       return;
     }
 
+    const sessionId = pendingSession.sessionId;
     pendingSession = undefined;
     sessionWanted = false;
     sessionLive = true;
     sessions.handleUpgrade(request, socket, head, (webSocket) => {
+      sessionIds.set(webSocket, sessionId);
       sessions.emit("connection", webSocket, request);
     });
   });
 
   sessions.on("connection", (webSocket: WebSocket) => {
+    const sessionId = sessionIds.get(webSocket);
+    if (!sessionId) {
+      webSocket.close(1011, "missing session binding");
+      return;
+    }
     logger("Reach session connected");
     let jobCompleted = false;
     const workspace = new WorkspaceFilesystem(options.workspaceRoot);
@@ -219,18 +230,21 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
-      let message: { type?: unknown; requestId?: unknown; method?: unknown; params?: unknown; permission?: unknown };
+      let message: { type?: unknown; requestId?: unknown };
       try {
         message = JSON.parse(text.toString()) as typeof message;
       } catch {
+        webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
         return;
       }
 
       if (message.type === "request") {
         const requestId = typeof message.requestId === "string" ? message.requestId : undefined;
         try {
-          const result = await dispatchFilesystem(workspace, grants, message.method, message.params, message.permission);
-          webSocket.send(JSON.stringify({ type: "response", requestId, result }));
+          const envelope = parseRequestEnvelope(message);
+          if (envelope.sessionId !== sessionId) throw new ContractError();
+          const result = await dispatchFilesystem(workspace, grants, envelope.method, envelope.params, envelope.permission);
+          webSocket.send(JSON.stringify({ type: "response", requestId: envelope.requestId, result }));
         } catch (error) {
           const code = error instanceof ContractError ? error.code : error instanceof FilesystemError ? error.code : "INVALID_PARAMS";
           webSocket.send(JSON.stringify({ type: "error", requestId, error: { code } }));
