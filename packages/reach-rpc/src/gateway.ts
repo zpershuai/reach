@@ -18,6 +18,7 @@ import { FilesystemError, WorkspaceFilesystem } from "./workspace.js";
 
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 120;
 export const SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS = 5;
+export const SESSION_TOKEN_TTL_MS = 30_000;
 
 const heartbeatRequestSchema = z.object({
   device: z.record(z.unknown()),
@@ -38,10 +39,12 @@ const GRANT_TTL_MS = 5 * 60 * 1000;
 export interface GatewayOptions {
   logger?: (message: string) => void;
   workspaceRoot?: string;
+  now?: () => number;
 }
 
 interface PendingSession {
   token: string;
+  expiresAt: number;
 }
 
 interface WriteGrant {
@@ -81,8 +84,10 @@ function rejectUpgrade(socket: Duplex): void {
 export function createGateway(options: GatewayOptions = {}): Server {
   let sessionWanted = false;
   let pendingSession: PendingSession | undefined;
+  let sessionLive = false;
   const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
+  const now = options.now ?? Date.now;
   const sessions = new WebSocketServer({ noServer: true });
 
   const gateway = createServer(async (request, response) => {
@@ -99,12 +104,13 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
-      if (!sessionWanted) {
+      if (!sessionWanted || sessionLive) {
         sendJson(response, 200, { intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS });
         return;
       }
 
-      pendingSession ??= { token: randomUUID() };
+      if (pendingSession && pendingSession.expiresAt <= now()) pendingSession = undefined;
+      pendingSession ??= { token: randomUUID(), expiresAt: now() + SESSION_TOKEN_TTL_MS };
       const host = request.headers.host ?? "127.0.0.1";
       sendJson(response, 200, {
         intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
@@ -117,9 +123,9 @@ export function createGateway(options: GatewayOptions = {}): Server {
     if (request.url === "/session-wanted") {
       try {
         sessionWanted = sessionWantedRequestSchema.parse(await readJsonBody(request)).wanted;
-        if (!sessionWanted) {
-          pendingSession = undefined;
-        }
+        // A control request is the explicit re-request boundary: old credentials
+        // can never become valid again after it.
+        pendingSession = undefined;
       } catch {
         sendJson(response, 400, { error: "invalid session-wanted payload" });
         return;
@@ -155,13 +161,17 @@ export function createGateway(options: GatewayOptions = {}): Server {
       request.method !== "GET" ||
       url.pathname !== "/session" ||
       !pendingSession ||
-      token !== pendingSession.token
+      pendingSession.expiresAt <= now() ||
+      token !== pendingSession.token ||
+      sessionLive
     ) {
       rejectUpgrade(socket);
       return;
     }
 
     pendingSession = undefined;
+    sessionWanted = false;
+    sessionLive = true;
     sessions.handleUpgrade(request, socket, head, (webSocket) => {
       sessions.emit("connection", webSocket, request);
     });
@@ -205,6 +215,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     });
 
     webSocket.on("close", () => {
+      sessionLive = false;
       workspace.close();
       logger("Reach session closed");
     });

@@ -4,7 +4,7 @@
 
 ## 2. Session lifecycle and transport limits
 
-- [ ] 2.1 Implement one-time 30-second tokens, one-live-socket state, explicit re-request behavior, and tests covering concurrent upgrades and no token remint after close.
+- [x] 2.1 Implement one-time 30-second tokens, one-live-socket state, explicit re-request behavior, and tests covering concurrent upgrades and no token remint after close.
 - [ ] 2.2 Enforce 64 KiB HTTP bodies, 1 MiB WebSocket text messages, five-minute hard sessions, and 60-second idle sessions; verify each limit is rejected or closes cleanly.
 
 ## 3. RPC envelope contract

@@ -148,6 +148,34 @@ test("session-wanted control rejects invalid payloads", async () => {
   });
 });
 
+test("session credentials are consumed once and require an explicit re-request", async () => {
+  await withGateway(async (baseUrl) => {
+    const heartbeat = async (): Promise<{ wssUrl?: string; token?: string }> => {
+      const response = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: { id: "engine-1" } }) });
+      return response.json() as Promise<{ wssUrl?: string; token?: string }>;
+    };
+    await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+    const first = await heartbeat();
+    assert.ok(first.token && first.wssUrl);
+    const engine = new WebSocket(`${first.wssUrl}?token=${first.token}`);
+    await once(engine, "open");
+
+    await new Promise<void>((resolve) => {
+      const concurrent = new WebSocket(`${first.wssUrl}?token=${first.token}`);
+      concurrent.once("unexpected-response", (_request, response) => { response.resume(); resolve(); });
+      concurrent.once("error", resolve);
+    });
+    engine.close();
+    await once(engine, "close");
+    assert.deepEqual(await heartbeat(), { intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS });
+
+    await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+    const renewed = await heartbeat();
+    assert.ok(renewed.token);
+    assert.notEqual(renewed.token, first.token);
+  });
+});
+
 test("job completion closes the session and restores the idle heartbeat", async () => {
   const events: string[] = [];
   let resolveSessionClosed: () => void = () => {};
@@ -251,7 +279,9 @@ test("session dispatches filesystem methods directly and through tool.call", asy
       const tool = await nextJson(engine);
       assert.equal((tool.result as { content: string }).content, "world");
 
-      engine.send(JSON.stringify({ type: "request", requestId: "write", method: "fs.write", permission: { grantId: "test" }, params: { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" } }));
+      const issued = await fetch(`${baseUrl}/grants`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ workspace: "fixture", path: "note.txt", methods: ["fs.write"] }) });
+      const grant = await issued.json() as { grantId: string };
+      engine.send(JSON.stringify({ type: "request", requestId: "write", method: "fs.write", permission: { grantId: grant.grantId }, params: { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" } }));
       assert.equal((await nextJson(engine)).type, "response");
       assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
       engine.send(JSON.stringify({ type: "job.done" }));
