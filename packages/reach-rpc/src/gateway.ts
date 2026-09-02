@@ -37,8 +37,12 @@ async function readJsonBody(request: IncomingMessage): Promise<unknown> {
 }
 
 function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-  response.writeHead(statusCode, { "content-type": "application/json" });
-  response.end(JSON.stringify(payload));
+  const body = JSON.stringify(payload);
+  response.writeHead(statusCode, {
+    "content-type": "application/json",
+    "content-length": Buffer.byteLength(body),
+  });
+  response.end(body);
 }
 
 function rejectUpgrade(socket: Duplex): void {
