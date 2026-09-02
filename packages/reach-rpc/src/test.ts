@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import {
   ContractError,
@@ -15,6 +18,13 @@ import {
   serializeRequest,
   serializeResult,
 } from "./index.js";
+import {
+  FilesystemError,
+  OLD_STRING_NOT_FOUND,
+  OLD_STRING_NOT_UNIQUE,
+  REVISION_CONFLICT,
+  WorkspaceFilesystem,
+} from "./workspace.js";
 
 const validRequest = {
   type: "request",
@@ -111,4 +121,46 @@ test("rejects invalid Round 4 filesystem parameters", () => {
   ]) {
     assert.throws(input, (error: unknown) => error instanceof ContractError && error.code === INVALID_PARAMS);
   }
+});
+
+async function fixtureWorkspace(): Promise<{ root: string; workspace: WorkspaceFilesystem }> {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-round4-"));
+  await fs.mkdir(join(root, "nested"));
+  await fs.writeFile(join(root, "lines.txt"), "one\ntwo\nthree\n");
+  await fs.writeFile(join(root, "edit.txt"), "repeat repeat");
+  await fs.writeFile(join(root, "nested", "needle.txt"), "needle\nother\n");
+  await fs.writeFile(join(root, ".gitignore"), "*.ignored\n");
+  await fs.writeFile(join(root, "hidden.ignored"), "needle");
+  return { root, workspace: new WorkspaceFilesystem(root) };
+}
+
+test("fixture workspace reads, lists, stats, writes, and edits safely", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  try {
+    const read = await workspace.read({ workspace: "fixture", path: "lines.txt", startLine: 2, maxLines: 1 });
+    assert.deepEqual(read, { content: "two", startLine: 2, endLine: 2, totalLines: 3, truncated: true, revision: read.revision });
+    const list = await workspace.list({ workspace: "fixture", path: ".", maxEntries: 2 });
+    assert.equal(list.entries.length, 2);
+    assert.ok(list.cursor);
+    assert.equal((await workspace.list({ workspace: "fixture", path: ".", maxEntries: 2, cursor: list.cursor })).entries.length > 0, true);
+    const stat = await workspace.stat({ workspace: "fixture", path: "lines.txt" });
+    assert.equal(stat.type, "file");
+    assert.equal(stat.revision, read.revision);
+    const written = await workspace.write({ workspace: "fixture", path: "new.txt", content: "first", mode: "create" });
+    await assert.rejects(
+      () => workspace.write({ workspace: "fixture", path: "new.txt", content: "stale", mode: "overwrite", ifMatch: "0".repeat(64) }),
+      (error: unknown) => error instanceof FilesystemError && error.code === REVISION_CONFLICT,
+    );
+    const edited = await workspace.edit({ workspace: "fixture", path: "new.txt", oldString: "first", newString: "second", replaceAll: false, ifMatch: written.revision });
+    assert.equal((await fs.readFile(join(root, "new.txt"), "utf8")), "second");
+    assert.notEqual(edited.revision, written.revision);
+    await assert.rejects(
+      () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "repeat", newString: "x", replaceAll: false }),
+      (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_UNIQUE,
+    );
+    await assert.rejects(
+      () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "missing", newString: "x", replaceAll: true }),
+      (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_FOUND,
+    );
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

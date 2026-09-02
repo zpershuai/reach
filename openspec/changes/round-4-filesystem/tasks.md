@@ -4,7 +4,7 @@
 
 ## 2. Workspace filesystem service
 
-- [ ] 2.1 Implement contained workspace path resolution, SHA-256 revisions, bounded read/list/stat, and atomic serialized write/edit operations with the specified error codes; verify fixture-tree tests cover reads, pagination, stale `ifMatch`, and edit match failures.
+- [x] 2.1 Implement contained workspace path resolution, SHA-256 revisions, bounded read/list/stat, and atomic serialized write/edit operations with the specified error codes; verify fixture-tree tests cover reads, pagination, stale `ifMatch`, and edit match failures.
 - [ ] 2.2 Implement files-only gitignore-aware globbing and bounded grep with session-query cursor validation, symlink skipping, and all specified resource limits; verify fixture-tree tests cover limits, continuation cursors, and invalid cursor reuse.
 
 ## 3. Session integration and regression coverage
