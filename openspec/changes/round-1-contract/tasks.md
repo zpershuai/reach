@@ -5,5 +5,5 @@
 
 ## 2. Cross-language fixture
 
-- [ ] 2.1 Add a canonical `fs.read` request fixture that exercises defaults and unknown-field ignoring; verify both package tests parse it and serialize the normalized payload.
+- [x] 2.1 Add a canonical `fs.read` request fixture that exercises defaults and unknown-field ignoring; verify both package tests parse it and serialize the normalized payload.
 - [ ] 2.2 Add and run a fixture validation command that compares Rust and TypeScript normalized payloads; verify it exits successfully.

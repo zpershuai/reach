@@ -199,4 +199,15 @@ mod tests {
         .unwrap();
         assert_eq!(serialize_result(&result).unwrap(), "{\"content\":\"hello\",\"startLine\":1,\"endLine\":1,\"totalLines\":1,\"truncated\":false,\"revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"}");
     }
+
+    #[test]
+    fn round_trips_shared_fixture_with_normalized_defaults() {
+        let request = parse_fs_read_request(include_str!("../../../fixtures/fs.read.request.json")).unwrap();
+        let normalized: Value = serde_json::from_str(&serialize_request(&request).unwrap()).unwrap();
+        assert_eq!(normalized["params"]["startLine"], 1);
+        assert_eq!(normalized["params"]["maxLines"], 200);
+        assert!(normalized.get("futureEnvelope").is_none());
+        assert!(normalized["params"].get("futureParameter").is_none());
+        assert!(normalized["permission"].get("futurePermission").is_none());
+    }
 }

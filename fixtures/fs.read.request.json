@@ -1,0 +1,18 @@
+{
+  "type": "request",
+  "protocol": "reach-rpc",
+  "version": "1.0",
+  "sessionId": "session-round-1",
+  "requestId": "request-round-1",
+  "method": "fs.read",
+  "params": {
+    "workspace": "reach",
+    "path": "README.md",
+    "futureParameter": "ignored"
+  },
+  "permission": {
+    "grantId": "grant-round-1",
+    "futurePermission": true
+  },
+  "futureEnvelope": true
+}

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
   ContractError,
@@ -59,4 +60,16 @@ test("validates read result metadata", () => {
     revision: "a".repeat(64),
   });
   assert.deepEqual(JSON.parse(serializeResult(result)), result);
+});
+
+test("round-trips the shared fixture with normalized defaults", () => {
+  const fixture = JSON.parse(
+    readFileSync(new URL("../../../fixtures/fs.read.request.json", import.meta.url), "utf8"),
+  );
+  const normalized = JSON.parse(serializeRequest(parseFsReadRequest(fixture)));
+  assert.equal(normalized.params.startLine, 1);
+  assert.equal(normalized.params.maxLines, 200);
+  assert.equal("futureEnvelope" in normalized, false);
+  assert.equal("futureParameter" in normalized.params, false);
+  assert.equal("futurePermission" in normalized.permission, false);
 });
