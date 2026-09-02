@@ -6,6 +6,12 @@ import {
   INVALID_PARAMS,
   parseFsReadRequest,
   parseFsReadResult,
+  parseFsEditParams,
+  parseFsGlobParams,
+  parseFsGrepParams,
+  parseFsListParams,
+  parseFsStatParams,
+  parseFsWriteParams,
   serializeRequest,
   serializeResult,
 } from "./index.js";
@@ -72,4 +78,37 @@ test("round-trips the shared fixture with normalized defaults", () => {
   assert.equal("futureEnvelope" in normalized, false);
   assert.equal("futureParameter" in normalized.params, false);
   assert.equal("futurePermission" in normalized.permission, false);
+});
+
+test("defaults and strips unknown Round 4 filesystem parameters", () => {
+  assert.deepEqual(parseFsEditParams({ workspace: "repo", path: "a", oldString: "x", newString: "y", future: true }), {
+    workspace: "repo", path: "a", oldString: "x", newString: "y", replaceAll: false,
+  });
+  assert.deepEqual(parseFsListParams({ workspace: "repo" }), {
+    workspace: "repo", path: ".", maxEntries: 200,
+  });
+  assert.deepEqual(parseFsGlobParams({ workspace: "repo", pattern: "**/*.ts" }), {
+    workspace: "repo", pattern: "**/*.ts", path: ".", maxResults: 200, respectGitignore: true,
+  });
+  assert.deepEqual(parseFsGrepParams({ workspace: "repo", pattern: "needle" }), {
+    workspace: "repo", pattern: "needle", path: ".", include: [], maxMatches: 100,
+  });
+  assert.deepEqual(parseFsStatParams({ workspace: "repo", path: "a", future: true }), {
+    workspace: "repo", path: "a",
+  });
+  assert.deepEqual(parseFsWriteParams({ workspace: "repo", path: "a", content: "x", mode: "create" }), {
+    workspace: "repo", path: "a", content: "x", mode: "create",
+  });
+});
+
+test("rejects invalid Round 4 filesystem parameters", () => {
+  for (const input of [
+    () => parseFsWriteParams({ workspace: "repo", path: "a", content: "x", mode: "append" }),
+    () => parseFsEditParams({ workspace: "repo", path: "a", oldString: "x", newString: "y", replaceAll: "yes" }),
+    () => parseFsListParams({ workspace: "repo", maxEntries: 0 }),
+    () => parseFsGlobParams({ workspace: "repo", pattern: "x", respectGitignore: "yes" }),
+    () => parseFsGrepParams({ workspace: "repo", pattern: "x", maxMatches: 10_001 }),
+  ]) {
+    assert.throws(input, (error: unknown) => error instanceof ContractError && error.code === INVALID_PARAMS);
+  }
 });

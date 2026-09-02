@@ -1,6 +1,6 @@
 ## 1. Cross-language filesystem contracts
 
-- [ ] 1.1 Add Rust Serde and TypeScript Zod DTOs, defaults, camelCase serialization, unknown-field tolerance, and `INVALID_PARAMS` validation for all Round 4 filesystem methods; verify Rust unit tests and the TypeScript contract tests pass.
+- [x] 1.1 Add Rust Serde and TypeScript Zod DTOs, defaults, camelCase serialization, unknown-field tolerance, and `INVALID_PARAMS` validation for all Round 4 filesystem methods; verify Rust unit tests and the TypeScript contract tests pass.
 
 ## 2. Workspace filesystem service
 
