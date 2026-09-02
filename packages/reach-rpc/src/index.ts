@@ -176,6 +176,8 @@ export function parseFsReadRequest(input: unknown): FsReadRequest {
   return parsed.data;
 }
 
+export const parseFsReadParams = (input: unknown): FsReadParams => parseParams(fsReadParamsSchema, input);
+
 export function parseFsReadResult(input: unknown): FsReadResult {
   const parsed = fsReadResultSchema.safeParse(input);
   if (!parsed.success) {

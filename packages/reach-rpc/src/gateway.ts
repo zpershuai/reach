@@ -3,6 +3,18 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from "node:stream";
 import { z } from "zod";
 import { WebSocket, WebSocketServer } from "ws";
+import {
+  ContractError,
+  parseFsEditParams,
+  parseFsGlobParams,
+  parseFsGrepParams,
+  parseFsListParams,
+  parseFsReadParams,
+  parseFsStatParams,
+  parseFsWriteParams,
+  permissionSchema,
+} from "./index.js";
+import { FilesystemError, WorkspaceFilesystem } from "./workspace.js";
 
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 120;
 export const SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS = 5;
@@ -17,6 +29,7 @@ const sessionWantedRequestSchema = z.object({
 
 export interface GatewayOptions {
   logger?: (message: string) => void;
+  workspaceRoot?: string;
 }
 
 interface PendingSession {
@@ -125,20 +138,33 @@ export function createGateway(options: GatewayOptions = {}): Server {
   sessions.on("connection", (webSocket: WebSocket) => {
     logger("Reach session connected");
     let jobCompleted = false;
+    const workspace = new WorkspaceFilesystem(options.workspaceRoot);
 
-    webSocket.on("message", (data, isBinary) => {
+    webSocket.on("message", async (data, isBinary) => {
       if (isBinary || jobCompleted) {
         return;
       }
 
+      let message: { type?: unknown; requestId?: unknown; method?: unknown; params?: unknown; permission?: unknown };
       try {
-        const message = JSON.parse(data.toString()) as { type?: unknown };
-        if (message.type !== "job.done") {
-          return;
-        }
+        message = JSON.parse(data.toString()) as typeof message;
       } catch {
         return;
       }
+
+      if (message.type === "request") {
+        const requestId = typeof message.requestId === "string" ? message.requestId : undefined;
+        try {
+          const result = await dispatchFilesystem(workspace, message.method, message.params, message.permission);
+          webSocket.send(JSON.stringify({ type: "response", requestId, result }));
+        } catch (error) {
+          const code = error instanceof ContractError ? error.code : error instanceof FilesystemError ? error.code : "INVALID_PARAMS";
+          webSocket.send(JSON.stringify({ type: "error", requestId, error: { code } }));
+        }
+        return;
+      }
+
+      if (message.type !== "job.done") return;
 
       jobCompleted = true;
       logger("Reach session job done");
@@ -147,9 +173,39 @@ export function createGateway(options: GatewayOptions = {}): Server {
     });
 
     webSocket.on("close", () => {
+      workspace.close();
       logger("Reach session closed");
     });
   });
 
   return gateway;
+}
+
+async function dispatchFilesystem(
+  workspace: WorkspaceFilesystem,
+  method: unknown,
+  params: unknown,
+  permission: unknown,
+): Promise<unknown> {
+  let name = method;
+  let argumentsValue = params;
+  if (name === "tool.call") {
+    const tool = z.object({ name: z.string().min(1), arguments: z.unknown() }).safeParse(params);
+    if (!tool.success) throw new ContractError();
+    name = tool.data.name;
+    argumentsValue = tool.data.arguments;
+  }
+  if (typeof name !== "string") throw new ContractError();
+  if (name === "fs.read") return workspace.read(parseFsReadParams(argumentsValue));
+  if (name === "fs.list") return workspace.list(parseFsListParams(argumentsValue));
+  if (name === "fs.stat") return workspace.stat(parseFsStatParams(argumentsValue));
+  if (name === "fs.glob") return workspace.glob(parseFsGlobParams(argumentsValue));
+  if (name === "fs.grep") return workspace.grep(parseFsGrepParams(argumentsValue));
+  if (name === "fs.write" || name === "fs.edit") {
+    if (!permissionSchema.safeParse(permission).success) throw new FilesystemError("PERMISSION_DENIED");
+    return name === "fs.write"
+      ? workspace.write(parseFsWriteParams(argumentsValue))
+      : workspace.edit(parseFsEditParams(argumentsValue));
+  }
+  throw new FilesystemError("METHOD_NOT_FOUND");
 }

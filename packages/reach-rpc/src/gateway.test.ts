@@ -1,6 +1,9 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { once } from "node:events";
+import { promises as fs } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
@@ -54,6 +57,15 @@ async function withGateway(
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
+}
+
+function nextJson(socket: WebSocket): Promise<Record<string, unknown>> {
+  return new Promise((resolve, reject) => {
+    socket.once("message", (data) => {
+      try { resolve(JSON.parse(data.toString()) as Record<string, unknown>); } catch (error) { reject(error); }
+    });
+    socket.once("error", reject);
+  });
 }
 
 test("heartbeat returns the idle interval for device information", async () => {
@@ -218,4 +230,32 @@ test("Rust engine connects once and gateway closes it after job completion", asy
       }
     },
   });
+});
+
+test("session dispatches filesystem methods directly and through tool.call", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-gateway-workspace-"));
+  await fs.writeFile(join(root, "note.txt"), "hello\nworld\n");
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session-wanted`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ wanted: true }) });
+      const heartbeat = await fetch(`${baseUrl}/heartbeat`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ device: { id: "engine-1" } }) });
+      const session = await heartbeat.json() as { wssUrl: string; token: string };
+      const engine = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+      await once(engine, "open");
+
+      engine.send(JSON.stringify({ type: "request", requestId: "direct", method: "fs.read", params: { workspace: "fixture", path: "note.txt", maxLines: 1 } }));
+      const direct = await nextJson(engine);
+      assert.deepEqual(direct, { type: "response", requestId: "direct", result: { content: "hello", startLine: 1, endLine: 1, totalLines: 2, truncated: true, revision: (direct.result as { revision: string }).revision } });
+
+      engine.send(JSON.stringify({ type: "request", requestId: "tool", method: "tool.call", params: { name: "fs.read", arguments: { workspace: "fixture", path: "note.txt", startLine: 2 } } }));
+      const tool = await nextJson(engine);
+      assert.equal((tool.result as { content: string }).content, "world");
+
+      engine.send(JSON.stringify({ type: "request", requestId: "write", method: "fs.write", permission: { grantId: "test" }, params: { workspace: "fixture", path: "note.txt", content: "changed", mode: "overwrite" } }));
+      assert.equal((await nextJson(engine)).type, "response");
+      assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
+      engine.send(JSON.stringify({ type: "job.done" }));
+      await once(engine, "close");
+    }, { workspaceRoot: root });
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
