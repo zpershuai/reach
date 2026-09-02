@@ -22,6 +22,7 @@ import {
   FilesystemError,
   OLD_STRING_NOT_FOUND,
   OLD_STRING_NOT_UNIQUE,
+  INVALID_CURSOR,
   REVISION_CONFLICT,
   WorkspaceFilesystem,
 } from "./workspace.js";
@@ -162,5 +163,24 @@ test("fixture workspace reads, lists, stats, writes, and edits safely", async ()
       () => workspace.edit({ workspace: "fixture", path: "edit.txt", oldString: "missing", newString: "x", replaceAll: true }),
       (error: unknown) => error instanceof FilesystemError && error.code === OLD_STRING_NOT_FOUND,
     );
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("fixture workspace globs and greps with bounded session cursors", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  try {
+    const glob = await workspace.glob({ workspace: "fixture", pattern: "**/*.txt", path: ".", maxResults: 1, respectGitignore: true });
+    assert.equal(glob.matches.length, 1);
+    assert.ok(glob.cursor);
+    const next = await workspace.glob({ workspace: "fixture", pattern: "**/*.txt", path: ".", maxResults: 1, respectGitignore: true, cursor: glob.cursor });
+    assert.equal(next.matches.length, 1);
+    assert.equal((await workspace.glob({ workspace: "fixture", pattern: "**/*", path: ".", maxResults: 20, respectGitignore: true })).matches.includes("hidden.ignored"), false);
+    await assert.rejects(
+      () => workspace.glob({ workspace: "fixture", pattern: "*.txt", path: ".", maxResults: 1, respectGitignore: true, cursor: glob.cursor }),
+      (error: unknown) => error instanceof FilesystemError && error.code === INVALID_CURSOR,
+    );
+    const grep = await workspace.grep({ workspace: "fixture", pattern: "needle", path: ".", include: ["**/*.txt"], maxMatches: 1 });
+    assert.deepEqual(grep.matches, [{ path: "nested/needle.txt", line: 1, content: "needle" }]);
+    assert.equal(grep.truncated, false);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

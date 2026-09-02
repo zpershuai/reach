@@ -124,7 +124,7 @@ export class WorkspaceFilesystem {
     if (cursor) return this.page(cursor, params.maxResults) as FsGlobResult;
     const root = await this.resolveEntry(params.path);
     const ignored = params.respectGitignore ? await readIgnorePatterns(root) : [];
-    const files = await walkFiles(root, root, ignored, MAX_GLOB_RESULTS);
+    const files = await walkFiles(root, root, ignored, MAX_GLOB_RESULTS + 1);
     const matches = files.filter((file) => globMatches(params.pattern, file));
     return this.startPage("fs.glob", query, "matches", matches.slice(0, MAX_GLOB_RESULTS), params.maxResults, matches.length > MAX_GLOB_RESULTS) as FsGlobResult;
   }
