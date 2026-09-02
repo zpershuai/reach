@@ -44,6 +44,7 @@ const GRANT_TTL_MS = 5 * 60 * 1000;
 export interface GatewayOptions {
   logger?: (message: string) => void;
   workspaceRoot?: string;
+  workspaceRoots?: Record<string, string>;
   now?: () => number;
   sessionDurationMs?: number;
   sessionIdleMs?: number;
@@ -206,7 +207,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     }
     logger("Reach session connected");
     let jobCompleted = false;
-    const workspace = new WorkspaceFilesystem(options.workspaceRoot);
+    const workspace = new WorkspaceFilesystem(options.workspaceRoots ?? (options.workspaceRoot ? { default: options.workspaceRoot } : undefined));
     const closeForLimit = () => webSocket.close(1008, "session limit exceeded");
     const hardTimer = setTimeout(closeForLimit, sessionDurationMs);
     let idleTimer = setTimeout(closeForLimit, sessionIdleMs);

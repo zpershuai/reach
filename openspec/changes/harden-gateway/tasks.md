@@ -13,7 +13,7 @@
 
 ## 4. Workspace roots and file limits
 
-- [ ] 4.1 Add named workspace-root configuration with `default` mapping, unknown-workspace denial, 32-cursor cap, and 8 MiB read/write/edit limits; verify with isolated fixture-root tests.
+- [x] 4.1 Add named workspace-root configuration with `default` mapping, unknown-workspace denial, 32-cursor cap, and 8 MiB read/write/edit limits; verify with isolated fixture-root tests.
 
 ## 5. Bounded filesystem search
 

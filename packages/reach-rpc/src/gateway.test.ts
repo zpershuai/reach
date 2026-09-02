@@ -329,7 +329,7 @@ test("session dispatches filesystem methods directly and through tool.call", asy
       assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
       engine.send(JSON.stringify({ type: "job.done" }));
       await once(engine, "close");
-    }, { workspaceRoot: root });
+    }, { workspaceRoots: { fixture: root } });
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
@@ -365,7 +365,7 @@ test("gateway-issued grants authorize only their live scoped mutations", async (
       assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
       engine.close();
       await once(engine, "close");
-    }, { workspaceRoot: root });
+    }, { workspaceRoots: { fixture: root } });
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 

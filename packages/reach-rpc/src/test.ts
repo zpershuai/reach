@@ -132,7 +132,7 @@ async function fixtureWorkspace(): Promise<{ root: string; workspace: WorkspaceF
   await fs.writeFile(join(root, "nested", "needle.txt"), "needle\nother\n");
   await fs.writeFile(join(root, ".gitignore"), "*.ignored\n");
   await fs.writeFile(join(root, "hidden.ignored"), "needle");
-  return { root, workspace: new WorkspaceFilesystem(root) };
+  return { root, workspace: new WorkspaceFilesystem({ fixture: root }) };
 }
 
 test("fixture workspace reads, lists, stats, writes, and edits safely", async () => {
@@ -182,5 +182,36 @@ test("fixture workspace globs and greps with bounded session cursors", async () 
     const grep = await workspace.grep({ workspace: "fixture", pattern: "needle", path: ".", include: ["**/*.txt"], maxMatches: 1 });
     assert.deepEqual(grep.matches, [{ path: "nested/needle.txt", line: 1, content: "needle" }]);
     assert.equal(grep.truncated, false);
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
+test("workspace names, cursor creation, and file operations stay within hard bounds", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  try {
+    await assert.rejects(
+      () => workspace.read({ workspace: "missing", path: "lines.txt", startLine: 1, maxLines: 1 }),
+      (error: unknown) => error instanceof FilesystemError && error.code === "WORKSPACE_ACCESS_DENIED",
+    );
+    const cursors: string[] = [];
+    for (let index = 0; index < 32; index += 1) {
+      const page = await workspace.list({ workspace: "fixture", path: ".", maxEntries: 1 });
+      assert.ok(page.cursor);
+      cursors.push(page.cursor);
+    }
+    await assert.rejects(
+      () => workspace.list({ workspace: "fixture", path: ".", maxEntries: 1 }),
+      (error: unknown) => error instanceof FilesystemError && error.code === "CURSOR_LIMIT_EXCEEDED",
+    );
+    await assert.rejects(
+      () => workspace.write({ workspace: "fixture", path: "large.txt", content: "x".repeat(8 * 1024 * 1024 + 1), mode: "create" }),
+      (error: unknown) => error instanceof FilesystemError && error.code === "FILE_TOO_LARGE",
+    );
+    await fs.writeFile(join(root, "too-large.txt"), "x".repeat(8 * 1024 * 1024 + 1));
+    await assert.rejects(
+      () => workspace.read({ workspace: "fixture", path: "too-large.txt", startLine: 1, maxLines: 1 }),
+      (error: unknown) => error instanceof FilesystemError && error.code === "FILE_TOO_LARGE",
+    );
+    // Keep snapshots live until the limit assertion above, then close them together.
+    assert.equal(cursors.length, 32);
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });

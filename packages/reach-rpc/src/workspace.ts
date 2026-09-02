@@ -28,6 +28,8 @@ export const MAX_GLOB_RESULTS = 10_000;
 export const MAX_GREP_MATCHES = 10_000;
 export const MAX_GREP_BYTES = 8 * 1024 * 1024;
 export const MAX_GREP_LINE_BYTES = 16 * 1024;
+export const MAX_FILE_BYTES = 8 * 1024 * 1024;
+export const MAX_CURSORS = 32;
 
 export class FilesystemError extends Error {
   constructor(readonly code: string) {
@@ -45,16 +47,17 @@ interface CursorSnapshot<T> {
 }
 
 export class WorkspaceFilesystem {
-  readonly root: string;
+  readonly roots: ReadonlyMap<string, string>;
   private readonly cursors = new Map<string, CursorSnapshot<unknown>>();
   private writeQueue: Promise<void> = Promise.resolve();
 
-  constructor(root = resolve(homedir(), ".reach", "workspace")) {
-    this.root = resolve(root);
+  constructor(roots: string | Record<string, string> = { default: resolve(homedir(), ".reach", "workspace") }) {
+    this.roots = new Map(Object.entries(typeof roots === "string" ? { default: roots } : roots).map(([name, root]) => [name, resolve(root)]));
   }
 
   async read(params: FsReadParams): Promise<FsReadResult> {
-    const file = await this.resolveEntry(params.path);
+    const file = await this.resolveEntry(this.rootFor(params.workspace), params.path);
+    if ((await fs.lstat(file)).size > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
     const content = await fs.readFile(file, "utf8");
     const lines = splitLines(content);
     const start = params.startLine - 1;
@@ -73,7 +76,7 @@ export class WorkspaceFilesystem {
     const query = stableQuery(params, ["cursor"]);
     const cursor = this.resumeCursor<{ name: string; path: string; type: "file" | "directory" | "symlink" }>("fs.list", query, params.cursor);
     if (cursor) return this.page(cursor, params.maxEntries) as FsListResult;
-    const directory = await this.resolveEntry(params.path);
+    const directory = await this.resolveEntry(this.rootFor(params.workspace), params.path);
     const entries = await fs.readdir(directory, { withFileTypes: true });
     const items = entries.map((entry) => ({
       name: entry.name,
@@ -84,7 +87,7 @@ export class WorkspaceFilesystem {
   }
 
   async stat(params: FsStatParams): Promise<FsStatResult> {
-    const entry = await this.resolveEntry(params.path);
+    const entry = await this.resolveEntry(this.rootFor(params.workspace), params.path);
     const stats = await fs.lstat(entry);
     const type = stats.isSymbolicLink() ? "symlink" : stats.isDirectory() ? "directory" : "file";
     const result: FsStatResult = { type, size: stats.size, mtime: stats.mtime.toISOString() };
@@ -94,8 +97,10 @@ export class WorkspaceFilesystem {
 
   async write(params: FsWriteParams): Promise<FsWriteResult> {
     return this.serializeWrite(async () => {
-      const file = await this.resolveMutationPath(params.path);
+      if (Buffer.byteLength(params.content) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
+      const file = await this.resolveMutationPath(this.rootFor(params.workspace), params.path);
       const current = await fileContentIfExists(file);
+      if (current !== undefined && Buffer.byteLength(current) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
       if (params.mode === "create" && current !== undefined) throw new FilesystemError("FILE_EXISTS");
       if (params.ifMatch && params.ifMatch !== revision(current ?? "")) throw new FilesystemError(REVISION_CONFLICT);
       await this.atomicWrite(file, params.content);
@@ -105,9 +110,10 @@ export class WorkspaceFilesystem {
 
   async edit(params: FsEditParams): Promise<FsEditResult> {
     return this.serializeWrite(async () => {
-      const file = await this.resolveMutationPath(params.path);
+      const file = await this.resolveMutationPath(this.rootFor(params.workspace), params.path);
       const current = await fileContentIfExists(file);
       if (current === undefined) throw new FilesystemError("FILE_NOT_FOUND");
+      if (Buffer.byteLength(current) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
       if (params.ifMatch && params.ifMatch !== revision(current)) throw new FilesystemError(REVISION_CONFLICT);
       const occurrences = countOccurrences(current, params.oldString);
       if (occurrences === 0) throw new FilesystemError(OLD_STRING_NOT_FOUND);
@@ -122,7 +128,7 @@ export class WorkspaceFilesystem {
     const query = stableQuery(params, ["cursor"]);
     const cursor = this.resumeCursor<string>("fs.glob", query, params.cursor);
     if (cursor) return this.page(cursor, params.maxResults) as FsGlobResult;
-    const root = await this.resolveEntry(params.path);
+    const root = await this.resolveEntry(this.rootFor(params.workspace), params.path);
     const ignored = params.respectGitignore ? await readIgnorePatterns(root) : [];
     const files = await walkFiles(root, root, ignored, MAX_GLOB_RESULTS + 1);
     const matches = files.filter((file) => globMatches(params.pattern, file));
@@ -133,7 +139,7 @@ export class WorkspaceFilesystem {
     const query = stableQuery(params, ["cursor"]);
     const cursor = this.resumeCursor<{ path: string; line: number; content: string }>("fs.grep", query, params.cursor);
     if (cursor) return this.page(cursor, params.maxMatches) as FsGrepResult;
-    const root = await this.resolveEntry(params.path);
+    const root = await this.resolveEntry(this.rootFor(params.workspace), params.path);
     const files = await walkFiles(root, root, [], Number.MAX_SAFE_INTEGER);
     let scanned = 0;
     let truncated = false;
@@ -163,27 +169,33 @@ export class WorkspaceFilesystem {
 
   close(): void { this.cursors.clear(); }
 
-  private async resolveEntry(input: string): Promise<string> {
-    const target = await this.resolveChecked(input);
+  private rootFor(workspace: string): string {
+    const root = this.roots.get(workspace);
+    if (!root) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    return root;
+  }
+
+  private async resolveEntry(root: string, input: string): Promise<string> {
+    const target = await this.resolveChecked(root, input);
     const info = await fs.lstat(target).catch(() => undefined);
     if (!info) throw new FilesystemError("FILE_NOT_FOUND");
     return target;
   }
 
-  private async resolveMutationPath(input: string): Promise<string> {
-    const target = await this.resolveChecked(input);
+  private async resolveMutationPath(root: string, input: string): Promise<string> {
+    const target = await this.resolveChecked(root, input);
     const info = await fs.lstat(target).catch(() => undefined);
     if (info?.isSymbolicLink()) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
     await fs.mkdir(dirname(target), { recursive: true });
     return target;
   }
 
-  private async resolveChecked(input: string): Promise<string> {
-    const root = await fs.realpath(this.root).catch(() => this.root);
-    const target = resolve(root, input);
-    if (target !== root && !target.startsWith(root + sep)) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
-    let current = root;
-    for (const part of relative(root, target).split(sep).filter(Boolean)) {
+  private async resolveChecked(configuredRoot: string, input: string): Promise<string> {
+    const realRoot = await fs.realpath(configuredRoot).catch(() => configuredRoot);
+    const target = resolve(realRoot, input);
+    if (target !== realRoot && !target.startsWith(realRoot + sep)) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    let current = realRoot;
+    for (const part of relative(realRoot, target).split(sep).filter(Boolean)) {
       current = resolve(current, part);
       const info = await fs.lstat(current).catch(() => undefined);
       if (info?.isSymbolicLink()) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
@@ -223,6 +235,7 @@ export class WorkspaceFilesystem {
   }
 
   private startPage<T>(method: string, query: string, field: "entries" | "matches", items: T[], size: number, truncated: boolean): { cursor?: string; truncated: boolean; [key: string]: unknown } {
+    if (this.cursors.size >= MAX_CURSORS) throw new FilesystemError("CURSOR_LIMIT_EXCEEDED");
     const snapshot: CursorSnapshot<T> = { method, query, field, items, index: 0, truncated };
     const cursor = randomUUID();
     this.cursors.set(cursor, snapshot as CursorSnapshot<unknown>);
