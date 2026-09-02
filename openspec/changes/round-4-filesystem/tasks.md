@@ -10,4 +10,4 @@
 ## 3. Session integration and regression coverage
 
 - [x] 3.1 Dispatch filesystem methods both directly and through `tool.call` on the existing WebSocket session while preserving heartbeat and job completion behavior; verify the gateway integration tests pass.
-- [ ] 3.2 Run the complete Rust and TypeScript test suites against the documented fixture workspace and verify Round 1–3 regression coverage remains green.
+- [x] 3.2 Run the complete Rust and TypeScript test suites against the documented fixture workspace and verify Round 1–3 regression coverage remains green.
