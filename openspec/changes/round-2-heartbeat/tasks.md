@@ -1,7 +1,7 @@
 ## 1. Gateway heartbeat
 
 - [x] 1.1 Implement the loopback TypeScript gateway with validated `POST /heartbeat` device payloads and verify automated tests cover its 120-second idle response and invalid payload rejection.
-- [ ] 1.2 Add the `POST /session-wanted` control and runnable gateway package command, and verify automated tests cover the 5-second session-wanted response plus invalid control payload rejection.
+- [x] 1.2 Add the `POST /session-wanted` control and runnable gateway package command, and verify automated tests cover the 5-second session-wanted response plus invalid control payload rejection.
 
 ## 2. Local proof
 

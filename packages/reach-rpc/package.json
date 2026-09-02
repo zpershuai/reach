@@ -5,8 +5,9 @@
   "type": "module",
   "scripts": {
     "build": "tsc --project tsconfig.json",
-    "test": "npm run build && node --test dist/test.js",
-    "roundtrip": "npm run build && node dist/roundtrip.js"
+    "test": "npm run build && node --test dist/test.js dist/gateway.test.js",
+    "roundtrip": "npm run build && node dist/roundtrip.js",
+    "gateway": "npm run build && node dist/gateway-main.js"
   },
   "dependencies": {
     "zod": "^3.24.2"

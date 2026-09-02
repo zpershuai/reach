@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import test from "node:test";
-import { createGateway, DEFAULT_HEARTBEAT_INTERVAL_SECONDS } from "./gateway.js";
+import {
+  createGateway,
+  DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+  SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
+} from "./gateway.js";
 
 async function withGateway(check: (baseUrl: string) => Promise<void>): Promise<void> {
   const server = createGateway();
@@ -40,6 +44,40 @@ test("heartbeat rejects a missing device object", async () => {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ device: "engine-1" }),
+    });
+
+    assert.equal(response.status, 400);
+  });
+});
+
+test("session-wanted control changes the heartbeat interval", async () => {
+  await withGateway(async (baseUrl) => {
+    const control = await fetch(`${baseUrl}/session-wanted`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wanted: true }),
+    });
+    assert.equal(control.status, 200);
+    assert.deepEqual(await control.json(), { wanted: true });
+
+    const heartbeat = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine-1" } }),
+    });
+    assert.equal(heartbeat.status, 200);
+    assert.deepEqual(await heartbeat.json(), {
+      intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
+    });
+  });
+});
+
+test("session-wanted control rejects invalid payloads", async () => {
+  await withGateway(async (baseUrl) => {
+    const response = await fetch(`${baseUrl}/session-wanted`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ wanted: "yes" }),
     });
 
     assert.equal(response.status, 400);
