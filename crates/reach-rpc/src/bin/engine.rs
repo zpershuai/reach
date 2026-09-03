@@ -1,8 +1,8 @@
 use reach_rpc::{
     default_workspace_root, parse_fs_edit_params, parse_fs_glob_params, parse_fs_grep_params,
     parse_fs_list_params, parse_fs_read_params, parse_fs_stat_params, parse_fs_write_params,
-    parse_request_envelope, parse_workspace_roots, RequestEnvelope, WorkspaceFilesystem,
-    INVALID_PARAMS, PERMISSION_DENIED,
+    parse_request_envelope, parse_workspace_roots, validate_tool_call_name, RequestEnvelope,
+    WorkspaceFilesystem, INVALID_PARAMS, PERMISSION_DENIED,
 };
 use serde::Deserialize;
 use serde_json::{json, Value};
@@ -173,10 +173,7 @@ fn dispatch_method(
             let arguments = params
                 .get("arguments")
                 .ok_or_else(|| INVALID_PARAMS.to_owned())?;
-            // Nested tool.call is rejected (matches prior gateway METHOD_NOT_FOUND behavior).
-            if name == "tool.call" {
-                return Err(INVALID_PARAMS.to_owned());
-            }
+            validate_tool_call_name(name).map_err(str::to_owned)?;
             if matches!(name, "fs.write" | "fs.edit") {
                 require_grant(envelope).map_err(str::to_owned)?;
             }
@@ -187,12 +184,21 @@ fn dispatch_method(
     }
 }
 
+struct SessionCursorGuard<'a>(&'a mut WorkspaceFilesystem);
+
+impl Drop for SessionCursorGuard<'_> {
+    fn drop(&mut self) {
+        self.0.close();
+    }
+}
+
 fn handle_session(
     wss_url: &str,
     token: &str,
     session_id: &str,
     workspace: &mut WorkspaceFilesystem,
 ) -> Result<(), Box<dyn Error>> {
+    let _cursor_guard = SessionCursorGuard(workspace);
     let separator = if wss_url.contains('?') { '&' } else { '?' };
     let session_url = format!("{wss_url}{separator}token={token}");
     let (mut session, _) = connect(session_url.as_str())?;
@@ -243,7 +249,7 @@ fn handle_session(
                 };
 
                 let complete = envelope.method == "session.complete";
-                let reply = match dispatch(workspace, &envelope) {
+                let reply = match dispatch(_cursor_guard.0, &envelope) {
                     Ok(result) => response_message(&envelope.request_id, result),
                     Err(code) => error_message(&envelope.request_id, &code),
                 };
@@ -261,7 +267,6 @@ fn handle_session(
         }
     }
 
-    workspace.close();
     println!("Reach engine session closed");
     Ok(())
 }

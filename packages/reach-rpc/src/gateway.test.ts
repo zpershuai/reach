@@ -14,6 +14,7 @@ import {
   SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
   MAX_HTTP_BODY_BYTES,
   MAX_WEBSOCKET_TEXT_BYTES,
+  MAX_PENDING_RPCS,
   normalizeWorkspacePath,
 } from "./gateway.js";
 
@@ -232,6 +233,8 @@ test("gateway rejects oversized HTTP bodies and closes oversized, idle, and hard
     assert.equal(oversized.status, 413);
 
     const { socket: oversizedSocket } = await openEngineSession(baseUrl);
+    // maxPayload rejects oversized frames at the ws layer; ignore the resulting error event.
+    oversizedSocket.on("error", () => undefined);
     oversizedSocket.send("x".repeat(MAX_WEBSOCKET_TEXT_BYTES + 1));
     const [oversizedCode] = await once(oversizedSocket, "close") as [number];
     assert.equal(oversizedCode, 1009);
@@ -414,8 +417,10 @@ test("nested tool.call cannot bypass grant validation", async () => {
         },
       }, { grantId: "forged" })),
     });
+    // Nested tool.call is rejected before grant lookup, so the code is
+    // INVALID_PARAMS even with a forged grant (no grant-state oracle).
     assert.equal(nested.status, 200);
-    assert.equal((await nested.json() as { error: { code: string } }).error.code, "PERMISSION_DENIED");
+    assert.equal((await nested.json() as { error: { code: string } }).error.code, "INVALID_PARAMS");
     assert.equal(forwarded, 0);
 
     const issued = await fetch(`${baseUrl}/grants`, {
@@ -424,7 +429,7 @@ test("nested tool.call cannot bypass grant validation", async () => {
       body: JSON.stringify({ workspace: "fixture", path: "note.txt", methods: ["fs.write"] }),
     });
     const grant = await issued.json() as { grantId: string };
-    const allowedNested = await fetch(`${baseUrl}/session/rpc`, {
+    const nestedRejected = await fetch(`${baseUrl}/session/rpc`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(rpcBody("nested-ok", "tool.call", {
@@ -435,12 +440,162 @@ test("nested tool.call cannot bypass grant validation", async () => {
         },
       }, { grantId: grant.grantId })),
     });
-    assert.equal((await allowedNested.json() as { type: string }).type, "response");
-    assert.equal(forwarded, 1);
+    assert.equal(nestedRejected.status, 200);
+    assert.equal((await nestedRejected.json() as { error: { code: string } }).error.code, "INVALID_PARAMS");
+    assert.equal(forwarded, 0);
 
     socket.close();
     await once(socket, "close");
   });
+});
+
+test("pending rpc cap returns 503 without forwarding", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl);
+    const blocked: Array<() => void> = [];
+    attachMockEngine(socket, (envelope) => new Promise((resolve) => {
+      blocked.push(() => resolve({ type: "response", requestId: envelope.requestId, result: { ok: true } }));
+    }));
+
+    const inflight = Array.from({ length: MAX_PENDING_RPCS }, (_, index) =>
+      fetch(`${baseUrl}/session/rpc`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(rpcBody(`pending-${index}`, "fs.read", {
+          workspace: "fixture",
+          path: "note.txt",
+          startLine: 1,
+          maxLines: 10,
+        })),
+      }),
+    );
+
+    const deadline = Date.now() + 1000;
+    while (blocked.length < MAX_PENDING_RPCS && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(blocked.length, MAX_PENDING_RPCS);
+
+    const overflow = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("pending-overflow", "fs.read", {
+        workspace: "fixture",
+        path: "note.txt",
+        startLine: 1,
+        maxLines: 10,
+      })),
+    });
+    assert.equal(overflow.status, 503);
+    assert.equal((await overflow.json() as { error: string }).error, "too many pending rpcs");
+    assert.equal(blocked.length, MAX_PENDING_RPCS);
+
+    for (const release of blocked) release();
+    await Promise.all(inflight);
+    socket.close();
+    await once(socket, "close");
+  });
+});
+
+test("rpc timeout closes the live session and rejects further rpcs", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl);
+    attachMockEngine(socket, () => new Promise<Record<string, unknown>>(() => {
+      // Never reply: force Gateway RPC timeout.
+    }));
+
+    const timedOut = fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("timeout-1", "fs.read", {
+        workspace: "fixture",
+        path: "note.txt",
+        startLine: 1,
+        maxLines: 10,
+      })),
+    });
+
+    const [closeCode] = await once(socket, "close") as [number];
+    assert.equal(closeCode, 1011);
+    const timedOutResponse = await timedOut;
+    assert.equal(timedOutResponse.status, 503);
+    assert.equal((await timedOutResponse.json() as { error: string }).error, "session rpc timeout");
+
+    const afterTimeout = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("timeout-2", "fs.read", {
+        workspace: "fixture",
+        path: "note.txt",
+        startLine: 1,
+        maxLines: 10,
+      })),
+    });
+    assert.equal(afterTimeout.status, 409);
+  }, { sessionRpcTimeoutMs: 30 });
+});
+
+test("timed-out requestId cannot be retried across session teardown", async () => {
+  await withGateway(async (baseUrl) => {
+    const first = await openEngineSession(baseUrl);
+    attachMockEngine(first.socket, () => new Promise<Record<string, unknown>>(() => {
+      // Never reply: force Gateway RPC timeout.
+    }));
+
+    const timedOut = fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("stuck-request", "fs.read", {
+        workspace: "fixture",
+        path: "note.txt",
+        startLine: 1,
+        maxLines: 10,
+      })),
+    });
+    const [firstCloseCode] = await once(first.socket, "close") as [number];
+    assert.equal(firstCloseCode, 1011);
+    const timedOutResponse = await timedOut;
+    assert.equal(timedOutResponse.status, 503);
+
+    // A fresh session must still refuse the same requestId: the Engine may have
+    // already applied a timed-out mutation, and retrying it would re-execute it.
+    const second = await openEngineSession(baseUrl);
+    let forwarded = 0;
+    attachMockEngine(second.socket, (envelope) => {
+      forwarded += 1;
+      return { type: "response", requestId: envelope.requestId, result: { ok: true } };
+    });
+    const retry = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("stuck-request", "fs.read", {
+        workspace: "fixture",
+        path: "note.txt",
+        startLine: 1,
+        maxLines: 10,
+      })),
+    });
+    assert.equal(retry.status, 409);
+    assert.equal((await retry.json() as { error: string }).error, "duplicate requestId");
+    assert.equal(forwarded, 0);
+
+    // A different requestId on the fresh session still works.
+    const fresh = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("fresh-request", "fs.read", {
+        workspace: "fixture",
+        path: "note.txt",
+        startLine: 1,
+        maxLines: 10,
+      })),
+    });
+    assert.equal(fresh.status, 200);
+    assert.equal(forwarded, 1);
+
+    second.socket.close();
+    await once(second.socket, "close");
+  }, { sessionRpcTimeoutMs: 30 });
 });
 
 test("grant path scope rejects .. escapes and normalizes grant paths", async () => {
@@ -646,6 +801,21 @@ test("Rust engine service connects, serves workspace RPC, and completes via sess
           body: JSON.stringify({ workspace: "fixture", path: "note.txt", methods: ["fs.write"] }),
         });
         const grant = await issued.json() as { grantId: string };
+
+        const nested = await fetch(`${baseUrl}/session/rpc`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(rpcBody("nested-1", "tool.call", {
+            name: "tool.call",
+            arguments: {
+              name: "fs.write",
+              arguments: { workspace: "fixture", path: "note.txt", content: "nested", mode: "overwrite" },
+            },
+          }, { grantId: grant.grantId })),
+        });
+        assert.equal((await nested.json() as { error: { code: string } }).error.code, "INVALID_PARAMS");
+        assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "hello\nworld\n");
+
         const write = await fetch(`${baseUrl}/session/rpc`, {
           method: "POST",
           headers: { "content-type": "application/json" },

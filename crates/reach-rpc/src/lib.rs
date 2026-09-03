@@ -12,6 +12,15 @@ pub use workspace::{
 pub const PROTOCOL: &str = "reach-rpc";
 pub const VERSION: &str = "1.0";
 pub const INVALID_PARAMS: &str = "INVALID_PARAMS";
+
+/// Nested `tool.call` is rejected by both Gateway (before forward) and Engine dispatch.
+pub fn validate_tool_call_name(name: &str) -> Result<(), &'static str> {
+    if name == "tool.call" {
+        Err(INVALID_PARAMS)
+    } else {
+        Ok(())
+    }
+}
 pub const DEFAULT_START_LINE: u32 = 1;
 pub const DEFAULT_MAX_LINES: u32 = 200;
 pub const MAX_MAX_LINES: u32 = 10_000;
@@ -413,5 +422,12 @@ mod tests {
         assert_eq!(grep.max_matches, DEFAULT_MAX_MATCHES);
         assert_eq!(parse_fs_write_params(r#"{"workspace":"repo","path":"a","content":"x","mode":"append"}"#).unwrap_err().code(), INVALID_PARAMS);
         assert_eq!(parse_fs_list_params(r#"{"workspace":"repo","maxEntries":0}"#).unwrap_err().code(), INVALID_PARAMS);
+    }
+
+    #[test]
+    fn engine_rejects_nested_tool_call_names() {
+        assert_eq!(validate_tool_call_name("tool.call").unwrap_err(), INVALID_PARAMS);
+        assert!(validate_tool_call_name("fs.read").is_ok());
+        assert!(validate_tool_call_name("fs.write").is_ok());
     }
 }

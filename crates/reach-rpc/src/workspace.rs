@@ -7,7 +7,7 @@ use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, HashMap};
-use std::fs::{self, File, OpenOptions};
+use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
@@ -437,82 +437,23 @@ impl WorkspaceFilesystem {
     }
 
     fn read_mutation_content(&self, root: &Path, input: &str) -> Result<Option<String>, FilesystemError> {
-        let target = self.resolve_checked(root, input)?;
-        match fs::symlink_metadata(&target) {
-            Err(_) => Ok(None),
-            Ok(meta) => {
-                if meta.file_type().is_symlink() || !meta.is_file() {
-                    return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-                }
-                if meta.len() as usize > MAX_FILE_BYTES {
-                    return Err(FilesystemError::new("FILE_TOO_LARGE"));
-                }
-                let content =
-                    fs::read_to_string(&target).map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-                Ok(Some(content))
-            }
-        }
+        // Never create parents on the read path: it runs before the existence /
+        // revision / FILE_EXISTS checks, so a failed write or edit must not
+        // mutate the tree. A missing parent means the target cannot exist.
+        let Some((parent, name)) = open_verified_parent(root, input, false)? else {
+            return Ok(None);
+        };
+        descriptor_read_file(&parent, &name)
     }
 
     fn atomic_write(&self, root: &Path, input: &str, content: &str) -> Result<(), FilesystemError> {
-        let real_root = fs::canonicalize(root).map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-        let target = join_resolved(&real_root, input);
-        if !is_within(&real_root, &target) || target == real_root {
-            return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-        }
-        let relative = pathdiff(&real_root, &target);
-        let Some(name) = relative.last().cloned() else {
-            return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
+        // Parent directories are created only after every check has passed in
+        // write()/edit(), so a successful write is the only operation that
+        // builds the tree. (`true` means missing parents are mkdirat'd here.)
+        let Some((parent, name)) = open_verified_parent(root, input, true)? else {
+            return Err(denied());
         };
-        let parents = &relative[..relative.len() - 1];
-
-        let mut current = real_root;
-        for part in parents {
-            current.push(part);
-            match fs::symlink_metadata(&current) {
-                Ok(meta) if meta.file_type().is_symlink() => {
-                    return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-                }
-                Ok(meta) if meta.is_dir() => {}
-                Ok(_) => return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED)),
-                Err(_) => {
-                    fs::create_dir(&current).map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-                    let meta = fs::symlink_metadata(&current)
-                        .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-                    if meta.file_type().is_symlink() || !meta.is_dir() {
-                        return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-                    }
-                }
-            }
-        }
-
-        let final_path = current.join(&name);
-        if let Ok(meta) = fs::symlink_metadata(&final_path) {
-            if meta.file_type().is_symlink() {
-                return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-            }
-        }
-
-        let temporary = format!(".{name}.{}.tmp", Uuid::new_v4());
-        let temporary_path = current.join(&temporary);
-        let write_result = (|| {
-            let mut file = OpenOptions::new()
-                .write(true)
-                .create_new(true)
-                .open(&temporary_path)
-                .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-            file.write_all(content.as_bytes())
-                .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-            file.sync_all()
-                .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-            fs::rename(&temporary_path, &final_path)
-                .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?;
-            Ok(())
-        })();
-        if write_result.is_err() {
-            let _ = fs::remove_file(&temporary_path);
-        }
-        write_result
+        descriptor_atomic_write(&parent, &name, content)
     }
 
     fn resume_page(
@@ -684,6 +625,191 @@ fn normalize_rel_path(parent: &str, name: &str) -> String {
     } else {
         format!("{}/{name}", parent.trim_end_matches('/'))
     }
+}
+
+fn denied() -> FilesystemError {
+    FilesystemError::new(WORKSPACE_ACCESS_DENIED)
+}
+
+fn is_safe_component(name: &str) -> bool {
+    // On unix a backslash is a legal filename byte, not a separator; only '/'
+    // (and NUL, which the OS cannot address) are rejected.
+    !name.is_empty()
+        && name != "."
+        && name != ".."
+        && !name.contains('/')
+        && !name.contains('\0')
+}
+
+/// A file descriptor pinned to a validated workspace directory. On unix it is
+/// a real open fd used for descriptor-relative I/O; elsewhere it is an
+/// uninhabited placeholder so the fail-closed stubs below still compile.
+#[cfg(unix)]
+type Descriptor = rustix::fd::OwnedFd;
+#[cfg(not(unix))]
+struct Descriptor;
+
+#[cfg(unix)]
+fn open_verified_parent(
+    root: &Path,
+    input: &str,
+    create_missing: bool,
+) -> Result<Option<(Descriptor, String)>, FilesystemError> {
+    use rustix::fs::{mkdirat, open, openat, Mode, OFlags};
+
+    let real_root = fs::canonicalize(root).map_err(|_| denied())?;
+    let target = join_resolved(&real_root, input);
+    if !is_within(&real_root, &target) || target == real_root {
+        return Err(denied());
+    }
+    let relative = pathdiff(&real_root, &target);
+    let Some(name) = relative.last().cloned() else {
+        return Err(denied());
+    };
+    if !is_safe_component(&name) {
+        return Err(denied());
+    }
+    let parents = &relative[..relative.len() - 1];
+    for part in parents {
+        if !is_safe_component(part) {
+            return Err(denied());
+        }
+    }
+
+    let dir_flags = OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let mut parent = open(&real_root, dir_flags, Mode::empty()).map_err(|_| denied())?;
+    for part in parents {
+        let child = match openat(&parent, part.as_str(), dir_flags, Mode::empty()) {
+            Ok(fd) => fd,
+            // Missing parent on a read-only walk: the target cannot exist, so
+            // report Ok(None) instead of creating the tree as a side effect.
+            Err(err) if err == rustix::io::Errno::NOENT && !create_missing => return Ok(None),
+            Err(err) if err == rustix::io::Errno::NOENT => {
+                match mkdirat(&parent, part.as_str(), Mode::from_raw_mode(0o755)) {
+                    Ok(()) => openat(&parent, part.as_str(), dir_flags, Mode::empty()).map_err(|_| denied())?,
+                    // Another actor created this directory between the failed
+                    // openat and mkdirat; re-open it. NOFOLLOW re-validates it
+                    // against a symlink swap during that window.
+                    Err(create_err) if create_err == rustix::io::Errno::EXIST => openat(
+                        &parent,
+                        part.as_str(),
+                        dir_flags,
+                        Mode::empty(),
+                    )
+                    .map_err(|_| denied())?,
+                    Err(_) => return Err(denied()),
+                }
+            }
+            Err(_) => return Err(denied()),
+        };
+        parent = child;
+    }
+    Ok(Some((parent, name)))
+}
+
+#[cfg(not(unix))]
+fn open_verified_parent(
+    _root: &Path,
+    _input: &str,
+    _create_missing: bool,
+) -> Result<Option<(Descriptor, String)>, FilesystemError> {
+    Err(denied())
+}
+
+#[cfg(unix)]
+fn descriptor_read_file(
+    parent: &Descriptor,
+    name: &str,
+) -> Result<Option<String>, FilesystemError> {
+    use rustix::fs::{openat, Mode, OFlags};
+
+    // O_NONBLOCK prevents hanging on a FIFO/device at the target path: a plain
+    // O_RDONLY open of a FIFO blocks until a writer appears (while the caller
+    // holds write_lock). It is a no-op for regular files. The is_file() check
+    // below rejects such targets before any read.
+    let fd = match openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => fd,
+        Err(err) if err == rustix::io::Errno::NOENT => return Ok(None),
+        Err(_) => return Err(denied()),
+    };
+    let mut file = File::from(fd);
+    let meta = file.metadata().map_err(|_| denied())?;
+    if !meta.is_file() {
+        return Err(denied());
+    }
+    if meta.len() as usize > MAX_FILE_BYTES {
+        return Err(FilesystemError::new("FILE_TOO_LARGE"));
+    }
+    let mut content = String::new();
+    file.read_to_string(&mut content).map_err(|_| denied())?;
+    Ok(Some(content))
+}
+
+#[cfg(not(unix))]
+fn descriptor_read_file(
+    _parent: &Descriptor,
+    _name: &str,
+) -> Result<Option<String>, FilesystemError> {
+    Err(denied())
+}
+
+#[cfg(unix)]
+fn descriptor_atomic_write(
+    parent: &Descriptor,
+    name: &str,
+    content: &str,
+) -> Result<(), FilesystemError> {
+    use rustix::fs::{openat, renameat, statat, unlinkat, AtFlags, Mode, OFlags};
+
+    let temporary = format!(".{name}.{}.tmp", Uuid::new_v4());
+    let write_flags =
+        OFlags::WRONLY | OFlags::CREATE | OFlags::EXCL | OFlags::NOFOLLOW | OFlags::CLOEXEC;
+    let write_result = (|| {
+        let fd = openat(
+            parent,
+            temporary.as_str(),
+            write_flags,
+            Mode::from_raw_mode(0o600),
+        )
+        .map_err(|_| denied())?;
+        let mut file = File::from(fd);
+        file.write_all(content.as_bytes()).map_err(|_| denied())?;
+        file.sync_all().map_err(|_| denied())?;
+        drop(file);
+        // Re-validate the final component immediately before renameat. The
+        // earlier pre-read (descriptor_read_file O_NOFOLLOW) rejected a symlink
+        // already in place, but one swapped in since then must not be destroyed
+        // silently: deny instead of replacing the link in place.
+        match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(meta) => {
+                if rustix::fs::FileType::from_raw_mode(meta.st_mode).is_symlink() {
+                    return Err(denied());
+                }
+            }
+            // Missing target is fine (the create case); other errors deny below.
+            Err(_) => {}
+        }
+        renameat(parent, temporary.as_str(), parent, name).map_err(|_| denied())?;
+        Ok(())
+    })();
+    if write_result.is_err() {
+        let _ = unlinkat(parent, temporary.as_str(), AtFlags::empty());
+    }
+    write_result
+}
+
+#[cfg(not(unix))]
+fn descriptor_atomic_write(
+    _parent: &Descriptor,
+    _name: &str,
+    _content: &str,
+) -> Result<(), FilesystemError> {
+    Err(denied())
 }
 
 fn normalize_absolute(path: &Path) -> PathBuf {
@@ -1197,5 +1323,162 @@ mod tests {
             WORKSPACE_ACCESS_DENIED
         );
         assert!(!outside.path().join("escaped.txt").exists());
+    }
+
+    #[test]
+    fn rejects_parent_directory_replaced_by_symlink_on_write() {
+        let (dir, workspace) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        let replaceable = dir.path().join("replaceable");
+        fs::create_dir(&replaceable).unwrap();
+        fs::remove_dir(&replaceable).unwrap();
+        std::os::unix::fs::symlink(outside.path(), &replaceable).unwrap();
+        assert_eq!(
+            workspace
+                .write(&FsWriteParams {
+                    workspace: "fixture".into(),
+                    path: "replaceable/nope.txt".into(),
+                    content: "unsafe".into(),
+                    mode: FsWriteMode::Create,
+                    if_match: None,
+                })
+                .unwrap_err()
+                .code,
+            WORKSPACE_ACCESS_DENIED
+        );
+        assert!(!outside.path().join("nope.txt").exists());
+    }
+
+    #[test]
+    fn close_invalidates_session_cursors() {
+        let (_dir, mut workspace) = fixture();
+        let page = workspace
+            .list(&FsListParams {
+                workspace: "fixture".into(),
+                path: ".".into(),
+                max_entries: 1,
+                cursor: None,
+            })
+            .unwrap();
+        let cursor = page.cursor.expect("expected a continuation cursor");
+        workspace.close();
+        assert_eq!(
+            workspace
+                .list(&FsListParams {
+                    workspace: "fixture".into(),
+                    path: ".".into(),
+                    max_entries: 1,
+                    cursor: Some(cursor),
+                })
+                .unwrap_err()
+                .code,
+            INVALID_CURSOR
+        );
+    }
+
+    #[test]
+    fn failed_writes_do_not_create_parent_directories() {
+        let (dir, workspace) = fixture();
+        // fs.edit to a path whose parent is missing returns FILE_NOT_FOUND and
+        // must not create the parent as a side effect.
+        assert_eq!(
+            workspace
+                .edit(&FsEditParams {
+                    workspace: "fixture".into(),
+                    path: "missing-dir/out.txt".into(),
+                    old_string: "a".into(),
+                    new_string: "b".into(),
+                    replace_all: false,
+                    if_match: None,
+                })
+                .unwrap_err()
+                .code,
+            "FILE_NOT_FOUND"
+        );
+        assert!(!dir.path().join("missing-dir").exists());
+
+        // A mode=Create write whose if_match cannot match must not create
+        // parents either (the revision check fails before atomic_write runs).
+        assert_eq!(
+            workspace
+                .write(&FsWriteParams {
+                    workspace: "fixture".into(),
+                    path: "missing-dir2/out.txt".into(),
+                    content: "x".into(),
+                    mode: FsWriteMode::Create,
+                    if_match: Some("0".repeat(64)),
+                })
+                .unwrap_err()
+                .code,
+            REVISION_CONFLICT
+        );
+        assert!(!dir.path().join("missing-dir2").exists());
+    }
+
+    #[test]
+    fn create_write_builds_missing_parents() {
+        let (dir, workspace) = fixture();
+        workspace
+            .write(&FsWriteParams {
+                workspace: "fixture".into(),
+                path: "a/b/c.txt".into(),
+                content: "nested".into(),
+                mode: FsWriteMode::Create,
+                if_match: None,
+            })
+            .unwrap();
+        assert_eq!(
+            fs::read_to_string(dir.path().join("a/b/c.txt")).unwrap(),
+            "nested"
+        );
+    }
+
+    #[test]
+    fn writes_to_unix_filenames_containing_backslash() {
+        let (dir, workspace) = fixture();
+        // On unix a backslash is a legal filename byte; is_safe_component must
+        // not reject it (parity with fs.read/fs.stat, which can access it).
+        let name = "back\\slash.txt";
+        fs::write(dir.path().join(name), "old").unwrap();
+        workspace
+            .write(&FsWriteParams {
+                workspace: "fixture".into(),
+                path: name.into(),
+                content: "new".into(),
+                mode: FsWriteMode::Overwrite,
+                if_match: None,
+            })
+            .unwrap();
+        assert_eq!(fs::read_to_string(dir.path().join(name)).unwrap(), "new");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn mutation_read_of_fifo_is_denied_not_blocked() {
+        let (dir, workspace) = fixture();
+        let fifo = dir.path().join("fifo.txt");
+        assert!(
+            std::process::Command::new("mkfifo")
+                .arg(&fifo)
+                .status()
+                .expect("mkfifo should run")
+                .success(),
+            "mkfifo {fifo:?} failed"
+        );
+        // A plain O_RDONLY open of a FIFO blocks until a writer appears; the
+        // descriptor read path must deny without blocking (O_NONBLOCK).
+        assert_eq!(
+            workspace
+                .write(&FsWriteParams {
+                    workspace: "fixture".into(),
+                    path: "fifo.txt".into(),
+                    content: "x".into(),
+                    mode: FsWriteMode::Overwrite,
+                    if_match: None,
+                })
+                .unwrap_err()
+                .code,
+            WORKSPACE_ACCESS_DENIED
+        );
     }
 }

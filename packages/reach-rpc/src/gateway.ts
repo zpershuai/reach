@@ -13,6 +13,13 @@ export const MAX_WEBSOCKET_TEXT_BYTES = 1024 * 1024;
 export const MAX_SESSION_DURATION_MS = 5 * 60 * 1000;
 export const MAX_SESSION_IDLE_MS = 60 * 1000;
 export const SESSION_RPC_TIMEOUT_MS = 30_000;
+export const MAX_PENDING_RPCS = 16;
+/**
+ * Upper bound on remembered timed-out request IDs. Prevents unbounded growth
+ * while keeping the "a timed-out mutation cannot be retried" guard from being
+ * wiped by the session close that the timeout itself triggers.
+ */
+const MAX_TIMED_OUT_REQUEST_IDS = 4096;
 
 const heartbeatRequestSchema = z.object({
   device: z.record(z.unknown()),
@@ -123,6 +130,21 @@ function effectiveMethod(method: string, params: unknown): { method: string; par
   return { method: currentMethod, params: currentParams };
 }
 
+/** True when `tool.call` nests another `tool.call` (or unwrap fails into an empty leaf). */
+function isNestedToolCall(method: string, params: unknown): boolean {
+  if (method !== "tool.call") return false;
+  let currentMethod = method;
+  let currentParams = params;
+  let depth = 0;
+  for (; depth < 8 && currentMethod === "tool.call"; depth += 1) {
+    const tool = toolCallSchema.safeParse(currentParams);
+    if (!tool.success) return depth > 0;
+    currentMethod = tool.data.name;
+    currentParams = tool.data.arguments;
+  }
+  return depth > 1 || currentMethod === "tool.call";
+}
+
 function leafMutation(method: string, params: unknown): { method: "fs.write" | "fs.edit"; params: { workspace: string; path: string } } | undefined {
   const leaf = effectiveMethod(method, params);
   if (leaf.method !== "fs.write" && leaf.method !== "fs.edit") return undefined;
@@ -163,19 +185,41 @@ export function createGateway(options: GatewayOptions = {}): Server {
   const pendingRpcs = new Map<string, PendingRpc>();
   /** Request IDs already forwarded in the live session (including timed-out ones). */
   const seenRequestIds = new Set<string>();
+  /**
+   * Request IDs that hit the RPC timeout. Unlike `seenRequestIds` — which the
+   * socket close handler clears — this survives session teardown, so a
+   * timed-out mutation (which the Engine may already have applied on disk)
+   * cannot be re-executed by retrying the same requestId in a fresh session.
+   * Bounded: oldest entries are evicted once `MAX_TIMED_OUT_REQUEST_IDS` is hit.
+   */
+  const timedOutRequestIds = new Set<string>();
+  const noteTimedOutRequest = (requestId: string) => {
+    timedOutRequestIds.add(requestId);
+    if (timedOutRequestIds.size > MAX_TIMED_OUT_REQUEST_IDS) {
+      const oldest = timedOutRequestIds.values().next().value;
+      if (oldest !== undefined) timedOutRequestIds.delete(oldest);
+    }
+  };
   const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
   const now = options.now ?? Date.now;
   const sessionDurationMs = options.sessionDurationMs ?? MAX_SESSION_DURATION_MS;
   const sessionIdleMs = options.sessionIdleMs ?? MAX_SESSION_IDLE_MS;
   const sessionRpcTimeoutMs = options.sessionRpcTimeoutMs ?? SESSION_RPC_TIMEOUT_MS;
-  const sessions = new WebSocketServer({ noServer: true });
+  const sessions = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_TEXT_BYTES });
 
   const clearPendingRpcs = (reason: string) => {
     for (const [requestId, pending] of pendingRpcs) {
       clearTimeout(pending.timer);
       pending.reject(new Error(reason));
       pendingRpcs.delete(requestId);
+    }
+  };
+
+  const closeLiveSession = (code: number, reason: string) => {
+    const socket = liveSocket;
+    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
+      socket.close(code, reason);
     }
   };
 
@@ -189,8 +233,11 @@ export function createGateway(options: GatewayOptions = {}): Server {
     if (typeof requestId !== "string" || !requestId) {
       return Promise.reject(new Error("missing requestId"));
     }
-    if (pendingRpcs.has(requestId) || seenRequestIds.has(requestId)) {
+    if (pendingRpcs.has(requestId) || seenRequestIds.has(requestId) || timedOutRequestIds.has(requestId)) {
       return Promise.reject(new Error("duplicate requestId"));
+    }
+    if (pendingRpcs.size >= MAX_PENDING_RPCS) {
+      return Promise.reject(new Error("too many pending rpcs"));
     }
 
     const payload = { ...envelope, sessionId, type: "request", protocol: "reach-rpc", version: "1.0" };
@@ -198,8 +245,13 @@ export function createGateway(options: GatewayOptions = {}): Server {
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingRpcs.delete(requestId);
-        // Keep requestId in seenRequestIds so a timed-out mutation cannot be retried.
+        // The session close this timeout triggers clears `seenRequestIds`, so
+        // retain the id in `timedOutRequestIds` (which survives teardown) to
+        // keep a timed-out mutation from being retried and re-applied.
+        noteTimedOutRequest(requestId);
         reject(new Error("session rpc timeout"));
+        // Tear down the live session so in-flight Engine work is aborted.
+        closeLiveSession(1011, "session rpc timeout");
       }, sessionRpcTimeoutMs);
       pendingRpcs.set(requestId, { resolve, reject, timer });
       resetIdleTimer?.();
@@ -316,6 +368,14 @@ export function createGateway(options: GatewayOptions = {}): Server {
       }
 
       try {
+        // Reject nested/pathological `tool.call` before any grant lookup so the
+        // response code never depends on grant state (kills the
+        // PERMISSION_DENIED-vs-INVALID_PARAMS oracle). Single-level `tool.call`
+        // is still unwrapped by `leafMutation` below for grant visibility.
+        if (isNestedToolCall(envelope.method, envelope.params)) {
+          sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } });
+          return;
+        }
         const mutation = leafMutation(envelope.method, envelope.params);
         if (mutation) {
           const permission = permissionSchema.safeParse(envelope.permission);
@@ -411,6 +471,10 @@ export function createGateway(options: GatewayOptions = {}): Server {
       clearTimeout(idleTimer);
       idleTimer = setTimeout(closeForLimit, sessionIdleMs);
     };
+
+    webSocket.on("error", (error) => {
+      logger(`Reach session socket error: ${error instanceof Error ? error.message : String(error)}`);
+    });
 
     webSocket.on("message", (data, isBinary) => {
       resetIdleTimer?.();
