@@ -1,0 +1,10 @@
+{
+  "type": "session.ready",
+  "protocol": "reach-rpc",
+  "version": "1.0",
+  "sessionId": "session-1",
+  "engineId": "reach-engine",
+  "workspaces": ["default", "fixture"],
+  "methods": ["fs.read", "fs.list", "fs.stat", "fs.write", "fs.edit", "fs.glob", "fs.grep"],
+  "futureField": true
+}

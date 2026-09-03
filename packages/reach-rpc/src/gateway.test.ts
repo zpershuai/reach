@@ -41,7 +41,14 @@ async function withGateway(
   }
 }
 
-async function openEngineSession(baseUrl: string): Promise<{ socket: WebSocket; sessionId: string; wssUrl: string; token: string }> {
+function wsBaseUrl(baseUrl: string): string {
+  return baseUrl.replace("http://", "ws://");
+}
+
+async function openEngineSession(
+  baseUrl: string,
+  options: { ready?: boolean } = {},
+): Promise<{ socket: WebSocket; sessionId: string; endpoint: string; token: string }> {
   await fetch(`${baseUrl}/session-wanted`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -52,14 +59,30 @@ async function openEngineSession(baseUrl: string): Promise<{ socket: WebSocket; 
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ device: { id: "engine-1" } }),
   });
-  const session = await heartbeat.json() as { wssUrl: string; token: string; sessionId: string };
-  const socket = new WebSocket(`${session.wssUrl}?token=${session.token}`);
+  const session = await heartbeat.json() as { endpoint: string; token: string; sessionId: string; leaseExpiresAt: string };
+  const socket = new WebSocket(`${wsBaseUrl(baseUrl)}${session.endpoint}?token=${session.token}`);
   await once(socket, "open");
+  if (options.ready !== false) {
+    // A live Engine announces readiness before the Gateway forwards RPC.
+    socket.send(JSON.stringify({
+      type: "session.ready",
+      protocol: "reach-rpc",
+      version: "1.0",
+      sessionId: session.sessionId,
+      engineId: "test-engine",
+      workspaces: ["fixture"],
+      methods: ["fs.read", "fs.write", "fs.edit", "fs.list", "fs.stat", "fs.glob", "fs.grep"],
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
   return { socket, ...session };
 }
 
-/** Minimal Model B engine peer: answers Gateway-forwarded requests and can emit job.done. */
-function attachMockEngine(socket: WebSocket, handler?: (envelope: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>): void {
+/** Minimal Model B engine peer: announces readiness and answers Gateway-forwarded requests. */
+function attachMockEngine(
+  socket: WebSocket,
+  handler?: (envelope: Record<string, unknown>) => Record<string, unknown> | Promise<Record<string, unknown>>,
+): void {
   socket.on("message", async (data) => {
     let message: Record<string, unknown>;
     try {
@@ -131,7 +154,7 @@ test("session-wanted heartbeat returns one-time session credentials", async () =
       body: JSON.stringify({ wanted: true }),
     });
     assert.equal(control.status, 200);
-    assert.deepEqual(await control.json(), { wanted: true });
+    assert.deepEqual(await control.json(), { wanted: true, status: "wanted" });
 
     const heartbeat = await fetch(`${baseUrl}/heartbeat`, {
       method: "POST",
@@ -142,13 +165,15 @@ test("session-wanted heartbeat returns one-time session credentials", async () =
     const payload = await heartbeat.json() as {
       intervalSeconds: number;
       token: string;
-      wssUrl: string;
+      endpoint: string;
       sessionId: string;
+      leaseExpiresAt: string;
     };
     assert.equal(payload.intervalSeconds, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS);
     assert.match(payload.token, /^[0-9a-f-]{36}$/);
     assert.match(payload.sessionId, /^[0-9a-f-]{36}$/);
-    assert.equal(payload.wssUrl, baseUrl.replace("http://", "ws://") + "/session");
+    assert.equal(payload.endpoint, "/session");
+    assert.ok(!Number.isNaN(Date.parse(payload.leaseExpiresAt)));
 
     const repeatedHeartbeat = await fetch(`${baseUrl}/heartbeat`, {
       method: "POST",
@@ -158,7 +183,7 @@ test("session-wanted heartbeat returns one-time session credentials", async () =
     assert.deepEqual(await repeatedHeartbeat.json(), payload);
 
     await new Promise<void>((resolve) => {
-      const invalid = new WebSocket(`${payload.wssUrl}?token=invalid`);
+      const invalid = new WebSocket(`${wsBaseUrl(baseUrl)}${payload.endpoint}?token=invalid`);
       invalid.once("unexpected-response", (_request, response) => {
         response.resume();
         resolve();
@@ -182,13 +207,13 @@ test("session-wanted control rejects invalid payloads", async () => {
 
 test("session credentials are consumed once and require an explicit re-request", async () => {
   await withGateway(async (baseUrl) => {
-    const heartbeat = async (): Promise<{ wssUrl?: string; token?: string; intervalSeconds?: number }> => {
+    const heartbeat = async (): Promise<{ endpoint?: string; token?: string; intervalSeconds?: number }> => {
       const response = await fetch(`${baseUrl}/heartbeat`, {
         method: "POST",
         headers: { "content-type": "application/json" },
         body: JSON.stringify({ device: { id: "engine-1" } }),
       });
-      return response.json() as Promise<{ wssUrl?: string; token?: string; intervalSeconds?: number }>;
+      return response.json() as Promise<{ endpoint?: string; token?: string; intervalSeconds?: number }>;
     };
     await fetch(`${baseUrl}/session-wanted`, {
       method: "POST",
@@ -196,12 +221,13 @@ test("session credentials are consumed once and require an explicit re-request",
       body: JSON.stringify({ wanted: true }),
     });
     const first = await heartbeat();
-    assert.ok(first.token && first.wssUrl);
-    const engine = new WebSocket(`${first.wssUrl}?token=${first.token}`);
+    assert.ok(first.token && first.endpoint);
+    const engine = new WebSocket(`${wsBaseUrl(baseUrl)}${first.endpoint}?token=${first.token}`);
     await once(engine, "open");
 
+    // A second connection with the same (now consumed) token is rejected.
     await new Promise<void>((resolve) => {
-      const concurrent = new WebSocket(`${first.wssUrl}?token=${first.token}`);
+      const concurrent = new WebSocket(`${wsBaseUrl(baseUrl)}${first.endpoint}?token=${first.token}`);
       concurrent.once("unexpected-response", (_request, response) => {
         response.resume();
         resolve();
@@ -238,6 +264,9 @@ test("gateway rejects oversized HTTP bodies and closes oversized, idle, and hard
     oversizedSocket.send("x".repeat(MAX_WEBSOCKET_TEXT_BYTES + 1));
     const [oversizedCode] = await once(oversizedSocket, "close") as [number];
     assert.equal(oversizedCode, 1009);
+    // The client close event can win the server's close handler. Wait until
+    // the Gateway has released its live-session binding before opening again.
+    await waitForStatus(baseUrl, "none");
 
     const { socket: idleSocket } = await openEngineSession(baseUrl);
     const [idleCode] = await once(idleSocket, "close") as [number];
@@ -271,6 +300,7 @@ test("job completion closes the session and restores the idle heartbeat", async 
 
     assert.deepEqual(events, [
       "Reach session connected",
+      "Reach session ready",
       "Reach session job done",
       "Reach session closed",
     ]);
@@ -655,8 +685,8 @@ test("failed websocket upgrade does not permanently brick session issuance", asy
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ device: { id: "engine-1" } }),
     });
-    const session = await heartbeat.json() as { wssUrl: string; token: string };
-    const url = new URL(session.wssUrl);
+    const session = await heartbeat.json() as { endpoint: string; token: string };
+    const url = new URL(`${wsBaseUrl(baseUrl)}${session.endpoint}`);
 
     // Valid token, invalid WebSocket handshake (bad key) — handleUpgrade aborts.
     await new Promise<void>((resolve, reject) => {
@@ -690,11 +720,11 @@ test("failed websocket upgrade does not permanently brick session issuance", asy
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ device: { id: "engine-1" } }),
     });
-    const payload = await renewed.json() as { token?: string; wssUrl?: string; intervalSeconds: number };
+    const payload = await renewed.json() as { token?: string; endpoint?: string; intervalSeconds: number };
     assert.equal(payload.intervalSeconds, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS);
-    assert.ok(payload.token && payload.wssUrl);
+    assert.ok(payload.token && payload.endpoint);
 
-    const socket = new WebSocket(`${payload.wssUrl}?token=${payload.token}`);
+    const socket = new WebSocket(`${wsBaseUrl(baseUrl)}${payload.endpoint}?token=${payload.token}`);
     await once(socket, "open");
     socket.close();
     await once(socket, "close");
@@ -755,31 +785,262 @@ test("gateway ignores engine-originated filesystem requests", async () => {
   });
 });
 
-test("Rust engine service connects, serves workspace RPC, and completes via session.complete", async () => {
-  const root = await fs.mkdtemp(join(tmpdir(), "reach-model-b-"));
+test("session/rpc is gated on Engine readiness", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket, sessionId } = await openEngineSession(baseUrl, { ready: false });
+    let forwarded = 0;
+    attachMockEngine(socket, (envelope) => {
+      forwarded += 1;
+      return { type: "response", requestId: envelope.requestId, result: { ok: true } };
+    });
+
+    const before = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("pre-ready", "fs.read", { workspace: "fixture", path: "note.txt" })),
+    });
+    assert.equal(before.status, 409);
+    assert.equal((await before.json() as { error: string }).error, "no ready session");
+    assert.equal(forwarded, 0);
+
+    // A ready message for the wrong session id must not authorize this session.
+    socket.send(JSON.stringify({
+      type: "session.ready",
+      protocol: "reach-rpc",
+      version: "1.0",
+      sessionId: "wrong-session",
+      engineId: "test-engine",
+      workspaces: ["fixture"],
+      methods: ["fs.read"],
+    }));
+    const wrongId = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("wrong-id", "fs.read", { workspace: "fixture", path: "note.txt" })),
+    });
+    assert.equal(wrongId.status, 409);
+    assert.equal(forwarded, 0);
+
+    socket.send(JSON.stringify({
+      type: "session.ready",
+      protocol: "reach-rpc",
+      version: "1.0",
+      sessionId,
+      engineId: "test-engine",
+      workspaces: ["fixture"],
+      methods: ["fs.read"],
+    }));
+    await waitForStatus(baseUrl, "ready");
+
+    const after = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("post-ready", "fs.read", { workspace: "fixture", path: "note.txt" })),
+    });
+    assert.equal(after.status, 200);
+    assert.equal(forwarded, 1);
+
+    socket.close();
+    await once(socket, "close");
+  });
+});
+
+async function waitForStatus(baseUrl: string, expected: string, timeoutMs = 2000): Promise<void> {
+  const started = Date.now();
+  for (;;) {
+    const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string };
+    if (status.status === expected) return;
+    if (Date.now() - started > timeoutMs) throw new Error(`timed out waiting for status ${expected}`);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test("agent renewal relays a bounded lease to the Engine", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket, sessionId } = await openEngineSession(baseUrl);
+    let renew: { sessionId: string; leaseExpiresAt: string } | undefined;
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (message.type === "session.renew") renew = message as { sessionId: string; leaseExpiresAt: string };
+    });
+
+    const renewed = await fetch(`${baseUrl}/session/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(renewed.status, 200);
+    const payload = await renewed.json() as { sessionId: string; leaseExpiresAt: string };
+    assert.equal(payload.sessionId, sessionId);
+    const expiry = Date.parse(payload.leaseExpiresAt);
+    assert.ok(expiry > Date.now());
+    assert.ok(expiry <= Date.now() + 1100, "renewal must not exceed the policy maximum");
+
+    await waitUntil(() => renew?.sessionId === sessionId);
+    assert.equal(renew?.leaseExpiresAt, payload.leaseExpiresAt);
+
+    socket.close();
+    await once(socket, "close");
+  }, { sessionDurationMs: 1000 });
+});
+
+test("renew and close controls require a live ready session", async () => {
+  await withGateway(async (baseUrl) => {
+    const missing = await fetch(`${baseUrl}/session/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(missing.status, 409);
+
+    const missingClose = await fetch(`${baseUrl}/session/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(missingClose.status, 409);
+
+    const { socket } = await openEngineSession(baseUrl, { ready: false });
+    const renew = await fetch(`${baseUrl}/session/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(renew.status, 409);
+    socket.close();
+    await once(socket, "close");
+  });
+});
+
+test("agent close sends session.close, rejects new RPC, and restores the idle heartbeat", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket, sessionId } = await openEngineSession(baseUrl);
+    let closeReason: string | undefined;
+    socket.on("message", (data) => {
+      const message = JSON.parse(data.toString()) as Record<string, unknown>;
+      if (message.type === "session.close") closeReason = message.reason as string;
+    });
+
+    const closed = await fetch(`${baseUrl}/session/close`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(closed.status, 200);
+    assert.equal((await closed.json() as { status: string }).status, "closing");
+    await waitUntil(() => closeReason === "agent_requested");
+
+    const rejectedRenew = await fetch(`${baseUrl}/session/renew`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(rejectedRenew.status, 409);
+
+    const rpc = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(rpcBody("after-close", "fs.read", { workspace: "fixture", path: "note.txt" })),
+    });
+    assert.equal(rpc.status, 409);
+
+    const idleHeartbeat = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine-1" } }),
+    });
+    assert.deepEqual(await idleHeartbeat.json(), { intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS });
+
+    // The Engine completes closure; the Gateway exposes the reason.
+    socket.send(JSON.stringify({ type: "session.closed", sessionId, reason: "agent_requested" }));
+    socket.close();
+    await once(socket, "close");
+    const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+    assert.equal(status.status, "none");
+    assert.equal(status.closureReason, "agent_requested");
+  });
+});
+
+test("engine policy closure clears the session and requires a new open request", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket, sessionId } = await openEngineSession(baseUrl);
+    socket.send(JSON.stringify({ type: "session.closed", sessionId, reason: "lease_expired" }));
+    socket.close();
+    await once(socket, "close");
+    await waitForStatus(baseUrl, "none");
+
+    const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+    assert.equal(status.status, "none");
+    assert.equal(status.closureReason, "lease_expired");
+
+    // No new credentials are minted until the Agent requests an open again.
+    const idleHeartbeat = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine-1" } }),
+    });
+    assert.deepEqual(await idleHeartbeat.json(), { intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS });
+
+    const reopened = await fetch(`${baseUrl}/session/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reopened.status, 200);
+    const reHeartbeat = await fetch(`${baseUrl}/heartbeat`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine-1" } }),
+    });
+    const payload = await reHeartbeat.json() as { token?: string; endpoint?: string };
+    assert.ok(payload.token && payload.endpoint === "/session");
+  });
+});
+
+test("open is rejected while another Engine session is live", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl);
+    const second = await fetch(`${baseUrl}/session/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(second.status, 409);
+    assert.equal((await second.json() as { error: string }).error, "session already active");
+    socket.close();
+    await once(socket, "close");
+  });
+});
+
+async function waitUntil(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+  const started = Date.now();
+  while (!condition()) {
+    if (Date.now() - started > timeoutMs) throw new Error("timed out waiting for condition");
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+}
+
+test("Rust engine lifecycle: open -> ready -> rpc -> renew -> close", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-integration-"));
   await fs.writeFile(join(root, "note.txt"), "hello\nworld\n");
   const events: string[] = [];
   let resolveSessionClosed: () => void = () => {};
-  const sessionClosed = new Promise<void>((resolve) => {
+  const sessionClosedOnce = new Promise<void>((resolve) => {
     resolveSessionClosed = resolve;
   });
-
   try {
     await withGateway(async (baseUrl) => {
-      await fetch(`${baseUrl}/session-wanted`, {
+      await fetch(`${baseUrl}/session/open`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ wanted: true }),
+        body: "{}",
       });
 
       const engine = await startEngine(baseUrl, { fixture: root });
       try {
-        try {
-          await waitForEvent(events, "Reach session connected", 30_000);
-        } catch (error) {
-          const output = (engine as ChildProcess & { reachOutput?: () => string }).reachOutput?.() ?? "";
-          throw new Error(`${error instanceof Error ? error.message : error}\nengine output:\n${output}`);
-        }
+        await waitForEvent(events, "Reach session ready", 30_000);
+        const readyStatus = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; sessionId?: string };
+        assert.equal(readyStatus.status, "ready");
 
         const read = await fetch(`${baseUrl}/session/rpc`, {
           method: "POST",
@@ -802,20 +1063,6 @@ test("Rust engine service connects, serves workspace RPC, and completes via sess
         });
         const grant = await issued.json() as { grantId: string };
 
-        const nested = await fetch(`${baseUrl}/session/rpc`, {
-          method: "POST",
-          headers: { "content-type": "application/json" },
-          body: JSON.stringify(rpcBody("nested-1", "tool.call", {
-            name: "tool.call",
-            arguments: {
-              name: "fs.write",
-              arguments: { workspace: "fixture", path: "note.txt", content: "nested", mode: "overwrite" },
-            },
-          }, { grantId: grant.grantId })),
-        });
-        assert.equal((await nested.json() as { error: { code: string } }).error.code, "INVALID_PARAMS");
-        assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "hello\nworld\n");
-
         const write = await fetch(`${baseUrl}/session/rpc`, {
           method: "POST",
           headers: { "content-type": "application/json" },
@@ -829,18 +1076,37 @@ test("Rust engine service connects, serves workspace RPC, and completes via sess
         assert.equal((await write.json() as { type: string }).type, "response");
         assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "changed");
 
-        const complete = await fetch(`${baseUrl}/session/rpc`, {
+        // Single-level tool.call is canonicalized by the engine to a direct method.
+        const wrapped = await fetch(`${baseUrl}/session/rpc`, {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify(rpcBody("done-1", "session.complete", {})),
+          body: JSON.stringify(rpcBody("tool-1", "tool.call", {
+            name: "fs.read",
+            arguments: { workspace: "fixture", path: "note.txt" },
+          })),
         });
-        assert.equal((await complete.json() as { type: string }).type, "response");
-        await sessionClosed;
-        assert.deepEqual(events, [
-          "Reach session connected",
-          "Reach session job done",
-          "Reach session closed",
-        ]);
+        assert.equal((await wrapped.json() as { result: { content: string } }).result.content, "changed");
+
+        const renewed = await fetch(`${baseUrl}/session/renew`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        assert.equal(renewed.status, 200);
+        assert.equal((await renewed.json() as { sessionId: string }).sessionId, readyStatus.sessionId ?? "");
+
+        await fetch(`${baseUrl}/session/close`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        await sessionClosedOnce;
+        const finalStatus = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+        assert.equal(finalStatus.status, "none");
+        assert.equal(finalStatus.closureReason, "agent_requested");
+        assert.ok(events.includes("Reach session connected"));
+        assert.ok(events.includes("Reach session ready"));
+        assert.ok(events.includes("Reach session closed"));
       } finally {
         await stopEngine(engine);
       }
@@ -850,6 +1116,193 @@ test("Rust engine service connects, serves workspace RPC, and completes via sess
         if (message === "Reach session closed") resolveSessionClosed();
       },
     });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("legacy session.complete is translated to a session close by the engine", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-compat-"));
+  await fs.writeFile(join(root, "note.txt"), "hi\n");
+  const events: string[] = [];
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session-wanted`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ wanted: true }),
+      });
+      const engine = await startEngine(baseUrl, { fixture: root });
+      try {
+        await waitForEvent(events, "Reach session ready", 30_000);
+        const complete = await fetch(`${baseUrl}/session/rpc`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(rpcBody("done-1", "session.complete", {})),
+        });
+        assert.equal((await complete.json() as { type: string }).type, "response");
+        await new Promise<void>((resolve) => {
+          const started = Date.now();
+          const poll = () => {
+            if (events.includes("Reach session closed")) return resolve();
+            if (Date.now() - started > 15_000) return resolve();
+            setTimeout(poll, 50);
+          };
+          poll();
+        });
+        const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+        assert.equal(status.status, "none");
+        assert.equal(status.closureReason, "session_complete");
+      } finally {
+        await stopEngine(engine);
+      }
+    }, { logger: (message) => events.push(message) });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("abandoned engine lease expires and the session returns to heartbeat", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-lease-"));
+  await fs.writeFile(join(root, "note.txt"), "x\n");
+  const events: string[] = [];
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      // The Gateway issues a 2.5s lease. The Engine enforces the same absolute
+      // expiry locally and, because it began counting at mint time (which
+      // precedes the upgrade), deterministically wins the expiry race.
+      const engine = await startEngine(baseUrl, { fixture: root });
+      try {
+        await waitForEvent(events, "Reach session ready", 30_000);
+        // No renew: the lease expires while the socket stays open.
+        await waitForEvent(events, "Reach session closed", 30_000);
+        const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+        assert.equal(status.status, "none");
+        assert.equal(status.closureReason, "lease_expired");
+      } finally {
+        await stopEngine(engine);
+      }
+    }, { sessionDurationMs: 2500, logger: (message) => events.push(message) });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Rust engine enforces its idle timeout and recovers to heartbeat", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-idle-"));
+  await fs.writeFile(join(root, "note.txt"), "x\n");
+  const events: string[] = [];
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const engine = await startEngine(baseUrl, { fixture: root }, { REACH_IDLE_SECS: "1" });
+      try {
+        await waitForEvent(events, "Reach session ready", 30_000);
+        await waitForEvent(events, "Reach session closed", 30_000);
+        const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+        assert.equal(status.status, "none");
+        assert.equal(status.closureReason, "idle_timeout");
+        // The engine keeps heartbeating: a fresh open works.
+        await fetch(`${baseUrl}/session/open`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: "{}",
+        });
+        const heartbeat = await fetch(`${baseUrl}/heartbeat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ device: { id: "reach-engine" } }),
+        });
+        const payload = await heartbeat.json() as { endpoint?: string; token?: string };
+        assert.ok(payload.token && payload.endpoint === "/session");
+      } finally {
+        await stopEngine(engine);
+      }
+    }, { logger: (message) => events.push(message) });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Rust engine drains a session at its rotation limit", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-rotation-"));
+  await fs.writeFile(join(root, "note.txt"), "x\n");
+  const events: string[] = [];
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const engine = await startEngine(baseUrl, { fixture: root }, { REACH_ROTATION_SECS: "1" });
+      try {
+        await waitForEvent(events, "Reach session ready", 30_000);
+        await waitForEvent(events, "Reach session closed", 30_000);
+        const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+        assert.equal(status.status, "none");
+        assert.equal(status.closureReason, "rotation");
+      } finally {
+        await stopEngine(engine);
+      }
+    }, { logger: (message) => events.push(message) });
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
+test("engine websocket failure clears the session and a new open recovers", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-ws-failure-"));
+  await fs.writeFile(join(root, "note.txt"), "x\n");
+  const events: string[] = [];
+  try {
+    await withGateway(async (baseUrl) => {
+      await fetch(`${baseUrl}/session/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const engine = await startEngine(baseUrl, { fixture: root });
+      try {
+        await waitForEvent(events, "Reach session ready", 30_000);
+      } finally {
+        // Kill the engine: the WebSocket drops without an explicit close.
+        await stopEngine(engine);
+      }
+      await waitForEvent(events, "Reach session closed", 15_000);
+      const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
+      assert.equal(status.status, "none");
+      assert.equal(status.closureReason, "disconnected");
+
+      // Clean heartbeat recovery: a new open + fresh engine session works.
+      await fetch(`${baseUrl}/session/open`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: "{}",
+      });
+      const engine2 = await startEngine(baseUrl, { fixture: root });
+      try {
+        await waitForEvent(events, "Reach session closed", 30_000).catch(() => undefined);
+        const heartbeat = await fetch(`${baseUrl}/heartbeat`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ device: { id: "reach-engine" } }),
+        });
+        const payload = await heartbeat.json() as { endpoint?: string; token?: string };
+        assert.ok(payload.token && payload.endpoint === "/session");
+      } finally {
+        await stopEngine(engine2);
+      }
+    }, { logger: (message) => events.push(message) });
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
@@ -874,12 +1327,16 @@ async function ensureEngineBinary(): Promise<string> {
   return binary;
 }
 
-async function startEngine(baseUrl: string, roots: Record<string, string>): Promise<ChildProcess> {
+async function startEngine(
+  baseUrl: string,
+  roots: Record<string, string>,
+  extraEnv: Record<string, string> = {},
+): Promise<ChildProcess> {
   const binary = await ensureEngineBinary();
   const mapped = Object.entries(roots).map(([name, path]) => `${name}:${path}`).join(",");
   const child = spawn(binary, [baseUrl], {
     cwd: repositoryRoot,
-    env: { ...process.env, REACH_WORKSPACE_ROOTS: mapped },
+    env: { ...process.env, REACH_WORKSPACE_ROOTS: mapped, ...extraEnv },
   });
   let output = "";
   child.stdout?.on("data", (chunk: Buffer) => {

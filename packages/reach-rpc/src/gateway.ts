@@ -3,17 +3,38 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Duplex } from "node:stream";
 import { z } from "zod";
 import { WebSocket, WebSocketServer } from "ws";
-import { ContractError, parseFsEditParams, parseFsWriteParams, parseRequestEnvelope, permissionSchema } from "./index.js";
+import {
+  CLOSURE_AGENT_REQUESTED,
+  CLOSURE_DISCONNECTED,
+  CLOSURE_SESSION_COMPLETE,
+  MESSAGE_CLOSE,
+  MESSAGE_CLOSED,
+  MESSAGE_READY,
+  MESSAGE_RENEW,
+  ContractError,
+  parseFsEditParams,
+  parseFsWriteParams,
+  parseRequestEnvelope,
+  parseSessionClosed,
+  parseSessionReady,
+  permissionSchema,
+} from "./index.js";
 
 export const DEFAULT_HEARTBEAT_INTERVAL_SECONDS = 120;
 export const SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS = 5;
 export const SESSION_TOKEN_TTL_MS = 30_000;
 export const MAX_HTTP_BODY_BYTES = 64 * 1024;
 export const MAX_WEBSOCKET_TEXT_BYTES = 1024 * 1024;
-export const MAX_SESSION_DURATION_MS = 5 * 60 * 1000;
-export const MAX_SESSION_IDLE_MS = 60 * 1000;
+/** Length of one issued/renewed session lease. The Engine enforces this locally. */
+export const SESSION_LEASE_MS = 5 * 60 * 1000;
+/** Gateway-enforced inbound-idle limit while a session is live. */
+export const SESSION_IDLE_MS = 5 * 60 * 1000;
+/** Client advisory for how often an Agent should renew before its lease expires. */
+export const SESSION_RENEW_CADENCE_MS = 60 * 1000;
 export const SESSION_RPC_TIMEOUT_MS = 30_000;
 export const MAX_PENDING_RPCS = 16;
+/** The Gateway-relative WebSocket session endpoint returned on heartbeat. */
+export const SESSION_ENDPOINT_PATH = "/session";
 /**
  * Upper bound on remembered timed-out request IDs. Prevents unbounded growth
  * while keeping the "a timed-out mutation cannot be retried" guard from being
@@ -27,6 +48,10 @@ const heartbeatRequestSchema = z.object({
 
 const sessionWantedRequestSchema = z.object({
   wanted: z.boolean(),
+});
+
+const sessionOpenRequestSchema = z.object({
+  engineId: z.string().min(1).optional(),
 });
 
 const grantRequestSchema = z.object({
@@ -48,8 +73,21 @@ export interface GatewayOptions {
 
 interface PendingSession {
   token: string;
+  /** Token expiry (epoch ms). The token is single-use and short-lived. */
   expiresAt: number;
   sessionId: string;
+  /** Absolute lease expiry (epoch ms) for the wanted session. */
+  leaseExpiresAt: number;
+}
+
+interface LiveSession {
+  sessionId: string;
+  socket: WebSocket;
+  /** True once the Engine has sent a valid `session.ready`. */
+  ready: boolean;
+  /** True while draining after close/expiry: no new data-plane requests. */
+  closed: boolean;
+  leaseExpiresAt: number;
 }
 
 interface WriteGrant {
@@ -99,6 +137,10 @@ function rejectUpgrade(socket: Duplex): void {
   socket.destroy();
 }
 
+function isoDate(epochMs: number): string {
+  return new Date(epochMs).toISOString();
+}
+
 /** Lexically normalize a workspace-relative path; reject empty / absolute / `..` escapes. */
 export function normalizeWorkspacePath(path: string): string | undefined {
   const trimmed = path.trim();
@@ -138,14 +180,19 @@ function isNestedToolCall(method: string, params: unknown): boolean {
   let depth = 0;
   for (; depth < 8 && currentMethod === "tool.call"; depth += 1) {
     const tool = toolCallSchema.safeParse(currentParams);
-    if (!tool.success) return depth > 0;
+    // A malformed outer wrapper is invalid too; otherwise it would evade this
+    // Gateway-side reject and be needlessly forwarded to the Engine.
+    if (!tool.success) return true;
     currentMethod = tool.data.name;
     currentParams = tool.data.arguments;
   }
   return depth > 1 || currentMethod === "tool.call";
 }
 
-function leafMutation(method: string, params: unknown): { method: "fs.write" | "fs.edit"; params: { workspace: string; path: string } } | undefined {
+function leafMutation(
+  method: string,
+  params: unknown,
+): { method: "fs.write" | "fs.edit"; params: { workspace: string; path: string } } | undefined {
   const leaf = effectiveMethod(method, params);
   if (leaf.method !== "fs.write" && leaf.method !== "fs.edit") return undefined;
   const parsed = leaf.method === "fs.write" ? parseFsWriteParams(leaf.params) : parseFsEditParams(leaf.params);
@@ -178,9 +225,11 @@ function hasMatchingGrant(
 export function createGateway(options: GatewayOptions = {}): Server {
   let sessionWanted = false;
   let pendingSession: PendingSession | undefined;
-  let sessionLive = false;
-  let liveSocket: WebSocket | undefined;
-  let liveSessionId: string | undefined;
+  let liveSession: LiveSession | undefined;
+  /** Last Engine-reported or observed closure reason, kept for session status. */
+  let lastClosureReason: string | undefined;
+  let leaseTimer: ReturnType<typeof setTimeout> | undefined;
+  let idleTimer: ReturnType<typeof setTimeout> | undefined;
   let resetIdleTimer: (() => void) | undefined;
   const pendingRpcs = new Map<string, PendingRpc>();
   /** Request IDs already forwarded in the live session (including timed-out ones). */
@@ -203,8 +252,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
   const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
   const now = options.now ?? Date.now;
-  const sessionDurationMs = options.sessionDurationMs ?? MAX_SESSION_DURATION_MS;
-  const sessionIdleMs = options.sessionIdleMs ?? MAX_SESSION_IDLE_MS;
+  const sessionLeaseMs = options.sessionDurationMs ?? SESSION_LEASE_MS;
+  const sessionIdleMs = options.sessionIdleMs ?? SESSION_IDLE_MS;
   const sessionRpcTimeoutMs = options.sessionRpcTimeoutMs ?? SESSION_RPC_TIMEOUT_MS;
   const sessions = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_TEXT_BYTES });
 
@@ -217,17 +266,18 @@ export function createGateway(options: GatewayOptions = {}): Server {
   };
 
   const closeLiveSession = (code: number, reason: string) => {
-    const socket = liveSocket;
-    if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) {
-      socket.close(code, reason);
+    const session = liveSession;
+    if (session && (session.socket.readyState === WebSocket.OPEN || session.socket.readyState === WebSocket.CONNECTING)) {
+      // Reject new data-plane requests immediately rather than waiting for the close event.
+      session.closed = true;
+      session.socket.close(code, reason);
     }
   };
 
   const forwardToEngine = (envelope: Record<string, unknown>): Promise<Record<string, unknown>> => {
-    const socket = liveSocket;
-    const sessionId = liveSessionId;
-    if (!socket || socket.readyState !== WebSocket.OPEN || !sessionId) {
-      return Promise.reject(new Error("no live session"));
+    const session = liveSession;
+    if (!session || session.socket.readyState !== WebSocket.OPEN || session.closed) {
+      return Promise.reject(new Error("no ready session"));
     }
     const requestId = envelope.requestId;
     if (typeof requestId !== "string" || !requestId) {
@@ -240,7 +290,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       return Promise.reject(new Error("too many pending rpcs"));
     }
 
-    const payload = { ...envelope, sessionId, type: "request", protocol: "reach-rpc", version: "1.0" };
+    const payload = { ...envelope, sessionId: session.sessionId, type: "request", protocol: "reach-rpc", version: "1.0" };
     seenRequestIds.add(requestId);
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -264,7 +314,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
           reject(new Error("message too large"));
           return;
         }
-        socket.send(text);
+        session.socket.send(text);
       } catch (error) {
         clearTimeout(timer);
         pendingRpcs.delete(requestId);
@@ -274,8 +324,102 @@ export function createGateway(options: GatewayOptions = {}): Server {
     });
   };
 
+  const openSession = () => {
+    if (liveSession) {
+      return { statusCode: 409 as const, payload: { error: "session already active" } };
+    }
+    sessionWanted = true;
+    pendingSession = undefined;
+    lastClosureReason = undefined;
+    return { statusCode: 200 as const, payload: { wanted: true, status: "wanted" } };
+  };
+
+  const requestClose = () => {
+    if (!sessionWanted && !liveSession) {
+      return { statusCode: 409 as const, payload: { error: "no session" } };
+    }
+    const session = liveSession;
+    if (session) {
+      session.closed = true;
+      sessionWanted = false;
+      try {
+        session.socket.send(JSON.stringify({
+          type: MESSAGE_CLOSE,
+          sessionId: session.sessionId,
+          reason: CLOSURE_AGENT_REQUESTED,
+        }));
+      } catch {
+        lastClosureReason = CLOSURE_DISCONNECTED;
+        closeLiveSession(1011, "session close delivery failed");
+        return { statusCode: 503 as const, payload: { error: "session close delivery failed" } };
+      }
+      logger("Reach session close requested");
+      return {
+        statusCode: 200 as const,
+        payload: { sessionId: session.sessionId, status: "closing", reason: CLOSURE_AGENT_REQUESTED },
+      };
+    }
+    sessionWanted = false;
+    pendingSession = undefined;
+    return { statusCode: 200 as const, payload: { status: "none" } };
+  };
+
+  const renewSession = () => {
+    const session = liveSession;
+    if (!session || !session.ready || session.closed || session.socket.readyState !== WebSocket.OPEN) {
+      return { statusCode: 409 as const, payload: { error: "no session" } };
+    }
+    // A renewal always re-bases on the present moment and is capped by the
+    // Gateway policy maximum (the lease length). It cannot extend the lease.
+    const leaseExpiresAt = now() + sessionLeaseMs;
+    session.leaseExpiresAt = leaseExpiresAt;
+    try {
+      session.socket.send(JSON.stringify({
+        type: MESSAGE_RENEW,
+        sessionId: session.sessionId,
+        leaseExpiresAt: isoDate(leaseExpiresAt),
+      }));
+    } catch {
+      lastClosureReason = CLOSURE_DISCONNECTED;
+      closeLiveSession(1011, "session renew delivery failed");
+      return { statusCode: 503 as const, payload: { error: "session renew delivery failed" } };
+    }
+    if (leaseTimer) clearTimeout(leaseTimer);
+    leaseTimer = setTimeout(sessionLimitReached, Math.max(0, leaseExpiresAt - now()));
+    resetIdleTimer?.();
+    logger("Reach session renewed");
+    return { statusCode: 200 as const, payload: { sessionId: session.sessionId, leaseExpiresAt: isoDate(leaseExpiresAt) } };
+  };
+
+  const sessionLimitReached = () => {
+    closeLiveSession(1008, "session limit exceeded");
+  };
+
+  const sessionStatus = () => {
+    const session = liveSession;
+    const status = session
+      ? session.closed
+        ? "closing"
+        : session.ready
+          ? "ready"
+          : "connecting"
+      : sessionWanted
+        ? pendingSession
+          ? "pending"
+          : "wanted"
+        : "none";
+    return {
+      wanted: sessionWanted,
+      status,
+      sessionId: session?.sessionId ?? pendingSession?.sessionId,
+      endpoint: pendingSession && !session ? SESSION_ENDPOINT_PATH : undefined,
+      leaseExpiresAt: (session ?? pendingSession) ? isoDate((session ?? pendingSession)!.leaseExpiresAt) : undefined,
+      closureReason: lastClosureReason,
+    };
+  };
+
   const gateway = createServer(async (request, response) => {
-    if (request.method !== "POST") {
+    if (request.method !== "POST" && request.url !== "/session/status") {
       sendJson(response, 404, { error: "not found" });
       return;
     }
@@ -288,33 +432,68 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
-      if (!sessionWanted || sessionLive) {
+      if (!sessionWanted || liveSession) {
         sendJson(response, 200, { intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS });
         return;
       }
 
       if (pendingSession && pendingSession.expiresAt <= now()) pendingSession = undefined;
-      pendingSession ??= { token: randomUUID(), expiresAt: now() + SESSION_TOKEN_TTL_MS, sessionId: randomUUID() };
-      const host = request.headers.host ?? "127.0.0.1";
+      pendingSession ??= {
+        token: randomUUID(),
+        expiresAt: now() + SESSION_TOKEN_TTL_MS,
+        sessionId: randomUUID(),
+        leaseExpiresAt: now() + sessionLeaseMs,
+      };
       sendJson(response, 200, {
         intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
-        wssUrl: `ws://${host}/session`,
+        endpoint: SESSION_ENDPOINT_PATH,
         token: pendingSession.token,
         sessionId: pendingSession.sessionId,
+        leaseExpiresAt: isoDate(pendingSession.leaseExpiresAt),
       });
       return;
     }
 
     if (request.url === "/session-wanted") {
+      let wanted: boolean;
       try {
-        sessionWanted = sessionWantedRequestSchema.parse(await readJsonBody(request)).wanted;
-        pendingSession = undefined;
+        wanted = sessionWantedRequestSchema.parse(await readJsonBody(request)).wanted;
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-wanted payload" });
         return;
       }
+      const result = wanted ? openSession() : requestClose();
+      sendJson(response, result.statusCode, result.payload);
+      return;
+    }
 
-      sendJson(response, 200, { wanted: sessionWanted });
+    if (request.url === "/session/open") {
+      try {
+        sessionOpenRequestSchema.parse(await readOptionalJsonBody(request));
+      } catch {
+        sendJson(response, 400, { error: "invalid session-open payload" });
+        return;
+      }
+      const result = openSession();
+      sendJson(response, result.statusCode, result.payload);
+      return;
+    }
+
+    if (request.url === "/session/renew") {
+      const result = renewSession();
+      sendJson(response, result.statusCode, result.payload);
+      return;
+    }
+
+    if (request.url === "/session/status") {
+      sendJson(response, 200, sessionStatus());
+      return;
+    }
+
+    if (request.url === "/session/close") {
+      // Accept an empty body; a body is not required.
+      const result = requestClose();
+      sendJson(response, result.statusCode, result.payload);
       return;
     }
 
@@ -342,8 +521,17 @@ export function createGateway(options: GatewayOptions = {}): Server {
     }
 
     if (request.url === "/session/rpc") {
-      if (!sessionLive || !liveSocket || !liveSessionId) {
+      const session = liveSession;
+      if (!session) {
         sendJson(response, 409, { error: "no live session" });
+        return;
+      }
+      if (!session.ready) {
+        sendJson(response, 409, { error: "no ready session" });
+        return;
+      }
+      if (session.closed) {
+        sendJson(response, 409, { error: "session closed" });
         return;
       }
 
@@ -358,10 +546,10 @@ export function createGateway(options: GatewayOptions = {}): Server {
       let envelope: ReturnType<typeof parseRequestEnvelope>;
       try {
         const candidate = typeof body === "object" && body !== null
-          ? { type: "request", protocol: "reach-rpc", version: "1.0", sessionId: liveSessionId, ...(body as Record<string, unknown>) }
+          ? { type: "request", protocol: "reach-rpc", version: "1.0", sessionId: session.sessionId, ...(body as Record<string, unknown>) }
           : body;
         envelope = parseRequestEnvelope(candidate);
-        if (envelope.sessionId !== liveSessionId) throw new ContractError();
+        if (envelope.sessionId !== session.sessionId) throw new ContractError();
       } catch {
         sendJson(response, 400, { type: "error", error: { code: "INVALID_PARAMS" } });
         return;
@@ -406,7 +594,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
         sendJson(response, 200, reply);
       } catch (error) {
         const message = error instanceof Error ? error.message : "session rpc failed";
-        const status = message === "no live session" || message === "duplicate requestId" ? 409 : 503;
+        const status = message === "no ready session" || message === "duplicate requestId" ? 409 : 503;
         sendJson(response, status, { error: message });
       }
       return;
@@ -420,17 +608,17 @@ export function createGateway(options: GatewayOptions = {}): Server {
     const token = url.searchParams.get("token");
     if (
       request.method !== "GET"
-      || url.pathname !== "/session"
+      || url.pathname !== SESSION_ENDPOINT_PATH
       || !pendingSession
       || pendingSession.expiresAt <= now()
       || token !== pendingSession.token
-      || sessionLive
+      || liveSession
     ) {
       rejectUpgrade(socket);
       return;
     }
 
-    const sessionId = pendingSession.sessionId;
+    const issued = pendingSession;
     // Consume credentials before upgrade, but do NOT mark the session live until
     // the WebSocket handshake succeeds. A failed handshake must not brick the gateway.
     pendingSession = undefined;
@@ -438,7 +626,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
 
     let upgraded = false;
     const failHandshake = () => {
-      if (upgraded || sessionLive) return;
+      if (upgraded || liveSession) return;
       logger("Reach session upgrade failed");
     };
     socket.once("close", failHandshake);
@@ -448,28 +636,35 @@ export function createGateway(options: GatewayOptions = {}): Server {
       upgraded = true;
       socket.off("close", failHandshake);
       socket.off("error", failHandshake);
-      sessionLive = true;
-      liveSocket = webSocket;
-      liveSessionId = sessionId;
+      liveSession = {
+        sessionId: issued.sessionId,
+        socket: webSocket,
+        ready: false,
+        closed: false,
+        leaseExpiresAt: issued.leaseExpiresAt,
+      };
       sessions.emit("connection", webSocket, request);
     });
   });
 
   sessions.on("connection", (webSocket: WebSocket) => {
-    const sessionId = liveSessionId;
-    if (!sessionId) {
+    const session = liveSession;
+    if (!session) {
       webSocket.close(1011, "missing session binding");
       return;
     }
     logger("Reach session connected");
     seenRequestIds.clear();
-    let jobCompleted = false;
-    const closeForLimit = () => webSocket.close(1008, "session limit exceeded");
-    const hardTimer = setTimeout(closeForLimit, sessionDurationMs);
-    let idleTimer = setTimeout(closeForLimit, sessionIdleMs);
+
+    const leakTimer = () => {
+      if (leaseTimer) clearTimeout(leaseTimer);
+      leaseTimer = setTimeout(sessionLimitReached, Math.max(0, session.leaseExpiresAt - now()));
+    };
+    leakTimer();
+    idleTimer = setTimeout(sessionLimitReached, sessionIdleMs);
     resetIdleTimer = () => {
-      clearTimeout(idleTimer);
-      idleTimer = setTimeout(closeForLimit, sessionIdleMs);
+      if (idleTimer) clearTimeout(idleTimer);
+      idleTimer = setTimeout(sessionLimitReached, sessionIdleMs);
     };
 
     webSocket.on("error", (error) => {
@@ -487,7 +682,6 @@ export function createGateway(options: GatewayOptions = {}): Server {
         webSocket.close(1009, "message too large");
         return;
       }
-      if (jobCompleted) return;
 
       let message: { type?: unknown; requestId?: unknown };
       try {
@@ -511,21 +705,78 @@ export function createGateway(options: GatewayOptions = {}): Server {
       // Model B: Engine-originated filesystem requests are not dispatched by Gateway.
       if (message.type === "request") return;
 
-      if (message.type !== "job.done") return;
+      if (message.type === MESSAGE_READY) {
+        try {
+          const ready = parseSessionReady(message);
+          if (ready.sessionId !== session.sessionId) {
+            webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
+            return;
+          }
+          session.ready = true;
+          logger("Reach session ready");
+        } catch {
+          webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
+        }
+        return;
+      }
 
-      jobCompleted = true;
-      logger("Reach session job done");
-      sessionWanted = false;
-      webSocket.close(1000, "job done");
+      if (message.type === MESSAGE_CLOSED) {
+        let reason: string;
+        try {
+          const closed = parseSessionClosed(message);
+          if (closed.sessionId !== session.sessionId) return;
+          reason = closed.reason;
+        } catch {
+          webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
+          return;
+        }
+        // The Engine closes the socket after `session.closed` per protocol; mark
+        // the session as draining so new data-plane requests are rejected now.
+        session.closed = true;
+        sessionWanted = false;
+        lastClosureReason = reason;
+        logger(`Reach session closed by engine: ${reason}`);
+        if (leaseTimer) clearTimeout(leaseTimer);
+        return;
+      }
+
+      if (message.type === "job.done") {
+        // Legacy short-job completion: translate to a session close.
+        session.closed = true;
+        sessionWanted = false;
+        lastClosureReason = CLOSURE_SESSION_COMPLETE;
+        logger("Reach session job done");
+        if (leaseTimer) clearTimeout(leaseTimer);
+        if (idleTimer) clearTimeout(idleTimer);
+        webSocket.close(1000, "job done");
+        return;
+      }
+
+      // Unknown or malformed control message.
+      webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
     });
 
-    webSocket.on("close", () => {
-      clearTimeout(hardTimer);
-      clearTimeout(idleTimer);
+    webSocket.on("close", (code: number) => {
+      if (leaseTimer) clearTimeout(leaseTimer);
+      if (idleTimer) clearTimeout(idleTimer);
       resetIdleTimer = undefined;
-      sessionLive = false;
-      liveSocket = undefined;
-      liveSessionId = undefined;
+      if (liveSession?.socket === webSocket) {
+        // If the Engine never reported a closure reason before the socket ended,
+        // classify the observed close: clean after an Agent close, a policy
+        // limit, an RPC timeout, or an unexpected disconnect.
+        if (lastClosureReason === undefined) {
+          if (code === 1000) {
+            lastClosureReason = session.closed ? CLOSURE_AGENT_REQUESTED : CLOSURE_DISCONNECTED;
+          } else if (code === 1008) {
+            lastClosureReason = "policy_limit";
+          } else if (code === 1011) {
+            lastClosureReason = "rpc_timeout";
+          } else {
+            lastClosureReason = CLOSURE_DISCONNECTED;
+          }
+        }
+        liveSession = undefined;
+      }
       seenRequestIds.clear();
       clearPendingRpcs("session closed");
       logger("Reach session closed");
@@ -533,4 +784,10 @@ export function createGateway(options: GatewayOptions = {}): Server {
   });
 
   return gateway;
+}
+
+async function readOptionalJsonBody(request: IncomingMessage): Promise<unknown> {
+  const length = Number(request.headers["content-length"] ?? 0);
+  if (length === 0) return {};
+  return readJsonBody(request);
 }

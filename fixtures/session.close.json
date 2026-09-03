@@ -1,0 +1,6 @@
+{
+  "type": "session.close",
+  "sessionId": "session-1",
+  "reason": "agent_requested",
+  "futureField": true
+}

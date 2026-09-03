@@ -1,0 +1,6 @@
+{
+  "type": "session.closed",
+  "sessionId": "session-1",
+  "reason": "lease_expired",
+  "futureField": true
+}

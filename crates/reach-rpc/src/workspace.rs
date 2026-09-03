@@ -1,7 +1,7 @@
 use crate::{
     FsEditParams, FsEditResult, FsEntry, FsEntryType, FsGlobParams, FsGlobResult, FsGrepMatch,
-    FsGrepParams, FsGrepResult, FsListParams, FsListResult, FsReadParams, FsReadResult, FsStatParams,
-    FsStatResult, FsWriteMode, FsWriteParams, FsWriteResult,
+    FsGrepParams, FsGrepResult, FsListParams, FsListResult, FsReadParams, FsReadResult,
+    FsStatParams, FsStatResult, FsWriteMode, FsWriteParams, FsWriteResult,
 };
 use regex::Regex;
 use serde::Serialize;
@@ -11,7 +11,7 @@ use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
 use std::sync::Mutex;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
 pub const REVISION_CONFLICT: &str = "REVISION_CONFLICT";
@@ -20,6 +20,7 @@ pub const OLD_STRING_NOT_UNIQUE: &str = "OLD_STRING_NOT_UNIQUE";
 pub const INVALID_CURSOR: &str = "INVALID_CURSOR";
 pub const WORKSPACE_ACCESS_DENIED: &str = "WORKSPACE_ACCESS_DENIED";
 pub const PERMISSION_DENIED: &str = "PERMISSION_DENIED";
+pub const DEADLINE_EXCEEDED: &str = "DEADLINE_EXCEEDED";
 pub const MAX_GLOB_RESULTS: usize = 10_000;
 pub const MAX_GREP_MATCHES: usize = 10_000;
 pub const MAX_GREP_BYTES: usize = 8 * 1024 * 1024;
@@ -92,11 +93,13 @@ impl WorkspaceFilesystem {
 
     pub fn read(&self, params: &FsReadParams) -> Result<FsReadResult, FilesystemError> {
         let file = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
-        let meta = fs::symlink_metadata(&file).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+        let meta =
+            fs::symlink_metadata(&file).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
         if meta.len() as usize > MAX_FILE_BYTES {
             return Err(FilesystemError::new("FILE_TOO_LARGE"));
         }
-        let content = fs::read_to_string(&file).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+        let content =
+            fs::read_to_string(&file).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
         let lines = split_lines(&content);
         let start = params.start_line.saturating_sub(1) as usize;
         let max = params.max_lines as usize;
@@ -120,8 +123,31 @@ impl WorkspaceFilesystem {
     }
 
     pub fn list(&mut self, params: &FsListParams) -> Result<FsListResult, FilesystemError> {
+        self.list_with_deadline(params, None)
+    }
+
+    /// List with a cooperative deadline for RPC execution. Existing callers
+    /// without an RPC deadline retain the stable `list` API above.
+    pub fn list_until(
+        &mut self,
+        params: &FsListParams,
+        deadline: Instant,
+    ) -> Result<FsListResult, FilesystemError> {
+        self.list_with_deadline(params, Some(deadline))
+    }
+
+    fn list_with_deadline(
+        &mut self,
+        params: &FsListParams,
+        deadline: Option<Instant>,
+    ) -> Result<FsListResult, FilesystemError> {
         let query = stable_query(params)?;
-        if let Some(page) = self.resume_page("fs.list", &query, params.cursor.as_deref(), params.max_entries as usize)? {
+        if let Some(page) = self.resume_page(
+            "fs.list",
+            &query,
+            params.cursor.as_deref(),
+            params.max_entries as usize,
+        )? {
             return match page {
                 PageResult::Entries(entries, cursor, truncated) => Ok(FsListResult {
                     entries,
@@ -134,12 +160,15 @@ impl WorkspaceFilesystem {
         let directory = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
         let mut entries = Vec::new();
         for entry in fs::read_dir(&directory).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))? {
+            ensure_before_deadline(deadline)?;
             let entry = entry.map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
             let name = entry.file_name().to_string_lossy().into_owned();
             if is_atomic_write_temp(&name) {
                 continue;
             }
-            let file_type = entry.file_type().map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+            let file_type = entry
+                .file_type()
+                .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
             let entry_type = if file_type.is_symlink() {
                 FsEntryType::Symlink
             } else if file_type.is_dir() {
@@ -154,8 +183,13 @@ impl WorkspaceFilesystem {
             });
         }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
-        let (items, cursor, truncated) =
-            self.start_page("fs.list", query, CursorField::Entries(entries), params.max_entries as usize, false)?;
+        let (items, cursor, truncated) = self.start_page(
+            "fs.list",
+            query,
+            CursorField::Entries(entries),
+            params.max_entries as usize,
+            false,
+        )?;
         match items {
             CursorField::Entries(entries) => Ok(FsListResult {
                 entries,
@@ -168,7 +202,8 @@ impl WorkspaceFilesystem {
 
     pub fn stat(&self, params: &FsStatParams) -> Result<FsStatResult, FilesystemError> {
         let entry = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
-        let meta = fs::symlink_metadata(&entry).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+        let meta =
+            fs::symlink_metadata(&entry).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
         let entry_type = if meta.file_type().is_symlink() {
             FsEntryType::Symlink
         } else if meta.is_dir() {
@@ -194,7 +229,10 @@ impl WorkspaceFilesystem {
     }
 
     pub fn write(&self, params: &FsWriteParams) -> Result<FsWriteResult, FilesystemError> {
-        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         if params.content.len() > MAX_FILE_BYTES {
             return Err(FilesystemError::new("FILE_TOO_LARGE"));
         }
@@ -223,7 +261,10 @@ impl WorkspaceFilesystem {
     }
 
     pub fn edit(&self, params: &FsEditParams) -> Result<FsEditResult, FilesystemError> {
-        let _guard = self.write_lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        let _guard = self
+            .write_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let root = self.root_for(&params.workspace)?;
         let current = self
             .read_mutation_content(root, &params.path)?
@@ -264,8 +305,30 @@ impl WorkspaceFilesystem {
     }
 
     pub fn glob(&mut self, params: &FsGlobParams) -> Result<FsGlobResult, FilesystemError> {
+        self.glob_with_deadline(params, None)
+    }
+
+    /// Glob with a cooperative deadline checked during recursive traversal.
+    pub fn glob_until(
+        &mut self,
+        params: &FsGlobParams,
+        deadline: Instant,
+    ) -> Result<FsGlobResult, FilesystemError> {
+        self.glob_with_deadline(params, Some(deadline))
+    }
+
+    fn glob_with_deadline(
+        &mut self,
+        params: &FsGlobParams,
+        deadline: Option<Instant>,
+    ) -> Result<FsGlobResult, FilesystemError> {
         let query = stable_query(params)?;
-        if let Some(page) = self.resume_page("fs.glob", &query, params.cursor.as_deref(), params.max_results as usize)? {
+        if let Some(page) = self.resume_page(
+            "fs.glob",
+            &query,
+            params.cursor.as_deref(),
+            params.max_results as usize,
+        )? {
             return match page {
                 PageResult::Matches(matches, cursor, truncated) => Ok(FsGlobResult {
                     matches: matches
@@ -286,7 +349,7 @@ impl WorkspaceFilesystem {
         };
         let mut matches = Vec::new();
         let mut truncated = false;
-        walk_file_entries(&root, &root, &ignored, &mut |file| {
+        walk_file_entries(&root, &root, &ignored, deadline, &mut |file| {
             if !glob_matches(&params.pattern, file) {
                 return Ok(WalkControl::Continue);
             }
@@ -301,8 +364,13 @@ impl WorkspaceFilesystem {
             .into_iter()
             .map(serde_json::Value::String)
             .collect::<Vec<_>>();
-        let (items, cursor, truncated) =
-            self.start_page("fs.glob", query, CursorField::Matches(values), params.max_results as usize, truncated)?;
+        let (items, cursor, truncated) = self.start_page(
+            "fs.glob",
+            query,
+            CursorField::Matches(values),
+            params.max_results as usize,
+            truncated,
+        )?;
         match items {
             CursorField::Matches(matches) => Ok(FsGlobResult {
                 matches: matches
@@ -317,8 +385,30 @@ impl WorkspaceFilesystem {
     }
 
     pub fn grep(&mut self, params: &FsGrepParams) -> Result<FsGrepResult, FilesystemError> {
+        self.grep_with_deadline(params, None)
+    }
+
+    /// Grep with a cooperative deadline checked during recursive traversal.
+    pub fn grep_until(
+        &mut self,
+        params: &FsGrepParams,
+        deadline: Instant,
+    ) -> Result<FsGrepResult, FilesystemError> {
+        self.grep_with_deadline(params, Some(deadline))
+    }
+
+    fn grep_with_deadline(
+        &mut self,
+        params: &FsGrepParams,
+        deadline: Option<Instant>,
+    ) -> Result<FsGrepResult, FilesystemError> {
         let query = stable_query(params)?;
-        if let Some(page) = self.resume_page("fs.grep", &query, params.cursor.as_deref(), params.max_matches as usize)? {
+        if let Some(page) = self.resume_page(
+            "fs.grep",
+            &query,
+            params.cursor.as_deref(),
+            params.max_matches as usize,
+        )? {
             return match page {
                 PageResult::Matches(matches, cursor, truncated) => Ok(FsGrepResult {
                     matches: matches
@@ -335,7 +425,7 @@ impl WorkspaceFilesystem {
         let mut scanned = 0usize;
         let mut truncated = false;
         let mut matches = Vec::new();
-        walk_file_entries(&root, &root, &[], &mut |path| {
+        walk_file_entries(&root, &root, &[], deadline, &mut |path| {
             if !params.include.is_empty()
                 && !params
                     .include
@@ -387,8 +477,13 @@ impl WorkspaceFilesystem {
             .iter()
             .filter_map(|item| serde_json::to_value(item).ok())
             .collect::<Vec<_>>();
-        let (items, cursor, truncated) =
-            self.start_page("fs.grep", query, CursorField::Matches(values), params.max_matches as usize, truncated)?;
+        let (items, cursor, truncated) = self.start_page(
+            "fs.grep",
+            query,
+            CursorField::Matches(values),
+            params.max_matches as usize,
+            truncated,
+        )?;
         match items {
             CursorField::Matches(matches) => Ok(FsGrepResult {
                 matches: matches
@@ -417,8 +512,13 @@ impl WorkspaceFilesystem {
         Ok(target)
     }
 
-    fn resolve_checked(&self, configured_root: &Path, input: &str) -> Result<PathBuf, FilesystemError> {
-        let real_root = fs::canonicalize(configured_root).unwrap_or_else(|_| configured_root.to_path_buf());
+    fn resolve_checked(
+        &self,
+        configured_root: &Path,
+        input: &str,
+    ) -> Result<PathBuf, FilesystemError> {
+        let real_root =
+            fs::canonicalize(configured_root).unwrap_or_else(|_| configured_root.to_path_buf());
         let target = join_resolved(&real_root, input);
         if !is_within(&real_root, &target) {
             return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
@@ -436,7 +536,11 @@ impl WorkspaceFilesystem {
         Ok(current)
     }
 
-    fn read_mutation_content(&self, root: &Path, input: &str) -> Result<Option<String>, FilesystemError> {
+    fn read_mutation_content(
+        &self,
+        root: &Path,
+        input: &str,
+    ) -> Result<Option<String>, FilesystemError> {
         // Never create parents on the read path: it runs before the existence /
         // revision / FILE_EXISTS checks, so a failed write or edit must not
         // mutate the tree. A missing parent means the target cannot exist.
@@ -521,13 +625,29 @@ impl WorkspaceFilesystem {
                 let values = items[index.min(items.len())..end.min(items.len())].to_vec();
                 let next = index + values.len();
                 let more = next < items.len();
-                (PageResult::Entries(values, more.then(|| cursor.to_owned()), base_truncated || more), next, more)
+                (
+                    PageResult::Entries(
+                        values,
+                        more.then(|| cursor.to_owned()),
+                        base_truncated || more,
+                    ),
+                    next,
+                    more,
+                )
             }
             CursorField::Matches(items) => {
                 let values = items[index.min(items.len())..end.min(items.len())].to_vec();
                 let next = index + values.len();
                 let more = next < items.len();
-                (PageResult::Matches(values, more.then(|| cursor.to_owned()), base_truncated || more), next, more)
+                (
+                    PageResult::Matches(
+                        values,
+                        more.then(|| cursor.to_owned()),
+                        base_truncated || more,
+                    ),
+                    next,
+                    more,
+                )
             }
         };
         let (page, next, more) = result;
@@ -591,7 +711,10 @@ fn revision_bytes(content: &[u8]) -> String {
 }
 
 fn split_lines(content: &str) -> Vec<String> {
-    let mut lines: Vec<String> = content.split('\n').map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned()).collect();
+    let mut lines: Vec<String> = content
+        .split('\n')
+        .map(|line| line.strip_suffix('\r').unwrap_or(line).to_owned())
+        .collect();
     if content.ends_with('\n') || content.ends_with("\r\n") {
         if lines.last().is_some_and(String::is_empty) {
             lines.pop();
@@ -634,11 +757,7 @@ fn denied() -> FilesystemError {
 fn is_safe_component(name: &str) -> bool {
     // On unix a backslash is a legal filename byte, not a separator; only '/'
     // (and NUL, which the OS cannot address) are rejected.
-    !name.is_empty()
-        && name != "."
-        && name != ".."
-        && !name.contains('/')
-        && !name.contains('\0')
+    !name.is_empty() && name != "." && name != ".." && !name.contains('/') && !name.contains('\0')
 }
 
 /// A file descriptor pinned to a validated workspace directory. On unix it is
@@ -686,17 +805,15 @@ fn open_verified_parent(
             Err(err) if err == rustix::io::Errno::NOENT && !create_missing => return Ok(None),
             Err(err) if err == rustix::io::Errno::NOENT => {
                 match mkdirat(&parent, part.as_str(), Mode::from_raw_mode(0o755)) {
-                    Ok(()) => openat(&parent, part.as_str(), dir_flags, Mode::empty()).map_err(|_| denied())?,
+                    Ok(()) => openat(&parent, part.as_str(), dir_flags, Mode::empty())
+                        .map_err(|_| denied())?,
                     // Another actor created this directory between the failed
                     // openat and mkdirat; re-open it. NOFOLLOW re-validates it
                     // against a symlink swap during that window.
-                    Err(create_err) if create_err == rustix::io::Errno::EXIST => openat(
-                        &parent,
-                        part.as_str(),
-                        dir_flags,
-                        Mode::empty(),
-                    )
-                    .map_err(|_| denied())?,
+                    Err(create_err) if create_err == rustix::io::Errno::EXIST => {
+                        openat(&parent, part.as_str(), dir_flags, Mode::empty())
+                            .map_err(|_| denied())?
+                    }
                     Err(_) => return Err(denied()),
                 }
             }
@@ -869,10 +986,12 @@ fn pathdiff(root: &Path, target: &Path) -> Vec<String> {
         .strip_prefix(root)
         .into_iter()
         .flat_map(|relative| {
-            relative.components().filter_map(|component| match component {
-                Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
-                _ => None,
-            })
+            relative
+                .components()
+                .filter_map(|component| match component {
+                    Component::Normal(part) => Some(part.to_string_lossy().into_owned()),
+                    _ => None,
+                })
         })
         .collect()
 }
@@ -921,14 +1040,17 @@ fn walk_file_entries(
     root: &Path,
     current: &Path,
     ignored: &[String],
+    deadline: Option<Instant>,
     on_file: &mut dyn FnMut(&str) -> Result<WalkControl, FilesystemError>,
 ) -> Result<WalkControl, FilesystemError> {
+    ensure_before_deadline(deadline)?;
     let mut entries = fs::read_dir(current)
         .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
     entries.sort_by_key(|entry| entry.file_name());
     for entry in entries {
+        ensure_before_deadline(deadline)?;
         let file_type = entry
             .file_type()
             .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
@@ -946,12 +1068,15 @@ fn walk_file_entries(
             .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?
             .to_string_lossy()
             .replace('\\', "/");
-        if ignored.iter().any(|pattern| gitignore_matches(pattern, &relative)) {
+        if ignored
+            .iter()
+            .any(|pattern| gitignore_matches(pattern, &relative))
+        {
             continue;
         }
         if file_type.is_dir() {
             if matches!(
-                walk_file_entries(root, &absolute, ignored, on_file)?,
+                walk_file_entries(root, &absolute, ignored, deadline, on_file)?,
                 WalkControl::Stop
             ) {
                 return Ok(WalkControl::Stop);
@@ -964,6 +1089,14 @@ fn walk_file_entries(
         }
     }
     Ok(WalkControl::Continue)
+}
+
+fn ensure_before_deadline(deadline: Option<Instant>) -> Result<(), FilesystemError> {
+    if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
+        Err(FilesystemError::new(DEADLINE_EXCEEDED))
+    } else {
+        Ok(())
+    }
 }
 
 fn is_atomic_write_temp(name: &str) -> bool {
@@ -1054,7 +1187,11 @@ mod tests {
         fs::create_dir(dir.path().join("nested")).unwrap();
         fs::write(dir.path().join("lines.txt"), "one\ntwo\nthree\n").unwrap();
         fs::write(dir.path().join("edit.txt"), "repeat repeat").unwrap();
-        fs::write(dir.path().join("nested").join("needle.txt"), "needle\nother\n").unwrap();
+        fs::write(
+            dir.path().join("nested").join("needle.txt"),
+            "needle\nother\n",
+        )
+        .unwrap();
         fs::write(dir.path().join(".gitignore"), "*.ignored\n").unwrap();
         fs::write(dir.path().join("hidden.ignored"), "needle").unwrap();
         let mut roots = HashMap::new();
@@ -1479,6 +1616,44 @@ mod tests {
                 .unwrap_err()
                 .code,
             WORKSPACE_ACCESS_DENIED
+        );
+    }
+
+    #[test]
+    fn cooperative_deadlines_stop_directory_operations_before_work() {
+        let (_dir, mut workspace) = fixture();
+        let expired = Instant::now();
+        assert_eq!(
+            workspace
+                .list_until(
+                    &FsListParams {
+                        workspace: "fixture".into(),
+                        path: ".".into(),
+                        max_entries: 10,
+                        cursor: None,
+                    },
+                    expired,
+                )
+                .unwrap_err()
+                .code,
+            DEADLINE_EXCEEDED
+        );
+        assert_eq!(
+            workspace
+                .glob_until(
+                    &FsGlobParams {
+                        workspace: "fixture".into(),
+                        pattern: "*".into(),
+                        path: ".".into(),
+                        max_results: 10,
+                        respect_gitignore: true,
+                        cursor: None,
+                    },
+                    Instant::now(),
+                )
+                .unwrap_err()
+                .code,
+            DEADLINE_EXCEEDED
         );
     }
 }

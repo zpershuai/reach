@@ -15,8 +15,13 @@ import {
   parseFsListParams,
   parseFsStatParams,
   parseFsWriteParams,
+  parseSessionMessage,
   serializeRequest,
   serializeResult,
+  serializeSessionMessage,
+  type SessionReady,
+  PROTOCOL,
+  VERSION,
 } from "./index.js";
 import {
   FilesystemError,
@@ -122,6 +127,65 @@ test("rejects invalid Round 4 filesystem parameters", () => {
   ]) {
     assert.throws(input, (error: unknown) => error instanceof ContractError && error.code === INVALID_PARAMS);
   }
+});
+
+test("parses the shared session control fixtures", () => {
+  const ready = parseSessionMessage(JSON.parse(
+    readFileSync(new URL("../../../fixtures/session.ready.json", import.meta.url), "utf8"),
+  ));
+  assert.equal(ready.type, "session.ready");
+  assert.equal("engineId" in ready && ready.engineId, "reach-engine");
+  assert.ok(Array.isArray("methods" in ready && ready.methods) && ready.methods.includes("fs.read"));
+  // Unknown fields are stripped, matching the data-plane contract.
+  assert.equal("futureField" in ready, false);
+
+  const renew = parseSessionMessage(JSON.parse(
+    readFileSync(new URL("../../../fixtures/session.renew.json", import.meta.url), "utf8"),
+  ));
+  assert.equal(renew.type, "session.renew");
+  assert.equal("leaseExpiresAt" in renew && renew.leaseExpiresAt, "2026-09-03T12:00:00Z");
+
+  const close = parseSessionMessage(JSON.parse(
+    readFileSync(new URL("../../../fixtures/session.close.json", import.meta.url), "utf8"),
+  ));
+  assert.equal(close.type, "session.close");
+  assert.equal("reason" in close && close.reason, "agent_requested");
+
+  const closed = parseSessionMessage(JSON.parse(
+    readFileSync(new URL("../../../fixtures/session.closed.json", import.meta.url), "utf8"),
+  ));
+  assert.equal(closed.type, "session.closed");
+  assert.equal("reason" in closed && closed.reason, "lease_expired");
+});
+
+test("rejects malformed session control messages", () => {
+  const throws = (input: unknown) => assert.throws(
+    () => parseSessionMessage(input),
+    (error: unknown) => error instanceof ContractError && error.code === INVALID_PARAMS,
+  );
+  throws({ type: "session.renew", sessionId: "s", leaseExpiresAt: "yesterday" });
+  throws({ type: "session.renew", sessionId: "s" });
+  throws({ type: "session.close", sessionId: "s", reason: "" });
+  throws({ type: "session.closed", sessionId: "s", reason: "" });
+  throws({ type: "session.frobnicate", sessionId: "s" });
+  throws({ type: "request", protocol: "reach-rpc", version: "1.0", sessionId: "s", requestId: "r", method: "fs.read", params: {} });
+});
+
+test("session control messages round-trip with a discriminated type", () => {
+  const ready: SessionReady = {
+    type: "session.ready",
+    protocol: PROTOCOL,
+    version: VERSION,
+    sessionId: "s",
+    engineId: "engine",
+    workspaces: ["default"],
+    methods: ["fs.read"],
+  };
+  const text = serializeSessionMessage(ready);
+  assert.ok(text.includes('"type":"session.ready"'));
+  assert.ok(text.includes('"sessionId":"s"'));
+  const parsed = parseSessionMessage(JSON.parse(text));
+  assert.equal(parsed.type, "session.ready");
 });
 
 async function fixtureWorkspace(): Promise<{ root: string; workspace: WorkspaceFilesystem }> {

@@ -1,0 +1,6 @@
+{
+  "type": "session.renew",
+  "sessionId": "session-1",
+  "leaseExpiresAt": "2026-09-03T12:00:00Z",
+  "futureField": true
+}

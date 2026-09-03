@@ -13,5 +13,8 @@ fn main() {
         eprintln!("failed to parse {fixture}: {error}");
         process::exit(1);
     });
-    println!("{}", serialize_request(&request).expect("validated request serializes"));
+    println!(
+        "{}",
+        serialize_request(&request).expect("validated request serializes")
+    );
 }
