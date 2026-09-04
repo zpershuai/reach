@@ -8,7 +8,7 @@ use crate::{
     parse_fs_edit_params, FsEditParams,
 };
 
-use super::{check_deadline, parse_params, to_value, workspace_error};
+use super::{check_deadline, deadline, parse_params, to_value, workspace_error};
 
 pub struct FsEditTool {
     descriptor: ToolDescriptor,
@@ -35,7 +35,7 @@ impl Tool for FsEditTool {
         let params: FsEditParams = parse_params(context.params, parse_fs_edit_params)?;
         let result = context
             .workspace
-            .edit(&params)
+            .edit_until(&params, deadline(context))
             .map_err(|error| workspace_error(&error))?;
         to_value(result)
     }

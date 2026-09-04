@@ -29,7 +29,11 @@ fn main() {
     }
 
     let workspace = WorkspaceFilesystem::new(config.workspace_roots.clone());
-    let heartbeat = LocalHttpHeartbeatTransport::new(config.gateway.clone(), &config.engine_id);
+    let heartbeat = LocalHttpHeartbeatTransport::new(
+        config.gateway.clone(),
+        &config.engine_id,
+        config.timeouts.connection_timeout,
+    );
     let registry = default_registry();
     let mut runtime = EngineRuntime::new(
         config.clone(),

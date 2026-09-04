@@ -6,7 +6,7 @@
 use std::{
     io::{Read, Write},
     net::{SocketAddr, TcpStream, ToSocketAddrs},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use tungstenite::{
@@ -155,6 +155,46 @@ impl HeartbeatResponse {
     }
 }
 
+/// Upper bound on a single heartbeat HTTP response (status line, headers, and
+/// JSON body). The Gateway's own accept limit is 64 KiB; a larger response is
+/// treated as hostile rather than buffered without bound.
+const MAX_HEARTBEAT_RESPONSE_BYTES: usize = 64 * 1024;
+
+/// Resolve a host/port pair into candidate socket addresses, tolerating a
+/// bracketed IPv6 literal (`[::1]`). An empty resolution is an error.
+fn resolve_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+    let bare = host
+        .strip_prefix('[')
+        .and_then(|host| host.strip_suffix(']'))
+        .unwrap_or(host);
+    (bare, port)
+        .to_socket_addrs()
+        .map(|addrs| addrs.collect())
+        .map_err(|error| format!("cannot resolve host {host}: {error}"))
+}
+
+/// Open a TCP stream to the first reachable candidate address, bounded overall
+/// by `timeout`. The budget is shared across every address, so a slow or
+/// black-holed first address cannot starve the remaining candidates; a host
+/// that resolves to both `::1` and `127.0.0.1` connects whichever listens.
+fn connect_try_all(addresses: &[SocketAddr], timeout: Duration) -> Result<TcpStream, String> {
+    let deadline = Instant::now() + timeout;
+    let mut last_error: Option<std::io::Error> = None;
+    for address in addresses {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        match TcpStream::connect_timeout(address, remaining) {
+            Ok(stream) => return Ok(stream),
+            Err(error) => last_error = Some(error),
+        }
+    }
+    Err(last_error
+        .map(|error| error.to_string())
+        .unwrap_or_else(|| "no address resolved".to_owned()))
+}
+
 use serde::Deserialize;
 
 /// Concrete heartbeat adapter that POSTs raw JSON HTTP to the configured
@@ -163,27 +203,46 @@ use serde::Deserialize;
 pub struct LocalHttpHeartbeatTransport {
     config: GatewayConfig,
     device_id: String,
+    /// Upper bound on connect, write, and the whole response read of one
+    /// heartbeat. A stalled or hostile Gateway cannot park the resident Engine
+    /// on a single heartbeat.
+    io_timeout: Duration,
 }
 
 impl LocalHttpHeartbeatTransport {
-    pub fn new(config: GatewayConfig, device_id: &str) -> LocalHttpHeartbeatTransport {
+    pub fn new(
+        config: GatewayConfig,
+        device_id: &str,
+        io_timeout: Duration,
+    ) -> LocalHttpHeartbeatTransport {
         LocalHttpHeartbeatTransport {
             config,
             device_id: device_id.to_owned(),
+            io_timeout,
         }
     }
 }
 
 impl HeartbeatTransport for LocalHttpHeartbeatTransport {
     fn heartbeat(&mut self) -> Result<HeartbeatOutcome, String> {
-        let authority = self.config.origin.authority();
+        let origin = &self.config.origin;
+        let authority = origin.authority();
         let request_body = format!(
             r#"{{"device":{{"id":"{}","platform":"rust"}}}}"#,
             self.device_id
         );
         let path = &self.config.heartbeat_path;
-        let mut stream = TcpStream::connect(authority.as_str())
+        // Bound every phase of the round trip: resolve, connect (trying each
+        // address within one shared budget), write, and read.
+        let addresses = resolve_addresses(&origin.host, origin.port)?;
+        let mut stream = connect_try_all(&addresses, self.io_timeout)
             .map_err(|error| format!("heartbeat connect failed: {error}"))?;
+        stream
+            .set_write_timeout(Some(self.io_timeout))
+            .map_err(|error| format!("heartbeat write timeout setup failed: {error}"))?;
+        stream
+            .set_read_timeout(Some(self.io_timeout))
+            .map_err(|error| format!("heartbeat read timeout setup failed: {error}"))?;
         write!(
             stream,
             "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{request_body}",
@@ -192,10 +251,26 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
         .map_err(|error| format!("heartbeat write failed: {error}"))?;
         stream.shutdown(std::net::Shutdown::Write).ok();
 
-        let mut response = String::new();
-        stream
-            .read_to_string(&mut response)
-            .map_err(|error| format!("heartbeat read failed: {error}"))?;
+        let mut response = Vec::new();
+        let mut buffer = [0u8; 4096];
+        loop {
+            match stream.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(read) => {
+                    response.extend_from_slice(&buffer[..read]);
+                    if response.len() > MAX_HEARTBEAT_RESPONSE_BYTES {
+                        return Err(
+                            "gateway heartbeat response exceeded the size limit".to_owned()
+                        );
+                    }
+                }
+                // The read timeout bounds a Gateway that accepts but never
+                // responds; the size cap bounds one that streams forever.
+                Err(error) => return Err(format!("heartbeat read failed: {error}")),
+            }
+        }
+        let response = String::from_utf8(response)
+            .map_err(|_| "gateway heartbeat response was not UTF-8".to_owned())?;
         let (headers, body) = response
             .split_once("\r\n\r\n")
             .ok_or("gateway returned a malformed HTTP response")?;
@@ -301,16 +376,13 @@ impl SessionTransportFactory for LocalWebSocketSessionTransportFactory {
         connection_timeout: Duration,
     ) -> Result<Box<dyn SessionTransport>, String> {
         let origin = Origin::parse_ws_endpoint(url)?;
-        let addresses: Vec<SocketAddr> = (origin.host.as_str(), origin.port)
-            .to_socket_addrs()
-            .map_err(|error| format!("cannot resolve session host {}: {error}", origin.host))?
-            .collect();
-        let address = addresses
-            .first()
-            .ok_or_else(|| format!("no address resolved for session host {}", origin.host))?;
-        let stream = TcpStream::connect_timeout(address, connection_timeout).map_err(|error| {
+        // Try every resolved address within the one connection budget, so the
+        // session connect agrees with the heartbeat on dual-stack hosts where
+        // `localhost` resolves to both `::1` and `127.0.0.1`.
+        let addresses = resolve_addresses(&origin.host, origin.port)?;
+        let stream = connect_try_all(&addresses, connection_timeout).map_err(|error| {
             format!(
-                "session connect to {} timed out or failed: {error}",
+                "session connect to {} failed: {error}",
                 origin.authority()
             )
         })?;
@@ -342,6 +414,9 @@ impl SessionTransportFactory for LocalWebSocketSessionTransportFactory {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::runtime::config::GatewayConfig;
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
 
     #[test]
     fn rfc3339_round_trips_epoch_millis() {
@@ -389,5 +464,102 @@ mod tests {
             partial.to_outcome().unwrap(),
             HeartbeatOutcome::Idle { .. }
         ));
+    }
+
+    /// A heartbeat transport pointed at a live loopback listener.
+    fn heartbeat_transport(config: GatewayConfig, io_timeout: Duration) -> LocalHttpHeartbeatTransport {
+        LocalHttpHeartbeatTransport::new(config, "test-device", io_timeout)
+    }
+
+    fn loopback_gateway_config(address: std::net::SocketAddr) -> GatewayConfig {
+        GatewayConfig::new(&format!("http://{address}")).expect("loopback URL parses")
+    }
+
+    #[test]
+    fn connect_tries_every_address_within_the_budget() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let live = listener.local_addr().unwrap();
+        // A freed loopback port refuses connections: bind and drop.
+        let refused = {
+            let probe = TcpListener::bind("127.0.0.1:0").unwrap();
+            probe.local_addr().unwrap()
+        };
+        // The first address is refused; the connect must fall through to the
+        // listening address instead of giving up.
+        let stream = connect_try_all(&[refused, live], Duration::from_secs(2)).unwrap();
+        assert_eq!(stream.peer_addr().unwrap(), live);
+
+        // A zero budget fails fast and reports an error rather than waiting.
+        assert!(connect_try_all(&[live], Duration::ZERO).is_err());
+    }
+
+    #[test]
+    fn heartbeat_succeeds_against_a_local_gateway() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Drain the request to EOF (the client sends Connection: close) so
+            // closing with unread data does not RST the response back.
+            std::io::copy(&mut stream, &mut std::io::sink()).ok();
+            let body = r#"{"intervalSeconds":30}"#;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let mut transport =
+            heartbeat_transport(loopback_gateway_config(address), Duration::from_secs(2));
+        match transport.heartbeat().unwrap() {
+            HeartbeatOutcome::Idle { interval } => {
+                assert_eq!(interval, Duration::from_secs(30))
+            }
+            other => panic!("expected an idle interval, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn heartbeat_times_out_when_gateway_never_responds() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Accept the connection but hold it open without replying; the read
+        // timeout must bound the heartbeat instead of hanging the engine.
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            std::thread::sleep(Duration::from_secs(5));
+        });
+        let mut transport = heartbeat_transport(
+            loopback_gateway_config(address),
+            Duration::from_millis(200),
+        );
+        let started = Instant::now();
+        assert!(transport.heartbeat().is_err());
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "heartbeat did not honor its I/O timeout"
+        );
+    }
+
+    #[test]
+    fn heartbeat_rejects_an_oversized_response() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = listener.local_addr().unwrap();
+        // Stream more bytes than the cap; the client must stop buffering and
+        // fail instead of growing memory without bound.
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut request = [0u8; 4096];
+            let _ = stream.read(&mut request);
+            let junk = "x".repeat(MAX_HEARTBEAT_RESPONSE_BYTES + 1);
+            stream.write_all(junk.as_bytes()).unwrap();
+            std::thread::sleep(Duration::from_secs(1));
+        });
+        let mut transport =
+            heartbeat_transport(loopback_gateway_config(address), Duration::from_secs(2));
+        let error = transport.heartbeat().unwrap_err();
+        assert!(error.contains("size limit"), "{error}");
     }
 }

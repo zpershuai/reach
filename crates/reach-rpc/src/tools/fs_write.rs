@@ -8,7 +8,7 @@ use crate::{
     parse_fs_write_params, FsWriteParams,
 };
 
-use super::{check_deadline, parse_params, to_value, workspace_error};
+use super::{check_deadline, deadline, parse_params, to_value, workspace_error};
 
 pub struct FsWriteTool {
     descriptor: ToolDescriptor,
@@ -38,7 +38,7 @@ impl Tool for FsWriteTool {
         let params: FsWriteParams = parse_params(context.params, parse_fs_write_params)?;
         let result = context
             .workspace
-            .write(&params)
+            .write_until(&params, deadline(context))
             .map_err(|error| workspace_error(&error))?;
         to_value(result)
     }

@@ -229,10 +229,32 @@ impl WorkspaceFilesystem {
     }
 
     pub fn write(&self, params: &FsWriteParams) -> Result<FsWriteResult, FilesystemError> {
+        self.write_with_deadline(params, None)
+    }
+
+    /// Write with a cooperative deadline for RPC execution. The deadline is
+    /// checked at entry and again immediately before the atomic mutation
+    /// boundary, so an over-deadline write fails with `DEADLINE_EXCEEDED`
+    /// without creating parents or touching the tree. A mutation that has
+    /// already begun at the boundary may complete (cancellation boundary).
+    pub fn write_until(
+        &self,
+        params: &FsWriteParams,
+        deadline: Instant,
+    ) -> Result<FsWriteResult, FilesystemError> {
+        self.write_with_deadline(params, Some(deadline))
+    }
+
+    fn write_with_deadline(
+        &self,
+        params: &FsWriteParams,
+        deadline: Option<Instant>,
+    ) -> Result<FsWriteResult, FilesystemError> {
         let _guard = self
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ensure_before_deadline(deadline)?;
         if params.content.len() > MAX_FILE_BYTES {
             return Err(FilesystemError::new("FILE_TOO_LARGE"));
         }
@@ -252,6 +274,10 @@ impl WorkspaceFilesystem {
                 return Err(FilesystemError::new(REVISION_CONFLICT));
             }
         }
+        // Last gate before the mutation boundary: validation (path resolution,
+        // current-content read, revision hashing) may have run past the
+        // deadline, but the write must not begin afterwards.
+        ensure_before_deadline(deadline)?;
         self.atomic_write(root, &params.path, &params.content)?;
         Ok(FsWriteResult {
             path: params.path.clone(),
@@ -261,10 +287,28 @@ impl WorkspaceFilesystem {
     }
 
     pub fn edit(&self, params: &FsEditParams) -> Result<FsEditResult, FilesystemError> {
+        self.edit_with_deadline(params, None)
+    }
+
+    /// Edit with a cooperative deadline; see `write_until`.
+    pub fn edit_until(
+        &self,
+        params: &FsEditParams,
+        deadline: Instant,
+    ) -> Result<FsEditResult, FilesystemError> {
+        self.edit_with_deadline(params, Some(deadline))
+    }
+
+    fn edit_with_deadline(
+        &self,
+        params: &FsEditParams,
+        deadline: Option<Instant>,
+    ) -> Result<FsEditResult, FilesystemError> {
         let _guard = self
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
+        ensure_before_deadline(deadline)?;
         let root = self.root_for(&params.workspace)?;
         let current = self
             .read_mutation_content(root, &params.path)?
@@ -292,6 +336,8 @@ impl WorkspaceFilesystem {
         if content.len() > MAX_FILE_BYTES {
             return Err(FilesystemError::new("FILE_TOO_LARGE"));
         }
+        // Last gate before the mutation boundary (see `write_with_deadline`).
+        ensure_before_deadline(deadline)?;
         self.atomic_write(root, &params.path, &content)?;
         Ok(FsEditResult {
             path: params.path.clone(),
@@ -1654,6 +1700,71 @@ mod tests {
                 .unwrap_err()
                 .code,
             DEADLINE_EXCEEDED
+        );
+    }
+
+    #[test]
+    fn over_deadline_mutations_do_not_touch_the_tree() {
+        let (dir, workspace) = fixture();
+        let expired = Instant::now();
+        // A write whose deadline already elapsed must not create the file or
+        // its parent directories, even though validation would otherwise have
+        // created them.
+        assert_eq!(
+            workspace
+                .write_until(
+                    &FsWriteParams {
+                        workspace: "fixture".into(),
+                        path: "deferred/write.txt".into(),
+                        content: "x".into(),
+                        mode: FsWriteMode::Create,
+                        if_match: None,
+                    },
+                    expired,
+                )
+                .unwrap_err()
+                .code,
+            DEADLINE_EXCEEDED
+        );
+        assert!(!dir.path().join("deferred").exists());
+
+        // Same guarantee for fs.edit: no file is created or modified.
+        assert_eq!(
+            workspace
+                .edit_until(
+                    &FsEditParams {
+                        workspace: "fixture".into(),
+                        path: "deferred/edit.txt".into(),
+                        old_string: "a".into(),
+                        new_string: "b".into(),
+                        replace_all: false,
+                        if_match: None,
+                    },
+                    expired,
+                )
+                .unwrap_err()
+                .code,
+            DEADLINE_EXCEEDED
+        );
+        assert!(!dir.path().join("deferred").exists());
+
+        // A deadline still in the future allows the same write through.
+        let written = workspace
+            .write_until(
+                &FsWriteParams {
+                    workspace: "fixture".into(),
+                    path: "timely/write.txt".into(),
+                    content: "y".into(),
+                    mode: FsWriteMode::Create,
+                    if_match: None,
+                },
+                Instant::now() + std::time::Duration::from_secs(60),
+            )
+            .unwrap();
+        assert_eq!(written.bytes_written, 1);
+        assert_eq!(
+            fs::read_to_string(dir.path().join("timely/write.txt")).unwrap(),
+            "y"
         );
     }
 }

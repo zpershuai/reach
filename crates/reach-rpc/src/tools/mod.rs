@@ -197,6 +197,28 @@ mod tests {
     }
 
     #[test]
+    fn write_tool_refuses_to_mutate_after_its_deadline() {
+        // The write Tool threads its context deadline into the workspace
+        // mutation boundary: an already-expired deadline must fail with
+        // DEADLINE_EXCEEDED and leave no side effect on disk.
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = workspace(dir.path());
+        let params = json!({
+            "workspace": "fixture", "path": "note.txt", "content": "x", "mode": "create"
+        });
+        let mut context = InvocationContext {
+            params: &params,
+            workspace: &mut workspace,
+            deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
+            write_claimed: true,
+            session_id: "session-1",
+        };
+        let error = FsWriteTool::new().execute(&mut context).unwrap_err();
+        assert_eq!(error.code, crate::workspace::DEADLINE_EXCEEDED);
+        assert!(!dir.path().join("note.txt").exists());
+    }
+
+    #[test]
     fn default_registry_exposes_all_canonical_methods() {
         let registry = default_registry();
         let methods = registry.methods();

@@ -41,6 +41,14 @@ export const SESSION_ENDPOINT_PATH = "/session";
  * wiped by the session close that the timeout itself triggers.
  */
 const MAX_TIMED_OUT_REQUEST_IDS = 4096;
+/**
+ * Upper bound on request IDs remembered for dedup within one live connection.
+ * `seenRequestIds` is keyed to a single WebSocket and survives renewals, so a
+ * caller streaming unique IDs across an 8-hour session could otherwise grow it
+ * without bound. Oldest entries are evicted once the cap is hit; the Engine's
+ * `SessionContext` dedup window is sized identically so the two stay in step.
+ */
+const MAX_SEEN_REQUEST_IDS = 65_536;
 
 const heartbeatRequestSchema = z.object({
   device: z.record(z.unknown()),
@@ -249,6 +257,13 @@ export function createGateway(options: GatewayOptions = {}): Server {
       if (oldest !== undefined) timedOutRequestIds.delete(oldest);
     }
   };
+  const noteSeenRequest = (requestId: string) => {
+    seenRequestIds.add(requestId);
+    if (seenRequestIds.size > MAX_SEEN_REQUEST_IDS) {
+      const oldest = seenRequestIds.values().next().value;
+      if (oldest !== undefined) seenRequestIds.delete(oldest);
+    }
+  };
   const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
   const now = options.now ?? Date.now;
@@ -291,7 +306,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     }
 
     const payload = { ...envelope, sessionId: session.sessionId, type: "request", protocol: "reach-rpc", version: "1.0" };
-    seenRequestIds.add(requestId);
+    noteSeenRequest(requestId);
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingRpcs.delete(requestId);
