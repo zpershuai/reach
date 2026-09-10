@@ -16,5 +16,5 @@
 
 ## 4. End-to-end verification
 
-- [ ] 4.1 Add an automated stdio client proof that receives `notifications/tools/list_changed`, re-fetches `tools/list`, and sees the expanded selected-device set; verify it runs in the connector package test command.
+- [x] 4.1 Add an automated stdio client proof that receives `notifications/tools/list_changed`, re-fetches `tools/list`, and sees the expanded selected-device set; verify it runs in the connector package test command.
 - [ ] 4.2 Run `cargo test -p reach-rpc`, `npm --prefix packages/reach-rpc test`, and the connector build/test commands with `/home/box/.cargo/bin` on PATH; verify all commands are green.

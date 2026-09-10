@@ -9,6 +9,6 @@
   "scripts": {
     "build": "../reach-rpc/node_modules/.bin/tsc --project tsconfig.json",
     "start": "node dist/main.js",
-    "test": "npm run build && node --test dist/test.js"
+    "test": "npm run build && node --test dist/test.js dist/stdio-proof.js"
   }
 }
