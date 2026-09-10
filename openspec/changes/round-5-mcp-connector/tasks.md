@@ -12,7 +12,7 @@
 
 - [x] 3.1 Implement selected-device `fs.read`, `fs.list`, `fs.glob`, `fs.stat`, `fs.grep`, and `session.close` through Gateway RPC, lifecycle, and conservative renewal calls; verify mock-Gateway request mapping tests pass.
 - [x] 3.2 Implement `fs.write` and `fs.edit` with Gateway-issued grants and forwarded permission identifiers; verify mutation tests reject fabricated grants and accept issued ones.
-- [ ] 3.3 Ship the `REACH_MCP_TOOL_MODE=static` Path 1 surface with required `deviceId` parameters and document its use when a host ignores list-change notifications; verify static tool schemas and README guidance.
+- [x] 3.3 Ship the `REACH_MCP_TOOL_MODE=static` Path 1 surface with required `deviceId` parameters and document its use when a host ignores list-change notifications; verify static tool schemas and README guidance.
 
 ## 4. End-to-end verification
 

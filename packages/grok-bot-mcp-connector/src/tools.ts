@@ -50,3 +50,17 @@ export function deviceScopedTools(): readonly Record<string, unknown>[] {
     tool("session.close", "Close the selected Reach Engine session.", object({})),
   ];
 }
+
+/** Path 1 compatibility surface for clients that do not honor tools/list_changed. */
+export function staticDeviceScopedTools(): readonly Record<string, unknown>[] {
+  return deviceScopedTools().map((definition) => {
+    const schema = definition.inputSchema as { properties: Record<string, Schema>; required?: readonly string[] };
+    return {
+      ...definition,
+      inputSchema: object(
+        { deviceId: string("Configured Reach device identifier."), ...schema.properties },
+        ["deviceId", ...(schema.required ?? [])],
+      ),
+    };
+  });
+}

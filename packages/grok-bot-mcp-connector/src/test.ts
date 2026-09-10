@@ -124,3 +124,22 @@ test("writes obtain a matching Gateway grant before forwarding permission", asyn
   assert.deepEqual(calls, ["grant:fs.write:default:note.txt", "rpc:fs.write:gateway-issued"]);
   assert.equal((messages[3].result as { isError?: boolean }).isError, undefined);
 });
+
+test("static compatibility mode advertises deviceId and opens that configured device per tool call", async () => {
+  const config = loadConfig({ REACH_MCP_TOOL_MODE: "static" });
+  const messages: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  const server = new McpServer(config, (message) => messages.push(message), () => readyGateway({
+    rpc: async (method, params) => {
+      calls.push(`${method}:${params.path}`);
+      return { type: "response", result: { ok: true } };
+    },
+  }));
+  await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
+  await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+  const tools = (messages[1].result as { tools: Array<{ name: string; inputSchema: { required: string[] } }> }).tools;
+  assert.ok(tools.some((tool) => tool.name === "fs.read"));
+  assert.ok(tools.find((tool) => tool.name === "session.close")!.inputSchema.required.includes("deviceId"));
+  await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "fs.read", arguments: { deviceId: "local-engine", workspace: "default", path: "note.txt" } } });
+  assert.deepEqual(calls, ["fs.read:note.txt"]);
+});

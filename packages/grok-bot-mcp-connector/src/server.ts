@@ -1,7 +1,7 @@
 import { createInterface } from "node:readline";
 import type { ConnectorConfig, DeviceConfig } from "./config.js";
 import { HttpGatewayClient, type GatewayClient, type ReadySession } from "./gateway.js";
-import { deviceScopedTools, deviceTools } from "./tools.js";
+import { deviceScopedTools, deviceTools, staticDeviceScopedTools } from "./tools.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 
@@ -86,6 +86,7 @@ export class McpServer {
   }
 
   protected listTools(): readonly Record<string, unknown>[] {
+    if (this.config.toolMode === "static") return [...deviceTools(), ...staticDeviceScopedTools()];
     return this.selected ? [...deviceTools(), ...deviceScopedTools()] : deviceTools();
   }
 
@@ -105,9 +106,9 @@ export class McpServer {
       case "fs.grep":
       case "fs.write":
       case "fs.edit":
-        return this.callFilesystem(call.name, call.arguments);
+        return this.callFilesystemForMode(call.name, call.arguments);
       case "session.close":
-        return this.closeSession();
+        return this.closeSessionForMode(call.arguments);
       default:
         return toolError(`Unknown tool: ${call.name}`);
     }
@@ -117,18 +118,49 @@ export class McpServer {
     if (typeof argumentsValue !== "object" || argumentsValue === null || typeof (argumentsValue as Record<string, unknown>).deviceId !== "string") {
       return toolError("pick_device requires a string deviceId");
     }
-    const deviceId = (argumentsValue as Record<string, unknown>).deviceId as string;
+    const selected = await this.selectDevice((argumentsValue as Record<string, unknown>).deviceId as string, this.config.toolMode === "dynamic");
+    return selected instanceof Error ? toolError(selected.message) : toolText({ selectedDeviceId: selected.device.id, status: "ready" });
+  }
+
+  private async callFilesystemForMode(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
+    const params = await this.argumentsForMode(argumentsValue);
+    return params instanceof Error ? toolError(params.message) : this.callFilesystem(method, params);
+  }
+
+  private async closeSessionForMode(argumentsValue: unknown): Promise<Record<string, unknown>> {
+    if (this.config.toolMode === "static") {
+      const params = await this.argumentsForMode(argumentsValue);
+      if (params instanceof Error) return toolError(params.message);
+    }
+    return this.closeSession();
+  }
+
+  private async argumentsForMode(argumentsValue: unknown): Promise<Record<string, unknown> | Error> {
+    if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) {
+      return new Error("Tool arguments must be an object");
+    }
+    const params = argumentsValue as Record<string, unknown>;
+    if (this.config.toolMode !== "static") return params;
+    if (typeof params.deviceId !== "string" || !params.deviceId) return new Error("Static tool mode requires a string deviceId");
+    const selected = await this.selectDevice(params.deviceId, false);
+    if (selected instanceof Error) return selected;
+    const { deviceId: _deviceId, ...deviceScopedParams } = params;
+    return deviceScopedParams;
+  }
+
+  private async selectDevice(deviceId: string, announce: boolean): Promise<SelectedDevice | Error> {
     const device = this.config.devices.find((candidate) => candidate.id === deviceId);
-    if (!device) return toolError(`Unknown device: ${deviceId}`);
+    if (!device) return new Error(`Unknown device: ${deviceId}`);
+    if (this.selected?.device.id === device.id) return this.selected;
     const gateway = this.gateways(device, this.config);
     try {
       const session = await gateway.openAndWait();
       this.selected = { device, gateway, session };
-      this.pendingToolListChange = true;
-      return toolText({ selectedDeviceId: device.id, status: "ready" });
+      if (announce) this.pendingToolListChange = true;
+      return this.selected;
     } catch (cause) {
       this.selected = undefined;
-      return toolError(cause instanceof Error ? cause.message : "Unable to select device");
+      return new Error(cause instanceof Error ? cause.message : "Unable to select device");
     }
   }
 
