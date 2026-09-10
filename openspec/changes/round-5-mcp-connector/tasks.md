@@ -6,7 +6,7 @@
 ## 2. Device-gated MCP tool discovery
 
 - [x] 2.1 Implement `list_devices` and `pick_device`, including Gateway session open and bounded ready polling; verify unknown and unready devices leave the connector unselected.
-- [ ] 2.2 Implement dynamic `tools/list` and `notifications/tools/list_changed` so selected-device filesystem and close tools appear only after a ready pick; verify a client refresh observes the expanded list.
+- [x] 2.2 Implement dynamic `tools/list` and `notifications/tools/list_changed` so selected-device filesystem and close tools appear only after a ready pick; verify a client refresh observes the expanded list.
 
 ## 3. Gateway tool bridge
 

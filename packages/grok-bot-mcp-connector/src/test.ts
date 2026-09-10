@@ -56,4 +56,9 @@ test("only configured devices can be picked after their Gateway is ready", async
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "remote" } } });
   assert.equal(opened, 1);
   assert.deepEqual(JSON.parse((((messages[3].result as { content: Array<{ text: string }> }).content)[0].text)), { selectedDeviceId: "remote", status: "ready" });
+  assert.deepEqual(messages[4], { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+  await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
+  const refreshed = (messages[5].result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
+  assert.deepEqual(refreshed.map((tool) => tool.name), ["list_devices", "pick_device", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
+  assert.equal("deviceId" in refreshed.find((tool) => tool.name === "fs.read")!.inputSchema.properties, false);
 });

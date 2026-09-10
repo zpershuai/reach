@@ -1,6 +1,7 @@
 import { createInterface } from "node:readline";
 import type { ConnectorConfig, DeviceConfig } from "./config.js";
 import { HttpGatewayClient, type GatewayClient, type ReadySession } from "./gateway.js";
+import { deviceScopedTools, deviceTools } from "./tools.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 
@@ -33,6 +34,7 @@ function error(id: JsonRpcId, code: number, message: string): Record<string, unk
 
 export class McpServer {
   private initialized = false;
+  private pendingToolListChange = false;
 
   public constructor(
     protected readonly config: ConnectorConfig,
@@ -50,7 +52,10 @@ export class McpServer {
     const isNotification = value.id === undefined;
     try {
       const result = await this.dispatch(value);
-      if (!isNotification) this.send({ jsonrpc: "2.0", id: value.id ?? null, result });
+      if (!isNotification) {
+        this.send({ jsonrpc: "2.0", id: value.id ?? null, result });
+        this.flushToolListChange();
+      }
     } catch (cause) {
       if (!isNotification) {
         this.send(error(value.id ?? null, -32603, cause instanceof Error ? cause.message : "Internal error"));
@@ -81,15 +86,7 @@ export class McpServer {
   }
 
   protected listTools(): readonly Record<string, unknown>[] {
-    return [
-      toolDefinition("list_devices", "List configured Reach Engine devices.", { type: "object", properties: {}, additionalProperties: false }),
-      toolDefinition("pick_device", "Open and select a ready Reach Engine device.", {
-        type: "object",
-        properties: { deviceId: { type: "string", description: "Configured Reach device identifier." } },
-        required: ["deviceId"],
-        additionalProperties: false,
-      }),
-    ];
+    return this.selected ? [...deviceTools(), ...deviceScopedTools()] : deviceTools();
   }
 
   protected async callTool(params: unknown): Promise<Record<string, unknown>> {
@@ -117,6 +114,7 @@ export class McpServer {
     try {
       const session = await gateway.openAndWait();
       this.selected = { device, gateway, session };
+      this.pendingToolListChange = true;
       return toolText({ selectedDeviceId: device.id, status: "ready" });
     } catch (cause) {
       this.selected = undefined;
@@ -127,10 +125,12 @@ export class McpServer {
   protected requireInitialized(): void {
     if (!this.initialized) throw new Error("MCP client must initialize before using tools");
   }
-}
 
-function toolDefinition(name: string, description: string, inputSchema: Record<string, unknown>): Record<string, unknown> {
-  return { name, description, inputSchema };
+  private flushToolListChange(): void {
+    if (!this.pendingToolListChange) return;
+    this.pendingToolListChange = false;
+    this.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+  }
 }
 
 export function toolText(value: unknown): Record<string, unknown> {
