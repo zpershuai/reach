@@ -1,7 +1,7 @@
 ## 1. MCP package foundation
 
 - [x] 1.1 Create the standalone TypeScript Grok Bot MCP connector package, executable stdio entrypoint, and configured device loading with a loopback default; verify its build command succeeds.
-- [ ] 1.2 Implement newline-delimited JSON-RPC handling for MCP initialization, initialized notification, and structured tool responses without a native Grok registration API; verify protocol unit tests pass.
+- [x] 1.2 Implement newline-delimited JSON-RPC handling for MCP initialization, initialized notification, and structured tool responses without a native Grok registration API; verify protocol unit tests pass.
 
 ## 2. Device-gated MCP tool discovery
 
