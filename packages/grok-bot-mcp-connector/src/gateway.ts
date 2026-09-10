@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { DeviceConfig } from "./config.js";
 
 export interface ReadySession {
@@ -6,6 +7,9 @@ export interface ReadySession {
 
 export interface GatewayClient {
   openAndWait(): Promise<ReadySession>;
+  renew(): Promise<ReadySession>;
+  rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>>;
+  close(): Promise<void>;
 }
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
@@ -35,6 +39,24 @@ export class HttpGatewayClient implements GatewayClient {
       await wait(this.readyPollMs);
     }
     throw new Error(`device ${this.device.id} did not become ready (last status: ${lastStatus})`);
+  }
+
+  public async renew(): Promise<ReadySession> {
+    const reply = await this.post("/session/renew", {});
+    return { leaseExpiresAt: typeof reply.leaseExpiresAt === "string" ? reply.leaseExpiresAt : undefined };
+  }
+
+  public async rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>> {
+    return this.post("/session/rpc", {
+      requestId: randomUUID(),
+      method,
+      params,
+      ...(permission ? { permission } : {}),
+    });
+  }
+
+  public async close(): Promise<void> {
+    await this.post("/session/close", {});
   }
 
   private async post(path: string, body?: unknown): Promise<Record<string, unknown>> {

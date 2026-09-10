@@ -98,6 +98,14 @@ export class McpServer {
         return toolText({ devices: this.config.devices.map(({ id }) => ({ id })) });
       case "pick_device":
         return this.pickDevice(call.arguments);
+      case "fs.read":
+      case "fs.list":
+      case "fs.glob":
+      case "fs.stat":
+      case "fs.grep":
+        return this.callFilesystem(call.name, call.arguments);
+      case "session.close":
+        return this.closeSession();
       default:
         return toolError(`Unknown tool: ${call.name}`);
     }
@@ -119,6 +127,46 @@ export class McpServer {
     } catch (cause) {
       this.selected = undefined;
       return toolError(cause instanceof Error ? cause.message : "Unable to select device");
+    }
+  }
+
+  protected async callFilesystem(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
+    const selected = this.selected;
+    if (!selected) return toolError("Pick a ready device before using filesystem tools");
+    if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) {
+      return toolError(`${method} arguments must be an object`);
+    }
+    try {
+      await this.renewIfNeeded(selected);
+      const reply = await selected.gateway.rpc(method, argumentsValue as Record<string, unknown>);
+      if (reply.type === "error") {
+        const candidate = typeof reply.error === "object" && reply.error !== null ? (reply.error as Record<string, unknown>).code : undefined;
+        const code = typeof candidate === "string" ? candidate : "Gateway RPC error";
+        return toolError(code);
+      }
+      return toolText(reply.result ?? reply);
+    } catch (cause) {
+      return toolError(cause instanceof Error ? cause.message : "Gateway filesystem call failed");
+    }
+  }
+
+  private async closeSession(): Promise<Record<string, unknown>> {
+    const selected = this.selected;
+    if (!selected) return toolError("No selected device session to close");
+    try {
+      await selected.gateway.close();
+      this.selected = undefined;
+      this.pendingToolListChange = true;
+      return toolText({ closedDeviceId: selected.device.id });
+    } catch (cause) {
+      return toolError(cause instanceof Error ? cause.message : "Unable to close selected device session");
+    }
+  }
+
+  private async renewIfNeeded(selected: SelectedDevice): Promise<void> {
+    const expiry = selected.session.leaseExpiresAt ? Date.parse(selected.session.leaseExpiresAt) : Number.NaN;
+    if (!Number.isNaN(expiry) && expiry <= Date.now() + this.config.renewSkewMs) {
+      selected.session = await selected.gateway.renew();
     }
   }
 
