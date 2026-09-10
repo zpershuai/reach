@@ -1,0 +1,4 @@
+schema: spec-driven
+created: 2026-09-10
+goal: After device pick, MCP tools/list shows device-scoped fs tools;
+  list_changed is proven or fallback documented.
