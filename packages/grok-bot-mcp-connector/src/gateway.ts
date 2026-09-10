@@ -9,6 +9,7 @@ export interface GatewayClient {
   openAndWait(): Promise<ReadySession>;
   renew(): Promise<ReadySession>;
   rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>>;
+  grant(workspace: string, path: string, method: "fs.write" | "fs.edit"): Promise<{ grantId: string }>;
   close(): Promise<void>;
 }
 
@@ -53,6 +54,12 @@ export class HttpGatewayClient implements GatewayClient {
       params,
       ...(permission ? { permission } : {}),
     });
+  }
+
+  public async grant(workspace: string, path: string, method: "fs.write" | "fs.edit"): Promise<{ grantId: string }> {
+    const reply = await this.post("/grants", { workspace, path, methods: [method] });
+    if (typeof reply.grantId !== "string" || !reply.grantId) throw new Error("Gateway /grants returned no grantId");
+    return { grantId: reply.grantId };
   }
 
   public async close(): Promise<void> {

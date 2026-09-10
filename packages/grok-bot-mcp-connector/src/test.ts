@@ -4,14 +4,16 @@ import { loadConfig } from "./config.js";
 import { McpServer, MCP_PROTOCOL_VERSION } from "./server.js";
 
 function readyGateway(overrides: Partial<{
-  rpc: (method: string, params: Record<string, unknown>) => Promise<Record<string, unknown>>;
+  rpc: (method: string, params: Record<string, unknown>, permission?: { grantId: string }) => Promise<Record<string, unknown>>;
   renew: () => Promise<{ leaseExpiresAt?: string }>;
+  grant: (workspace: string, path: string, method: "fs.write" | "fs.edit") => Promise<{ grantId: string }>;
   close: () => Promise<void>;
 }> = {}) {
   return {
     openAndWait: async () => ({ leaseExpiresAt: new Date(Date.now() + 30_000).toISOString() }),
     renew: overrides.renew ?? (async () => ({ leaseExpiresAt: new Date(Date.now() + 300_000).toISOString() })),
     rpc: overrides.rpc ?? (async (method: string, params: Record<string, unknown>) => ({ type: "response", result: { method, params } })),
+    grant: overrides.grant ?? (async () => ({ grantId: "issued-grant" })),
     close: overrides.close ?? (async () => {}),
   };
 }
@@ -101,4 +103,24 @@ test("filesystem calls renew then forward through the selected Gateway and close
   assert.equal(calls[2], "close");
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
   assert.deepEqual(((messages[6].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "pick_device"]);
+});
+
+test("writes obtain a matching Gateway grant before forwarding permission", async () => {
+  const messages: Record<string, unknown>[] = [];
+  const calls: string[] = [];
+  const server = new McpServer(loadConfig({}), (message) => messages.push(message), () => readyGateway({
+    grant: async (workspace, path, method) => {
+      calls.push(`grant:${method}:${workspace}:${path}`);
+      return { grantId: "gateway-issued" };
+    },
+    rpc: async (method, _params, permission) => {
+      calls.push(`rpc:${method}:${permission?.grantId}`);
+      return { type: "response", result: { written: true } };
+    },
+  }));
+  await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
+  await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "local-engine" } } });
+  await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "fs.write", arguments: { workspace: "default", path: "note.txt", content: "hello", mode: "overwrite" } } });
+  assert.deepEqual(calls, ["grant:fs.write:default:note.txt", "rpc:fs.write:gateway-issued"]);
+  assert.equal((messages[3].result as { isError?: boolean }).isError, undefined);
 });

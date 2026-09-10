@@ -103,6 +103,8 @@ export class McpServer {
       case "fs.glob":
       case "fs.stat":
       case "fs.grep":
+      case "fs.write":
+      case "fs.edit":
         return this.callFilesystem(call.name, call.arguments);
       case "session.close":
         return this.closeSession();
@@ -138,7 +140,10 @@ export class McpServer {
     }
     try {
       await this.renewIfNeeded(selected);
-      const reply = await selected.gateway.rpc(method, argumentsValue as Record<string, unknown>);
+      const params = argumentsValue as Record<string, unknown>;
+      const permission = await this.mutationPermission(selected.gateway, method, params);
+      if (permission instanceof Error) return toolError(permission.message);
+      const reply = await selected.gateway.rpc(method, params, permission);
       if (reply.type === "error") {
         const candidate = typeof reply.error === "object" && reply.error !== null ? (reply.error as Record<string, unknown>).code : undefined;
         const code = typeof candidate === "string" ? candidate : "Gateway RPC error";
@@ -147,6 +152,22 @@ export class McpServer {
       return toolText(reply.result ?? reply);
     } catch (cause) {
       return toolError(cause instanceof Error ? cause.message : "Gateway filesystem call failed");
+    }
+  }
+
+  private async mutationPermission(
+    gateway: GatewayClient,
+    method: string,
+    params: Record<string, unknown>,
+  ): Promise<{ grantId: string } | undefined | Error> {
+    if (method !== "fs.write" && method !== "fs.edit") return undefined;
+    if (typeof params.workspace !== "string" || !params.workspace || typeof params.path !== "string" || !params.path) {
+      return new Error(`${method} requires non-empty workspace and path for a Gateway grant`);
+    }
+    try {
+      return await gateway.grant(params.workspace, params.path, method);
+    } catch (cause) {
+      return new Error(cause instanceof Error ? cause.message : "Unable to obtain Gateway mutation grant");
     }
   }
 
