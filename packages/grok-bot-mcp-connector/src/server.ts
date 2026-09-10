@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline";
-import type { ConnectorConfig } from "./config.js";
+import type { ConnectorConfig, DeviceConfig } from "./config.js";
+import { HttpGatewayClient, type GatewayClient, type ReadySession } from "./gateway.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 
@@ -12,6 +13,13 @@ export interface JsonRpcRequest {
 
 type JsonRpcId = string | number | null;
 type Send = (message: Record<string, unknown>) => void;
+type GatewayFactory = (device: DeviceConfig, config: ConnectorConfig) => GatewayClient;
+
+interface SelectedDevice {
+  device: DeviceConfig;
+  gateway: GatewayClient;
+  session: ReadySession;
+}
 
 function isRequest(value: unknown): value is JsonRpcRequest {
   if (typeof value !== "object" || value === null) return false;
@@ -28,8 +36,11 @@ export class McpServer {
 
   public constructor(
     protected readonly config: ConnectorConfig,
-    private readonly send: Send,
+    protected readonly send: Send,
+    private readonly gateways: GatewayFactory = (device, config) => new HttpGatewayClient(device, config.readyTimeoutMs, config.readyPollMs),
   ) {}
+
+  protected selected: SelectedDevice | undefined;
 
   public async receive(value: unknown): Promise<void> {
     if (!isRequest(value)) {
@@ -70,16 +81,56 @@ export class McpServer {
   }
 
   protected listTools(): readonly Record<string, unknown>[] {
-    return [];
+    return [
+      toolDefinition("list_devices", "List configured Reach Engine devices.", { type: "object", properties: {}, additionalProperties: false }),
+      toolDefinition("pick_device", "Open and select a ready Reach Engine device.", {
+        type: "object",
+        properties: { deviceId: { type: "string", description: "Configured Reach device identifier." } },
+        required: ["deviceId"],
+        additionalProperties: false,
+      }),
+    ];
   }
 
-  protected async callTool(_params: unknown): Promise<Record<string, unknown>> {
-    return toolError("Unknown tool");
+  protected async callTool(params: unknown): Promise<Record<string, unknown>> {
+    if (typeof params !== "object" || params === null) return toolError("tools/call params must be an object");
+    const call = params as Record<string, unknown>;
+    if (typeof call.name !== "string") return toolError("tools/call requires a tool name");
+    switch (call.name) {
+      case "list_devices":
+        return toolText({ devices: this.config.devices.map(({ id }) => ({ id })) });
+      case "pick_device":
+        return this.pickDevice(call.arguments);
+      default:
+        return toolError(`Unknown tool: ${call.name}`);
+    }
+  }
+
+  private async pickDevice(argumentsValue: unknown): Promise<Record<string, unknown>> {
+    if (typeof argumentsValue !== "object" || argumentsValue === null || typeof (argumentsValue as Record<string, unknown>).deviceId !== "string") {
+      return toolError("pick_device requires a string deviceId");
+    }
+    const deviceId = (argumentsValue as Record<string, unknown>).deviceId as string;
+    const device = this.config.devices.find((candidate) => candidate.id === deviceId);
+    if (!device) return toolError(`Unknown device: ${deviceId}`);
+    const gateway = this.gateways(device, this.config);
+    try {
+      const session = await gateway.openAndWait();
+      this.selected = { device, gateway, session };
+      return toolText({ selectedDeviceId: device.id, status: "ready" });
+    } catch (cause) {
+      this.selected = undefined;
+      return toolError(cause instanceof Error ? cause.message : "Unable to select device");
+    }
   }
 
   protected requireInitialized(): void {
     if (!this.initialized) throw new Error("MCP client must initialize before using tools");
   }
+}
+
+function toolDefinition(name: string, description: string, inputSchema: Record<string, unknown>): Record<string, unknown> {
+  return { name, description, inputSchema };
 }
 
 export function toolText(value: unknown): Record<string, unknown> {
