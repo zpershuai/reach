@@ -1,0 +1,14 @@
+{
+  "name": "@reach/grok-bot-mcp-connector",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "reach-grok-mcp": "dist/main.js"
+  },
+  "scripts": {
+    "build": "../reach-rpc/node_modules/.bin/tsc --project tsconfig.json",
+    "start": "node dist/main.js",
+    "test": "npm run build && node --test dist/test.js"
+  }
+}
