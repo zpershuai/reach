@@ -25,6 +25,7 @@ export const requestEnvelopeSchema = z.object({
   requestId: nonEmptyString,
   method: nonEmptyString,
   params: z.record(z.unknown()),
+  deadlineAt: z.string().datetime({ offset: true }).optional(),
   permission: permissionSchema.optional(),
 });
 
@@ -95,6 +96,7 @@ export const fsReadRequestSchema = z
     requestId: nonEmptyString,
     method: z.literal("fs.read"),
     params: fsReadParamsSchema,
+    deadlineAt: rfc3339Timestamp.optional(),
     permission: permissionSchema.optional(),
   });
 

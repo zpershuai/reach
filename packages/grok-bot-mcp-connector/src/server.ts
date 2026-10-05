@@ -1,6 +1,6 @@
 import { createInterface } from "node:readline";
 import type { ConnectorConfig, DeviceConfig } from "./config.js";
-import { HttpGatewayClient, type GatewayClient, type ReadySession } from "./gateway.js";
+import { GatewayHttpError, HttpGatewayClient, SessionReplacedError, type GatewayClient, type ReadySession } from "./gateway.js";
 import { deviceScopedTools, deviceTools, staticDeviceScopedTools } from "./tools.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
@@ -20,6 +20,7 @@ interface SelectedDevice {
   device: DeviceConfig;
   gateway: GatewayClient;
   session: ReadySession;
+  uncertain?: boolean;
 }
 
 function isRequest(value: unknown): value is JsonRpcRequest {
@@ -39,10 +40,21 @@ export class McpServer {
   public constructor(
     protected readonly config: ConnectorConfig,
     protected readonly send: Send,
-    private readonly gateways: GatewayFactory = (device, config) => new HttpGatewayClient(device, config.readyTimeoutMs, config.readyPollMs),
+    private readonly gateways: GatewayFactory = (device, config) => new HttpGatewayClient(device, config.readyTimeoutMs, config.readyPollMs, fetch, config.requestTimeoutMs),
   ) {}
 
   protected selected: SelectedDevice | undefined;
+
+  public async shutdown(): Promise<void> {
+    const selected = this.selected;
+    if (!selected) return;
+    try {
+      await selected.gateway.close();
+      this.clearSelection();
+    } catch (cause) {
+      if (!await this.releaseAfterFailure()) throw cause;
+    }
+  }
 
   public async receive(value: unknown): Promise<void> {
     if (!isRequest(value)) {
@@ -87,7 +99,7 @@ export class McpServer {
 
   protected listTools(): readonly Record<string, unknown>[] {
     if (this.config.toolMode === "static") return [...deviceTools(), ...staticDeviceScopedTools()];
-    return this.selected ? [...deviceTools(), ...deviceScopedTools()] : deviceTools();
+    return this.selected && !this.selected.uncertain ? [...deviceTools(), ...deviceScopedTools()] : deviceTools();
   }
 
   protected async callTool(params: unknown): Promise<Record<string, unknown>> {
@@ -151,25 +163,37 @@ export class McpServer {
   private async selectDevice(deviceId: string, announce: boolean): Promise<SelectedDevice | Error> {
     const device = this.config.devices.find((candidate) => candidate.id === deviceId);
     if (!device) return new Error(`Unknown device: ${deviceId}`);
-    if (this.selected?.device.id === device.id) return this.selected;
-    const gateway = this.gateways(device, this.config);
     try {
+      const previous = this.selected;
+      if (previous?.device.id === device.id && !previous.uncertain) {
+        const status = await previous.gateway.status();
+        if (status.status === "ready" && status.sessionId === previous.session.sessionId) {
+          previous.session = status;
+          return previous;
+        }
+      }
+      if (previous) await previous.gateway.close();
+      this.clearSelection();
+      const gateway = this.gateways(device, this.config);
+      // Keep the client reachable even if opening or its cleanup fails.
+      this.selected = { device, gateway, session: {}, uncertain: true };
       const session = await gateway.openAndWait();
       this.selected = { device, gateway, session };
       if (announce) this.pendingToolListChange = true;
       return this.selected;
     } catch (cause) {
-      this.selected = undefined;
+      await this.releaseAfterFailure();
       return new Error(cause instanceof Error ? cause.message : "Unable to select device");
     }
   }
 
   protected async callFilesystem(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
-    const selected = this.selected;
-    if (!selected) return toolError("Pick a ready device before using filesystem tools");
+    if (!this.selected) return toolError("Pick a ready device before using filesystem tools");
     if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) {
       return toolError(`${method} arguments must be an object`);
     }
+    const selected = await this.selectDevice(this.selected.device.id, this.config.toolMode === "dynamic");
+    if (selected instanceof Error) return toolError(selected.message);
     try {
       await this.renewIfNeeded(selected);
       const params = argumentsValue as Record<string, unknown>;
@@ -179,10 +203,12 @@ export class McpServer {
       if (reply.type === "error") {
         const candidate = typeof reply.error === "object" && reply.error !== null ? (reply.error as Record<string, unknown>).code : undefined;
         const code = typeof candidate === "string" ? candidate : "Gateway RPC error";
+        if (code === "SESSION_CLOSED") await this.releaseAfterFailure();
         return toolError(code);
       }
       return toolText(reply.result ?? reply);
     } catch (cause) {
+      if (!(cause instanceof GatewayHttpError && cause.isRequestRejection)) await this.releaseAfterFailure();
       return toolError(cause instanceof Error ? cause.message : "Gateway filesystem call failed");
     }
   }
@@ -208,10 +234,10 @@ export class McpServer {
     if (!selected) return toolError("No selected device session to close");
     try {
       await selected.gateway.close();
-      this.selected = undefined;
-      this.pendingToolListChange = true;
+      this.clearSelection();
       return toolText({ closedDeviceId: selected.device.id });
     } catch (cause) {
+      if (await this.releaseAfterFailure()) return toolText({ closedDeviceId: selected.device.id });
       return toolError(cause instanceof Error ? cause.message : "Unable to close selected device session");
     }
   }
@@ -220,6 +246,32 @@ export class McpServer {
     const expiry = selected.session.leaseExpiresAt ? Date.parse(selected.session.leaseExpiresAt) : Number.NaN;
     if (!Number.isNaN(expiry) && expiry <= Date.now() + this.config.renewSkewMs) {
       selected.session = await selected.gateway.renew();
+    }
+  }
+
+  private clearSelection(): void {
+    if (this.selected && this.config.toolMode === "dynamic") this.pendingToolListChange = true;
+    this.selected = undefined;
+  }
+
+  /** Hide stale tools, attempt a drain, and retain ownership if it still fails. */
+  private async releaseAfterFailure(): Promise<boolean> {
+    const selected = this.selected;
+    if (!selected) return true;
+    if (!selected.uncertain && this.config.toolMode === "dynamic") this.pendingToolListChange = true;
+    selected.uncertain = true;
+    try {
+      await selected.gateway.close();
+      this.clearSelection();
+      return true;
+    } catch (cause) {
+      if (cause instanceof SessionReplacedError) {
+        // Ownership is definitively gone; never drain the replacement.
+        this.clearSelection();
+        return true;
+      }
+      // The next selection must drain this client before opening a new one.
+      return false;
     }
   }
 
@@ -254,6 +306,11 @@ export function startStdioServer(config: ConnectorConfig): void {
       } catch {
         await server.receive(undefined);
       }
+    });
+  });
+  input.on("close", () => {
+    pending = pending.then(() => server.shutdown()).catch((cause) => {
+      process.stderr.write(`reach-grok-mcp: ${cause instanceof Error ? cause.message : String(cause)}\n`);
     });
   });
 }

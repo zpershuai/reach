@@ -7,19 +7,31 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 
 async function waitFor<T>(queue: T[], predicate: (item: T) => boolean): Promise<T> {
+  const deadline = Date.now() + 5_000;
   for (;;) {
     const index = queue.findIndex(predicate);
     if (index >= 0) return queue.splice(index, 1)[0];
+    if (Date.now() >= deadline) throw new Error("stdio response timed out");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
 
 test("stdio client re-fetches the expanded tool list after tools/list_changed", async () => {
-  const gateway = createServer((request, response) => {
+  let sessionId: string | undefined;
+  let status = "none";
+  const gateway = createServer(async (request, response) => {
+    if (request.url === "/session/open") {
+      let body = "";
+      for await (const chunk of request) body += chunk;
+      sessionId = (JSON.parse(body) as { sessionId: string }).sessionId;
+      status = "ready";
+    }
+    if (request.url === "/session/close") status = "none";
     const payload = request.url === "/session/status"
-      ? { status: "ready", leaseExpiresAt: new Date(Date.now() + 300_000).toISOString() }
+      ? { status, sessionId, leaseExpiresAt: new Date(Date.now() + 300_000).toISOString() }
       : request.url === "/session/open"
         ? { wanted: true, status: "wanted" }
+        : request.url === "/session/close" ? { status: "none" }
         : { error: "unexpected endpoint" };
     response.writeHead(payload.error ? 404 : 200, { "content-type": "application/json" });
     response.end(JSON.stringify(payload));

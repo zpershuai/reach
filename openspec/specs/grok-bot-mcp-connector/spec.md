@@ -61,3 +61,37 @@ The connector SHALL provide a documented Path 1 mode for MCP hosts that ignore `
 #### Scenario: Operator needs a non-refreshing host integration
 - **WHEN** an operator uses an MCP host that does not re-fetch `tools/list` after a list-change notification
 - **THEN** the documentation identifies how to enable the static `deviceId`-parameter fallback and its trade-off
+
+### Requirement: Bounded readiness and session recovery
+The connector MUST default readiness waiting to 150 seconds to cover the Engine's 120-second idle poll and setup. Each HTTP request and response body MUST have a timeout, defaulting to 35 seconds. A failed readiness wait MUST attempt to release its own session intent. Before filesystem calls, the connector MUST verify selected-session readiness and identity and reopen an expired session before forwarding a new RPC. Device switching MUST drain the old session before opening the new one. Renew, close, and RPC MUST carry the bound session id. Stdio EOF MUST close the selected session after received work finishes.
+
+#### Scenario: Idle session has expired
+- **WHEN** a filesystem tool is invoked for a previously selected session whose Gateway reports no active session
+- **THEN** the connector establishes a new ready session before sending that invocation
+
+#### Scenario: Switch devices
+- **WHEN** a client selects another configured device
+- **THEN** the connector closes and drains the old selection before opening the new one
+
+### Requirement: Uncertain mutations are never automatically replayed
+The connector MUST NOT automatically replay a forwarded RPC after timeout or transport failure. It MUST return the failure as a tool error and remove stale dynamic tools when the selected session is no longer usable.
+
+#### Scenario: Write reply is lost
+- **WHEN** an RPC transport fails after the Engine may have committed a write
+- **THEN** the connector returns an error and sends no retry of that write
+
+### Requirement: Failure cleanup retains session ownership
+On readiness, status, or transport failure, the connector MUST attempt to drain its owned intent. If drain fails, it MUST retain that Gateway client as an uncertain selection, hide its dynamic filesystem tools, and drain it before opening another session. Confirmed ownership loss MUST release only the stale local reference and MUST NOT close the replacement session. A request-scoped deadline error MUST NOT invalidate an otherwise healthy selection. Explicit close and shutdown MAY retry lifecycle cleanup, but MUST NOT replay a forwarded filesystem RPC.
+
+Known pre-forwarding HTTP RPC rejections, including invalid parameters, oversized payloads, duplicate ids, and a full queue, MUST return tool errors without draining a healthy selected session. Uncertain forwarding failures and session-unavailable errors MUST remain eligible for cleanup; HTTP 503 alone MUST NOT imply either category.
+
+#### Scenario: Gateway status and cleanup are temporarily unavailable
+- **WHEN** status fails and a best-effort close also fails
+- **THEN** the connector retains the uncertain owner, hides dynamic filesystem tools, and a later device pick attempts cleanup before any new open
+
+### Requirement: Legacy Gateway identity acquisition
+If `/session/open` returns a session id, the connector MUST bind that acknowledged id before polling and reject any subsequent different id. If a legacy Gateway omits the id from the open reply, the connector MAY adopt the first non-empty id observed during acquisition, then MUST reject later identity changes. Ready status MUST contain a non-empty id. Legacy Gateways without intent binding are supported only under the single-controller assumption.
+
+#### Scenario: Legacy Gateway generates its id at heartbeat
+- **WHEN** an open reply and initial wanted status omit the session id, then a ready status exposes the Gateway-generated id
+- **THEN** the connector adopts that id and includes it in subsequent RPC, renew, and close requests

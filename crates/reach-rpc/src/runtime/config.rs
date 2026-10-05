@@ -52,6 +52,14 @@ impl Origin {
             return Err("gateway base URL must not contain a path".into());
         }
         let (host, port) = parse_authority(authority, scheme)?;
+        let address = host.trim_start_matches('[').trim_end_matches(']');
+        if !host.eq_ignore_ascii_case("localhost")
+            && !address
+                .parse::<std::net::IpAddr>()
+                .is_ok_and(|ip| ip.is_loopback())
+        {
+            return Err("gateway host must be a loopback address or localhost".into());
+        }
         Ok(Origin {
             scheme: scheme.to_owned(),
             host,
@@ -345,6 +353,24 @@ mod tests {
     fn rejects_multiple_or_bogus_origin_inputs() {
         assert!(Origin::parse_http_base_url("http://a:1,b:2").is_err());
         assert!(Origin::parse_http_base_url("http://a http://b").is_err());
+    }
+
+    #[test]
+    fn rejects_non_loopback_gateways_and_accepts_loopback_variants() {
+        for url in [
+            "http://reach.example:8787",
+            "http://192.0.2.1:8787",
+            "http://[::2]:8787",
+        ] {
+            assert!(GatewayConfig::new(url).is_err(), "{url}");
+        }
+        for url in [
+            "http://localhost:8787",
+            "http://127.0.0.2:8787",
+            "http://[::1]:8787",
+        ] {
+            assert!(GatewayConfig::new(url).is_ok(), "{url}");
+        }
     }
 
     #[test]

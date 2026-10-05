@@ -1,4 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
+// Contract-test reference implementation. Model B execution and its security
+// boundary live in the Rust Engine; the Gateway never imports this module.
 import { constants as fsConstants, promises as fs } from "node:fs";
 import type { FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -58,8 +60,11 @@ export class WorkspaceFilesystem {
 
   async read(params: FsReadParams): Promise<FsReadResult> {
     const file = await this.resolveEntry(this.rootFor(params.workspace), params.path);
-    if ((await fs.lstat(file)).size > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
-    const content = await fs.readFile(file, "utf8");
+    const stats = await fs.lstat(file);
+    if (stats.isDirectory()) throw new FilesystemError("FILE_NOT_FOUND");
+    if (!stats.isFile()) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
+    if (stats.size > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
+    const content = decodeUtf8(await fs.readFile(file));
     const lines = splitLines(content);
     const start = params.startLine - 1;
     const selected = lines.slice(start, start + params.maxLines);
@@ -213,7 +218,7 @@ export class WorkspaceFilesystem {
       }
       const stats = await file.stat();
       if (!stats.isFile()) throw new FilesystemError(WORKSPACE_ACCESS_DENIED);
-      return await file.readFile({ encoding: "utf8" });
+      return decodeUtf8(await file.readFile());
     } finally {
       await file?.close();
       await parent.close();
@@ -290,8 +295,9 @@ export class WorkspaceFilesystem {
     const values = snapshot.items.slice(snapshot.index, snapshot.index + size);
     snapshot.index += values.length;
     const more = snapshot.index < snapshot.items.length;
-    const cursor = more ? [...this.cursors.entries()].find(([, item]) => item === snapshot)?.[0] : undefined;
-    if (!more && cursor) this.cursors.delete(cursor);
+    const snapshotId = [...this.cursors.entries()].find(([, item]) => item === snapshot)?.[0];
+    const cursor = more ? snapshotId : undefined;
+    if (!more && snapshotId) this.cursors.delete(snapshotId);
     const truncated = snapshot.truncated || more;
     return snapshot.field === "entries" ? { entries: values, cursor, truncated } : { matches: values, cursor, truncated };
   }
@@ -302,6 +308,14 @@ export class WorkspaceFilesystem {
     const cursor = randomUUID();
     this.cursors.set(cursor, snapshot as CursorSnapshot<unknown>);
     return this.page(snapshot, size);
+  }
+}
+
+function decodeUtf8(bytes: Uint8Array): string {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(bytes);
+  } catch {
+    throw new FilesystemError("INVALID_UTF8");
   }
 }
 

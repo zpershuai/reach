@@ -48,3 +48,30 @@ The gateway SHALL provide Agent-facing local control for opening, renewing, quer
 #### Scenario: Agent closes a live session
 - **WHEN** the active Agent requests closure of its session
 - **THEN** the gateway sends `session.close`, stops accepting new session RPC after draining begins, and subsequent heartbeats return the idle interval
+
+### Requirement: Optional session intent binding
+`POST /session/open` MUST accept an optional non-empty caller-selected `sessionId`, otherwise generate one, and expose it in the open reply and wanted status before heartbeat acquisition. The acquired Engine lease MUST use that intent id. Renew and close controls MAY contain a `sessionId`; supplied ids MUST match the pending or live intent. Omitting the id MUST retain the legacy single-session behavior.
+
+While a wanted or pending intent exists, opening with another supplied id MUST return HTTP 409 without changing pending credentials. Opening with the same id, or omitting an id through the legacy single-session API, MUST be idempotent and preserve the pending token and lease.
+
+#### Scenario: Repeat an open while the Engine is connecting
+- **WHEN** a controller retries an open for its existing intent after heartbeat credentials were issued
+- **THEN** the Gateway preserves the token, session id, token expiry, and lease expiry and the Engine can still connect
+
+#### Scenario: Stale close cannot cancel a replacement intent
+- **WHEN** a controller closes with a session id different from the currently wanted or live session
+- **THEN** the Gateway returns HTTP 409 and preserves the current session
+
+### Requirement: Request deadlines preserve unrelated work
+A caller deadline earlier than the Gateway RPC timeout MUST return a request-scoped `DEADLINE_EXCEEDED` without closing the session or rejecting other pending requests. The Gateway's own RPC timeout MUST still bound forwarding and close an unresponsive session. Timed-out request ids MUST remain protected by the bounded deduplication window. Pending RPC work MUST count as activity for the Gateway idle timer.
+
+#### Scenario: A shorter caller deadline expires behind other work
+- **WHEN** one caller's earlier deadline elapses while other RPCs are pending
+- **THEN** the caller receives a deadline error and the other RPCs may complete on the same session
+
+### Requirement: Uncertain request identities survive teardown
+The Gateway MUST retain a bounded window of up to 4,096 request ids across session teardown for Gateway timeouts, Engine `DEADLINE_EXCEEDED` or `SESSION_CLOSED` errors, and forwarded requests that lose their reply on disconnect. Retrying an id still in that window MUST return a duplicate-request rejection without forwarding it again. This in-memory protection MUST NOT be described as durable exactly-once execution after process restart or eviction.
+
+#### Scenario: Engine reports a deadline before disconnecting
+- **WHEN** an Engine returns a deadline error for a forwarded request and the session later closes
+- **THEN** the same id cannot be forwarded on the next session while it remains in the uncertain-id window

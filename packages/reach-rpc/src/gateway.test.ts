@@ -3,6 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
+import type { Socket } from "node:net";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -25,6 +26,11 @@ async function withGateway(
   options: GatewayOptions = {},
 ): Promise<void> {
   const server = createGateway(options);
+  const sockets = new Set<Socket>();
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.on("close", () => sockets.delete(socket));
+  });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
 
@@ -37,6 +43,7 @@ async function withGateway(
   try {
     await check(baseUrl);
   } finally {
+    for (const socket of sockets) socket.destroy();
     await new Promise<void>((resolve, reject) => server.close((error) => (error ? reject(error) : resolve())));
   }
 }
@@ -120,6 +127,60 @@ function rpcBody(requestId: string, method: string, params: unknown, permission?
     ...(permission === undefined ? {} : { permission }),
   };
 }
+
+test("session controls bind pending intent and reject a replacement id", async () => {
+  await withGateway(async (baseUrl) => {
+    const post = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const opened = await post("/session/open", { sessionId: "intent-a" });
+    assert.equal((await opened.json() as { sessionId: string }).sessionId, "intent-a");
+    assert.equal((await post("/session/close", { sessionId: "intent-b" })).status, 409);
+    assert.equal((await (await fetch(`${baseUrl}/session/status`)).json() as { status: string }).status, "wanted");
+    assert.equal((await post("/session/close", { sessionId: "intent-a" })).status, 200);
+  });
+});
+
+test("reopening an intent preserves pending credentials and rejects another owner", async () => {
+  await withGateway(async (baseUrl) => {
+    const post = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    await post("/session/open", { sessionId: "intent-a" });
+    assert.equal((await post("/session/open", { sessionId: "intent-b" })).status, 409);
+    const before = await (await post("/heartbeat", { device: { id: "engine" } })).json();
+    assert.equal((await post("/session/open", { sessionId: "intent-a" })).status, 200);
+    assert.equal((await post("/session-wanted", { wanted: true })).status, 200);
+    assert.equal((await post("/session/open", {})).status, 200);
+    assert.equal((await post("/session/open", { sessionId: "intent-b" })).status, 409);
+    const after = await (await post("/heartbeat", { device: { id: "engine" } })).json();
+    assert.deepEqual(after, before);
+    assert.equal((after as { sessionId: string }).sessionId, "intent-a");
+    // The preserved token must still connect the Engine.
+    const socket = new WebSocket(`${wsBaseUrl(baseUrl)}${(after as { endpoint: string }).endpoint}?token=${(after as { token: string }).token}`);
+    await once(socket, "open");
+    socket.close();
+    await once(socket, "close");
+  });
+});
+
+test("Gateway binds one RPC deadline and never forwards expired work", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl);
+    let forwarded = 0;
+    attachMockEngine(socket, (envelope) => {
+      forwarded += 1;
+      assert.ok(typeof envelope.deadlineAt === "string");
+      assert.ok(Date.parse(envelope.deadlineAt as string) <= Date.now() + 30_000);
+      return { type: "response", requestId: envelope.requestId, result: {} };
+    });
+    const post = (body: unknown) => fetch(`${baseUrl}/session/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const expired = await post({ ...rpcBody("expired", "fs.read", {}), deadlineAt: "2000-01-01T00:00:00Z" });
+    assert.equal((await expired.json() as { error: { code: string } }).error.code, "DEADLINE_EXCEEDED");
+    assert.equal(forwarded, 0);
+    const live = await post({ ...rpcBody("live", "fs.read", {}), deadlineAt: "2100-01-01T00:00:00Z" });
+    assert.equal((await live.json() as { type: string }).type, "response");
+    assert.equal(forwarded, 1);
+    socket.close();
+    await once(socket, "close");
+  });
+});
 
 test("heartbeat returns the idle interval for device information", async () => {
   await withGateway(async (baseUrl) => {
@@ -565,6 +626,56 @@ test("rpc timeout closes the live session and rejects further rpcs", async () =>
   }, { sessionRpcTimeoutMs: 30 });
 });
 
+test("a shorter caller deadline leaves other pending requests and the session intact", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl);
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => { release = resolve; });
+    let firstStarted!: () => void;
+    const started = new Promise<void>((resolve) => { firstStarted = resolve; });
+    attachMockEngine(socket, async (envelope) => {
+      if (envelope.requestId === "first") firstStarted();
+      if (envelope.requestId === "expired") return new Promise<Record<string, unknown>>(() => {});
+      await gate;
+      return { type: "response", requestId: envelope.requestId, result: { ok: true } };
+    });
+    const post = (body: unknown) => fetch(`${baseUrl}/session/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const first = post(rpcBody("first", "fs.read", {}));
+    await started;
+    const expired = post({ ...rpcBody("expired", "fs.read", {}), deadlineAt: new Date(Date.now() + 80).toISOString() });
+    const next = post(rpcBody("next", "fs.read", {}));
+    const timedOut = await expired;
+    assert.equal(timedOut.status, 200);
+    assert.equal((await timedOut.json() as { error: { code: string } }).error.code, "DEADLINE_EXCEEDED");
+    assert.equal((await (await fetch(`${baseUrl}/session/status`)).json() as { status: string }).status, "ready");
+    assert.equal((await post(rpcBody("expired", "fs.read", {}))).status, 409);
+    release();
+    for (const response of await Promise.all([first, next])) {
+      assert.equal(response.status, 200);
+      assert.equal((await response.json() as { type: string }).type, "response");
+    }
+    socket.close();
+    await once(socket, "close");
+  }, { sessionRpcTimeoutMs: 1_000 });
+});
+
+test("pending RPC execution remains active when its idle bound is shorter", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl);
+    attachMockEngine(socket, async (envelope) => {
+      await new Promise((resolve) => setTimeout(resolve, 120));
+      return { type: "response", requestId: envelope.requestId, result: { ok: true } };
+    });
+    const response = await fetch(`${baseUrl}/session/rpc`, {
+      method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(rpcBody("active", "fs.read", {})),
+    });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json() as { type: string }).type, "response");
+    socket.close();
+    await once(socket, "close");
+  }, { sessionIdleMs: 50, sessionRpcTimeoutMs: 1_000 });
+});
+
 test("timed-out requestId cannot be retried across session teardown", async () => {
   await withGateway(async (baseUrl) => {
     const first = await openEngineSession(baseUrl);
@@ -670,6 +781,50 @@ test("grant path scope rejects .. escapes and normalizes grant paths", async () 
     socket.close();
     await once(socket, "close");
   });
+});
+
+test("Engine deadline, closed errors, and lost replies protect request ids across teardown", async () => {
+  for (const code of ["DEADLINE_EXCEEDED", "SESSION_CLOSED", "disconnect"]) {
+    await withGateway(async (baseUrl) => {
+      const { socket } = await openEngineSession(baseUrl);
+      let forwarded = 0;
+      let started!: () => void;
+      const received = new Promise<void>((resolve) => { started = resolve; });
+      attachMockEngine(socket, (envelope) => {
+        forwarded += 1;
+        started();
+        return code === "disconnect" ? new Promise<Record<string, unknown>>(() => {})
+          : { type: "error", requestId: envelope.requestId, error: { code } };
+      });
+      const grant = await (await fetch(`${baseUrl}/grants`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ workspace: "fixture", path: "note.txt", methods: ["fs.write"] }),
+      })).json() as { grantId: string };
+      const body = rpcBody("uncertain-write", "fs.write", { workspace: "fixture", path: "note.txt", content: "x", mode: "overwrite" }, { grantId: grant.grantId });
+      const post = () => fetch(`${baseUrl}/session/rpc`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+      const pending = post();
+      await received;
+      if (code !== "disconnect") {
+        const response = await pending;
+        assert.equal((await response.json() as { error: { code: string } }).error.code, code);
+      }
+      socket.close();
+      await once(socket, "close");
+      await waitForStatus(baseUrl, "none");
+      if (code === "disconnect") assert.equal((await pending).status, 503);
+      const next = await openEngineSession(baseUrl);
+      attachMockEngine(next.socket, (envelope) => {
+        forwarded += 1;
+        return { type: "response", requestId: envelope.requestId, result: { ok: true } };
+      });
+      const retried = await post();
+      assert.equal(retried.status, 409);
+      assert.equal((await retried.json() as { error: string }).error, "duplicate requestId");
+      assert.equal(forwarded, 1);
+      next.socket.close();
+      await once(next.socket, "close");
+    });
+  }
 });
 
 test("failed websocket upgrade does not permanently brick session issuance", async () => {
@@ -955,6 +1110,8 @@ test("agent close sends session.close, rejects new RPC, and restores the idle he
     socket.send(JSON.stringify({ type: "session.closed", sessionId, reason: "agent_requested" }));
     socket.close();
     await once(socket, "close");
+    // The client's close event can precede the server-side session cleanup.
+    await waitForStatus(baseUrl, "none");
     const status = await (await fetch(`${baseUrl}/session/status`)).json() as { status: string; closureReason: string };
     assert.equal(status.status, "none");
     assert.equal(status.closureReason, "agent_requested");

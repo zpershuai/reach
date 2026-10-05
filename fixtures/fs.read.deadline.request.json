@@ -1,0 +1,10 @@
+{
+  "type": "request",
+  "protocol": "reach-rpc",
+  "version": "1.0",
+  "sessionId": "session-1",
+  "requestId": "deadline-1",
+  "method": "fs.read",
+  "params": { "workspace": "repo", "path": "README.md" },
+  "deadlineAt": "2030-01-01T00:00:00Z"
+}

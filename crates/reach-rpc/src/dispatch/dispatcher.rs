@@ -59,7 +59,7 @@ impl SessionDispatcher {
         &mut self,
         session: &mut SessionContext<'_>,
         envelope: &RequestEnvelope,
-        _now_ms: i64,
+        now_ms: i64,
     ) -> Result<Value, String> {
         // 1. Session binding.
         if envelope.session_id != self.session_id {
@@ -71,12 +71,21 @@ impl SessionDispatcher {
         }
         // 3. Session state: draining/cancelled rejects queued work that has not
         //    started.
-        if session.cancelled {
+        if session.cancelled || session.workspace.is_cancelled() {
             return Err(SESSION_CLOSED.to_owned());
         }
         // 4. Deadline gate: do not start work past its deadline.
-        let deadline = Instant::now() + self.rpc_deadline;
-        if Instant::now() >= deadline {
+        let started = Instant::now();
+        let mut budget = self.rpc_deadline;
+        if let Some(expiry) = &envelope.deadline_at {
+            let expiry = crate::runtime::transports::rfc3339_to_epoch_millis(expiry)
+                .map_err(|_| INVALID_PARAMS.to_owned())?;
+            if expiry <= now_ms {
+                return Err(DEADLINE_EXCEEDED.to_owned());
+            }
+            budget = budget.min(Duration::from_millis(expiry.saturating_sub(now_ms) as u64));
+        }
+        if budget.is_zero() {
             return Err(DEADLINE_EXCEEDED.to_owned());
         }
         // 5. Canonicalize a single-level `tool.call` before authorization.
@@ -90,11 +99,16 @@ impl SessionDispatcher {
         // 7. Authorization boundary.
         let auth = authorize(tool.descriptor(), envelope.permission.as_ref())
             .map_err(|error| error.code)?;
-        let deadline = Instant::now()
-            + tool
-                .descriptor()
+        let budget = budget.min(
+            tool.descriptor()
                 .default_deadline
-                .unwrap_or(self.rpc_deadline);
+                .unwrap_or(self.rpc_deadline),
+        );
+        // Never restart the budget after validation or authorization.
+        let deadline = started + budget;
+        if Instant::now() >= deadline {
+            return Err(DEADLINE_EXCEEDED.to_owned());
+        }
         // 8. Serial execution with an authorized invocation context.
         let mut context = InvocationContext {
             params: &invocation.params,
@@ -104,6 +118,14 @@ impl SessionDispatcher {
             session_id: &self.session_id,
         };
         let result = tool.execute(&mut context).map_err(|error| error.code);
+        // A write Tool reports success only after its commit boundary. Do not
+        // turn that known outcome into an uncertain mutation during teardown.
+        if result.is_ok() && tool.descriptor().access.is_write() {
+            return result;
+        }
+        if context.workspace.is_cancelled() {
+            return Err(SESSION_CLOSED.to_owned());
+        }
         if context.expired() {
             return Err(DEADLINE_EXCEEDED.to_owned());
         }
@@ -139,6 +161,7 @@ mod tests {
             request_id: request_id.into(),
             method: method.into(),
             params,
+            deadline_at: None,
             permission,
         }
     }
@@ -211,6 +234,27 @@ mod tests {
     }
 
     #[test]
+    fn queued_expired_write_is_never_invoked() {
+        let mut workspace = workspace();
+        let mut session = SessionContext::new("session-1".into(), 0, 0, &mut workspace);
+        let mut request = envelope(
+            "expired",
+            "fs.write",
+            json!({}),
+            Some(Permission {
+                grant_id: "g".into(),
+            }),
+        );
+        request.deadline_at = Some("1970-01-01T00:00:01Z".into());
+        assert_eq!(
+            dispatcher()
+                .dispatch(&mut session, &request, 2_000)
+                .unwrap_err(),
+            DEADLINE_EXCEEDED
+        );
+    }
+
+    #[test]
     fn elapsed_tool_execution_returns_deadline_exceeded() {
         struct SlowTool {
             descriptor: ToolDescriptor,
@@ -247,6 +291,63 @@ mod tests {
                 )
                 .unwrap_err(),
             DEADLINE_EXCEEDED
+        );
+    }
+
+    #[test]
+    fn committed_write_is_not_relabelled_when_its_deadline_elapses() {
+        struct CommittingTool(ToolDescriptor);
+        impl Tool for CommittingTool {
+            fn descriptor(&self) -> &ToolDescriptor {
+                &self.0
+            }
+            fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
+                let result = context
+                    .workspace
+                    .write(&crate::FsWriteParams {
+                        workspace: "fixture".into(),
+                        path: "committed.txt".into(),
+                        content: "done".into(),
+                        mode: crate::FsWriteMode::Create,
+                        if_match: None,
+                    })
+                    .map_err(|error| ToolError::new(error.code))?;
+                while !context.expired() {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                Ok(serde_json::to_value(result).unwrap())
+            }
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let mut workspace = WorkspaceFilesystem::new(HashMap::from([(
+            "fixture".into(),
+            dir.path().to_path_buf(),
+        )]));
+        let mut session = SessionContext::new("session-1".into(), 0, 0, &mut workspace);
+        let mut descriptor = ToolDescriptor::write("fs.commit");
+        descriptor.default_deadline = Some(Duration::from_millis(10));
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(CommittingTool(descriptor)));
+        let mut dispatcher =
+            SessionDispatcher::new("session-1".into(), registry, Duration::from_secs(30));
+        let result = dispatcher
+            .dispatch(
+                &mut session,
+                &envelope(
+                    "commit",
+                    "fs.commit",
+                    json!({}),
+                    Some(Permission {
+                        grant_id: "g".into(),
+                    }),
+                ),
+                0,
+            )
+            .unwrap();
+        assert_eq!(result["path"], "committed.txt");
+        assert_eq!(
+            std::fs::read_to_string(dir.path().join("committed.txt")).unwrap(),
+            "done"
         );
     }
 

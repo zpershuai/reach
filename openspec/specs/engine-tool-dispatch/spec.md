@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD: Define the Engine tool dispatch contract. Update Purpose after archive.
+Defines typed serial Tool execution with authorization, request identity, shared deadlines, and responsive session control.
 
 ## Requirements
 
@@ -40,3 +40,18 @@ The Dispatcher SHALL canonicalize one `tool.call` wrapper with `{ name, argument
 #### Scenario: Nested compatibility call is rejected before dispatch
 - **WHEN** a request uses `tool.call` whose name is another `tool.call`
 - **THEN** the Engine returns `INVALID_PARAMS` and does not invoke a Tool
+
+### Requirement: Shared deadline and responsive control lane
+The Engine MUST honor an optional Gateway-stamped absolute `deadlineAt`, including time spent queued. It MUST convert the remaining budget to a monotonic deadline and cap it by Runtime and Tool policy without restarting the budget after authorization. One serial Tool worker MAY execute while the Runtime receives session controls and a bounded queue of at most 16 deferred requests. An individual caller or Tool deadline MUST return `DEADLINE_EXCEEDED` without closing an otherwise healthy session or discarding other requests. Close, lease expiry, rotation, and the Runtime's hard RPC execution bound MUST signal cooperative cancellation and discard deferred requests before session teardown. The Runtime MUST drain the worker before resuming heartbeat; a syscall or atomic mutation already past its commit boundary MAY finish. A successful write-class Tool result MUST NOT be changed to a cancellation or deadline error after commit, and the Runtime MUST attempt to send that result before finalizing transport closure.
+
+#### Scenario: Expired queued mutation
+- **WHEN** a forwarded write reaches dispatch after its absolute deadline
+- **THEN** no Tool runs, the Engine returns `DEADLINE_EXCEEDED`, and later valid queued requests remain dispatchable
+
+#### Scenario: Close while a Tool is running
+- **WHEN** a session close arrives while a cooperative Tool executes and another request is queued
+- **THEN** the Runtime signals cancellation, drains the running worker, and does not execute the queued request
+
+#### Scenario: Mutation finishes after crossing its commit boundary
+- **WHEN** a write-class Tool reports success while session cancellation or its request deadline has elapsed
+- **THEN** dispatch preserves its successful result and revision, while any requested session teardown still completes

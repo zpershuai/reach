@@ -148,3 +148,28 @@ The system SHALL bind pagination cursors to the active session, method, and comp
 #### Scenario: Clear cursors after abnormal session end
 - **WHEN** a session ends because the WebSocket read or response send fails before a clean `job.done` close
 - **THEN** all cursors created during that session are invalidated and a later session cannot resume them
+
+### Requirement: Descriptor-relative inspection and bounded snapshots
+The Rust Engine MUST inspect and traverse workspace paths through no-follow directory descriptors. Opening and reading regular files MUST reject non-regular targets without waiting on a FIFO. The 8 MiB bound MUST be enforced during reads even when files grow after metadata inspection. Directory enumeration MUST retain at most 10,000 entries per directory and recursion MUST be bounded to 128 directory levels, failing as `DIRECTORY_TOO_LARGE` or `DIRECTORY_TOO_DEEP`. Platforms lacking descriptor-relative primitives MUST fail closed. Completed pagination snapshots, including the TypeScript test reference, MUST be deleted and exhausted cursors MUST be invalid.
+
+#### Scenario: Directory is swapped during inspection
+- **WHEN** a validated directory's path is replaced with a symbolic link to an outside directory
+- **THEN** inspection continues through the pinned original descriptor or fails without reading outside content
+
+#### Scenario: Complete many paginated queries
+- **WHEN** a session repeatedly consumes queries to their final pages
+- **THEN** completed snapshots do not consume the 32-live-cursor allowance and exhausted cursors are rejected
+
+### Requirement: Bounded cooperative text reads
+Regular-file reads and grep's partial byte-budget reads MUST check cooperative cancellation between chunks no larger than 64 KiB. Grep MUST also check its invocation deadline between chunks and scanned lines while preserving its truncation behavior. Text reads and mutation pre-reads MUST return `INVALID_UTF8` for invalid UTF-8 content on supported platforms, without modifying that content. Reading a directory as a text file MUST return `FILE_NOT_FOUND`; non-regular special targets MUST remain access-denied. `fs.stat` MAY hash raw file bytes without requiring valid UTF-8.
+
+#### Scenario: Cancel grep during one large file
+- **WHEN** session cancellation is requested between read chunks of a large regular file
+- **THEN** grep stops before reading another chunk and does not wait to consume the whole file
+
+### Requirement: Safe traversal under concurrent entry changes
+Within a verified pinned directory, traversal MUST skip children removed or replaced with a symlink, directory, or special file after enumeration when they no longer match the expected entry type. It MUST not follow replacement symlinks. File callbacks MUST receive the pinned regular-file descriptor rather than reopen the child name. Workspace-root validation and other I/O, containment, deadline, and cancellation errors MUST still be reported rather than silently skipped.
+
+#### Scenario: A listed regular file is replaced before opening
+- **WHEN** a listed file is replaced with a FIFO or symlink before the no-follow child open
+- **THEN** traversal skips that entry, does not wait on the FIFO or read outside content, and continues to surviving regular files

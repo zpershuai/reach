@@ -1,0 +1,23 @@
+name: Verify Reach
+
+on: [push, pull_request]
+
+jobs:
+  verify:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/reach-rpc/package-lock.json
+      - run: npm --prefix packages/reach-rpc ci --ignore-scripts
+      - run: bash scripts/verify.sh

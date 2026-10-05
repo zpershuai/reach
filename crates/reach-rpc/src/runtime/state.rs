@@ -8,7 +8,8 @@ use crate::session::{
 
 /// The explicit single-Gateway Runtime state machine. Transitions are events,
 /// not nested control flow.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum RuntimeState {
     /// Process start; nothing has been configured or attempted yet.
     Boot,
@@ -45,7 +46,8 @@ impl RuntimeState {
 
 /// Machine-readable reason a session ended. Mirrors the `session.closed`
 /// wire reasons plus local-only reasons (connection failure, policy error).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum SessionClosureReason {
     /// The Agent/Gateway requested closure.
     AgentRequested,
@@ -99,7 +101,8 @@ impl SessionClosureReason {
 }
 
 /// Structured lifecycle event emitted by the Runtime.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[serde(tag = "event", rename_all = "snake_case")]
 pub enum RuntimeEvent {
     StateChanged {
         from: RuntimeState,
