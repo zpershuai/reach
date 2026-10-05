@@ -11,6 +11,7 @@ export interface ConnectorConfig {
   readyTimeoutMs: number;
   readyPollMs: number;
   renewSkewMs: number;
+  requestTimeoutMs: number;
 }
 
 const DEFAULT_DEVICE: DeviceConfig = {
@@ -67,8 +68,10 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConnectorConfi
   return {
     devices,
     toolMode: requestedMode,
-    readyTimeoutMs: positiveInteger(env.REACH_MCP_READY_TIMEOUT_MS, 15_000, "REACH_MCP_READY_TIMEOUT_MS"),
+    // The idle Engine polls every 120s; allow that poll plus connection setup.
+    readyTimeoutMs: positiveInteger(env.REACH_MCP_READY_TIMEOUT_MS, 150_000, "REACH_MCP_READY_TIMEOUT_MS"),
     readyPollMs: positiveInteger(env.REACH_MCP_READY_POLL_MS, 200, "REACH_MCP_READY_POLL_MS"),
     renewSkewMs: positiveInteger(env.REACH_MCP_RENEW_SKEW_MS, 60_000, "REACH_MCP_RENEW_SKEW_MS"),
+    requestTimeoutMs: positiveInteger(env.REACH_MCP_REQUEST_TIMEOUT_MS, 35_000, "REACH_MCP_REQUEST_TIMEOUT_MS"),
   };
 }

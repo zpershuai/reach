@@ -34,6 +34,9 @@ pub(crate) fn parse_params<T>(
 
 /// Refuse to begin work when the request deadline window has already elapsed.
 pub(crate) fn check_deadline(context: &InvocationContext<'_>) -> Result<(), ToolError> {
+    if context.cancelled() {
+        return Err(ToolError::new(crate::dispatch::SESSION_CLOSED));
+    }
     if context.expired() {
         Err(ToolError::new(crate::dispatch::DEADLINE_EXCEEDED))
     } else {

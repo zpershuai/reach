@@ -10,7 +10,10 @@ use std::collections::{BTreeMap, HashMap};
 use std::fs::{self, File};
 use std::io::{Read, Write};
 use std::path::{Component, Path, PathBuf};
-use std::sync::Mutex;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc, Mutex,
+};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 use uuid::Uuid;
 
@@ -27,6 +30,8 @@ pub const MAX_GREP_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_GREP_LINE_BYTES: usize = 16 * 1024;
 pub const MAX_FILE_BYTES: usize = 8 * 1024 * 1024;
 pub const MAX_CURSORS: usize = 32;
+pub const MAX_DIRECTORY_ENTRIES: usize = 10_000;
+const MAX_TRAVERSAL_DEPTH: usize = 128;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct FilesystemError {
@@ -66,6 +71,7 @@ pub struct WorkspaceFilesystem {
     roots: HashMap<String, PathBuf>,
     cursors: HashMap<String, CursorSnapshot>,
     write_lock: Mutex<()>,
+    cancelled: Arc<AtomicBool>,
 }
 
 impl WorkspaceFilesystem {
@@ -78,6 +84,7 @@ impl WorkspaceFilesystem {
             roots,
             cursors: HashMap::new(),
             write_lock: Mutex::new(()),
+            cancelled: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -87,19 +94,33 @@ impl WorkspaceFilesystem {
         Self::new(roots)
     }
 
+    pub(crate) fn cancellation(&self) -> Arc<AtomicBool> {
+        self.cancelled.clone()
+    }
+
+    pub(crate) fn begin_session(&mut self) {
+        self.cancelled.store(false, Ordering::Release);
+    }
+
+    pub fn is_cancelled(&self) -> bool {
+        self.cancelled.load(Ordering::Acquire)
+    }
+
     pub fn close(&mut self) {
         self.cursors.clear();
     }
 
     pub fn read(&self, params: &FsReadParams) -> Result<FsReadResult, FilesystemError> {
-        let file = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
-        let meta =
-            fs::symlink_metadata(&file).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-        if meta.len() as usize > MAX_FILE_BYTES {
-            return Err(FilesystemError::new("FILE_TOO_LARGE"));
+        let mut file = open_verified_entry(self.root_for(&params.workspace)?, &params.path)?;
+        if file.metadata().map_err(|_| denied())?.is_dir() {
+            return Err(FilesystemError::new("FILE_NOT_FOUND"));
         }
-        let content =
-            fs::read_to_string(&file).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+        let content = String::from_utf8(read_regular_file(
+            &mut file,
+            MAX_FILE_BYTES,
+            Some(&self.cancelled),
+        )?)
+        .map_err(|_| FilesystemError::new("INVALID_UTF8"))?;
         let lines = split_lines(&content);
         let start = params.start_line.saturating_sub(1) as usize;
         let max = params.max_lines as usize;
@@ -157,28 +178,12 @@ impl WorkspaceFilesystem {
                 PageResult::Matches(..) => Err(FilesystemError::new(INVALID_CURSOR)),
             };
         }
-        let directory = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
+        let directory = open_verified_directory(self.root_for(&params.workspace)?, &params.path)?;
         let mut entries = Vec::new();
-        for entry in fs::read_dir(&directory).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))? {
-            ensure_before_deadline(deadline)?;
-            let entry = entry.map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if is_atomic_write_temp(&name) {
-                continue;
-            }
-            let file_type = entry
-                .file_type()
-                .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-            let entry_type = if file_type.is_symlink() {
-                FsEntryType::Symlink
-            } else if file_type.is_dir() {
-                FsEntryType::Directory
-            } else {
-                FsEntryType::File
-            };
+        for (name, entry_type) in directory_entries(&directory, deadline, Some(&self.cancelled))? {
             entries.push(FsEntry {
+                path: normalize_rel_path(&params.path, &name),
                 name,
-                path: normalize_rel_path(&params.path, &entry.file_name().to_string_lossy()),
                 entry_type,
             });
         }
@@ -201,15 +206,14 @@ impl WorkspaceFilesystem {
     }
 
     pub fn stat(&self, params: &FsStatParams) -> Result<FsStatResult, FilesystemError> {
-        let entry = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
-        let meta =
-            fs::symlink_metadata(&entry).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-        let entry_type = if meta.file_type().is_symlink() {
-            FsEntryType::Symlink
-        } else if meta.is_dir() {
+        let mut file = open_verified_entry(self.root_for(&params.workspace)?, &params.path)?;
+        let meta = file.metadata().map_err(|_| denied())?;
+        let entry_type = if meta.is_dir() {
             FsEntryType::Directory
-        } else {
+        } else if meta.is_file() {
             FsEntryType::File
+        } else {
+            return Err(denied());
         };
         let mtime = system_time_to_iso8601(meta.modified().unwrap_or(UNIX_EPOCH));
         let mut result = FsStatResult {
@@ -222,7 +226,7 @@ impl WorkspaceFilesystem {
             if meta.len() as usize > MAX_FILE_BYTES {
                 return Err(FilesystemError::new("FILE_TOO_LARGE"));
             }
-            let bytes = fs::read(&entry).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+            let bytes = read_regular_file(&mut file, MAX_FILE_BYTES, Some(&self.cancelled))?;
             result.revision = Some(revision_bytes(&bytes));
         }
         Ok(result)
@@ -254,7 +258,7 @@ impl WorkspaceFilesystem {
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ensure_before_deadline(deadline)?;
+        ensure_before_deadline(deadline, Some(&self.cancelled))?;
         if params.content.len() > MAX_FILE_BYTES {
             return Err(FilesystemError::new("FILE_TOO_LARGE"));
         }
@@ -277,7 +281,7 @@ impl WorkspaceFilesystem {
         // Last gate before the mutation boundary: validation (path resolution,
         // current-content read, revision hashing) may have run past the
         // deadline, but the write must not begin afterwards.
-        ensure_before_deadline(deadline)?;
+        ensure_before_deadline(deadline, Some(&self.cancelled))?;
         self.atomic_write(root, &params.path, &params.content)?;
         Ok(FsWriteResult {
             path: params.path.clone(),
@@ -308,7 +312,7 @@ impl WorkspaceFilesystem {
             .write_lock
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
-        ensure_before_deadline(deadline)?;
+        ensure_before_deadline(deadline, Some(&self.cancelled))?;
         let root = self.root_for(&params.workspace)?;
         let current = self
             .read_mutation_content(root, &params.path)?
@@ -337,7 +341,7 @@ impl WorkspaceFilesystem {
             return Err(FilesystemError::new("FILE_TOO_LARGE"));
         }
         // Last gate before the mutation boundary (see `write_with_deadline`).
-        ensure_before_deadline(deadline)?;
+        ensure_before_deadline(deadline, Some(&self.cancelled))?;
         self.atomic_write(root, &params.path, &content)?;
         Ok(FsEditResult {
             path: params.path.clone(),
@@ -387,25 +391,32 @@ impl WorkspaceFilesystem {
                 PageResult::Entries(..) => Err(FilesystemError::new(INVALID_CURSOR)),
             };
         }
-        let root = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
+        let root = open_verified_directory(self.root_for(&params.workspace)?, &params.path)?;
         let ignored = if params.respect_gitignore {
-            read_ignore_patterns(&root)
+            read_ignore_patterns(&root, Some(&self.cancelled))
         } else {
             Vec::new()
         };
         let mut matches = Vec::new();
         let mut truncated = false;
-        walk_file_entries(&root, &root, &ignored, deadline, &mut |file| {
-            if !glob_matches(&params.pattern, file) {
-                return Ok(WalkControl::Continue);
-            }
-            if matches.len() == MAX_GLOB_RESULTS {
-                truncated = true;
-                return Ok(WalkControl::Stop);
-            }
-            matches.push(file.to_owned());
-            Ok(WalkControl::Continue)
-        })?;
+        walk_file_entries(
+            &root,
+            "",
+            &ignored,
+            deadline,
+            Some(&self.cancelled),
+            &mut |_descriptor, file| {
+                if !glob_matches(&params.pattern, file) {
+                    return Ok(WalkControl::Continue);
+                }
+                if matches.len() == MAX_GLOB_RESULTS {
+                    truncated = true;
+                    return Ok(WalkControl::Stop);
+                }
+                matches.push(file.to_owned());
+                Ok(WalkControl::Continue)
+            },
+        )?;
         let values = matches
             .into_iter()
             .map(serde_json::Value::String)
@@ -467,58 +478,64 @@ impl WorkspaceFilesystem {
                 PageResult::Entries(..) => Err(FilesystemError::new(INVALID_CURSOR)),
             };
         }
-        let root = self.resolve_entry(self.root_for(&params.workspace)?, &params.path)?;
+        let root = open_verified_directory(self.root_for(&params.workspace)?, &params.path)?;
         let mut scanned = 0usize;
         let mut truncated = false;
         let mut matches = Vec::new();
-        walk_file_entries(&root, &root, &[], deadline, &mut |path| {
-            if !params.include.is_empty()
-                && !params
-                    .include
-                    .iter()
-                    .any(|pattern| glob_matches(pattern, path))
-            {
-                return Ok(WalkControl::Continue);
-            }
-            let absolute = root.join(path);
-            let meta = match fs::symlink_metadata(&absolute) {
-                Ok(meta) => meta,
-                Err(_) => return Ok(WalkControl::Continue),
-            };
-            if meta.file_type().is_symlink() {
-                return Ok(WalkControl::Continue);
-            }
-            let remaining = MAX_GREP_BYTES.saturating_sub(scanned);
-            if remaining == 0 {
-                truncated = true;
-                return Ok(WalkControl::Stop);
-            }
-            let to_read = (meta.len() as usize).min(remaining);
-            let data = read_at_most(&absolute, to_read)?;
-            scanned += data.len();
-            if meta.len() as usize > remaining {
-                truncated = true;
-            }
-            let text = String::from_utf8_lossy(&data);
-            for (offset, line) in split_lines(&text).into_iter().enumerate() {
-                if !line.contains(&params.pattern) {
-                    continue;
+        walk_file_entries(
+            &root,
+            "",
+            &[],
+            deadline,
+            Some(&self.cancelled),
+            &mut |file, path| {
+                if !params.include.is_empty()
+                    && !params
+                        .include
+                        .iter()
+                        .any(|pattern| glob_matches(pattern, path))
+                {
+                    return Ok(WalkControl::Continue);
                 }
-                if matches.len() == MAX_GREP_MATCHES {
+                let meta = file.metadata().map_err(|_| denied())?;
+                let remaining = MAX_GREP_BYTES.saturating_sub(scanned);
+                if remaining == 0 {
                     truncated = true;
                     return Ok(WalkControl::Stop);
                 }
-                matches.push(FsGrepMatch {
-                    path: path.to_owned(),
-                    line: (offset + 1) as u32,
-                    content: truncate_utf8(&line, MAX_GREP_LINE_BYTES),
-                });
-            }
-            if truncated {
-                return Ok(WalkControl::Stop);
-            }
-            Ok(WalkControl::Continue)
-        })?;
+                let to_read = (meta.len() as usize).min(remaining);
+                let data = read_file_chunks(
+                    &mut file.take(to_read as u64),
+                    remaining,
+                    deadline,
+                    Some(&self.cancelled),
+                )?;
+                scanned += data.len();
+                if meta.len() as usize > remaining {
+                    truncated = true;
+                }
+                let text = String::from_utf8_lossy(&data);
+                for (offset, line) in split_lines(&text).into_iter().enumerate() {
+                    ensure_before_deadline(deadline, Some(&self.cancelled))?;
+                    if !line.contains(&params.pattern) {
+                        continue;
+                    }
+                    if matches.len() == MAX_GREP_MATCHES {
+                        truncated = true;
+                        return Ok(WalkControl::Stop);
+                    }
+                    matches.push(FsGrepMatch {
+                        path: path.to_owned(),
+                        line: (offset + 1) as u32,
+                        content: truncate_utf8(&line, MAX_GREP_LINE_BYTES),
+                    });
+                }
+                if truncated {
+                    return Ok(WalkControl::Stop);
+                }
+                Ok(WalkControl::Continue)
+            },
+        )?;
         let values = matches
             .iter()
             .filter_map(|item| serde_json::to_value(item).ok())
@@ -550,38 +567,6 @@ impl WorkspaceFilesystem {
             .ok_or_else(|| FilesystemError::new(WORKSPACE_ACCESS_DENIED))
     }
 
-    fn resolve_entry(&self, root: &Path, input: &str) -> Result<PathBuf, FilesystemError> {
-        let target = self.resolve_checked(root, input)?;
-        if fs::symlink_metadata(&target).is_err() {
-            return Err(FilesystemError::new("FILE_NOT_FOUND"));
-        }
-        Ok(target)
-    }
-
-    fn resolve_checked(
-        &self,
-        configured_root: &Path,
-        input: &str,
-    ) -> Result<PathBuf, FilesystemError> {
-        let real_root =
-            fs::canonicalize(configured_root).unwrap_or_else(|_| configured_root.to_path_buf());
-        let target = join_resolved(&real_root, input);
-        if !is_within(&real_root, &target) {
-            return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-        }
-        let relative = pathdiff(&real_root, &target);
-        let mut current = real_root;
-        for part in relative {
-            current.push(&part);
-            if let Ok(meta) = fs::symlink_metadata(&current) {
-                if meta.file_type().is_symlink() {
-                    return Err(FilesystemError::new(WORKSPACE_ACCESS_DENIED));
-                }
-            }
-        }
-        Ok(current)
-    }
-
     fn read_mutation_content(
         &self,
         root: &Path,
@@ -593,7 +578,7 @@ impl WorkspaceFilesystem {
         let Some((parent, name)) = open_verified_parent(root, input, false)? else {
             return Ok(None);
         };
-        descriptor_read_file(&parent, &name)
+        descriptor_read_file(&parent, &name, Some(&self.cancelled))
     }
 
     fn atomic_write(&self, root: &Path, input: &str, content: &str) -> Result<(), FilesystemError> {
@@ -883,6 +868,7 @@ fn open_verified_parent(
 fn descriptor_read_file(
     parent: &Descriptor,
     name: &str,
+    cancelled: Option<&AtomicBool>,
 ) -> Result<Option<String>, FilesystemError> {
     use rustix::fs::{openat, Mode, OFlags};
 
@@ -908,15 +894,17 @@ fn descriptor_read_file(
     if meta.len() as usize > MAX_FILE_BYTES {
         return Err(FilesystemError::new("FILE_TOO_LARGE"));
     }
-    let mut content = String::new();
-    file.read_to_string(&mut content).map_err(|_| denied())?;
-    Ok(Some(content))
+    let bytes = read_regular_file(&mut file, MAX_FILE_BYTES, cancelled)?;
+    String::from_utf8(bytes)
+        .map(Some)
+        .map_err(|_| FilesystemError::new("INVALID_UTF8"))
 }
 
 #[cfg(not(unix))]
 fn descriptor_read_file(
     _parent: &Descriptor,
     _name: &str,
+    _cancelled: Option<&AtomicBool>,
 ) -> Result<Option<String>, FilesystemError> {
     Err(denied())
 }
@@ -1050,26 +1038,53 @@ fn truncate_utf8(value: &str, max_bytes: usize) -> String {
     value[..end].to_owned()
 }
 
-fn read_at_most(path: &Path, length: usize) -> Result<Vec<u8>, FilesystemError> {
-    let mut file = File::open(path).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-    let mut buffer = vec![0u8; length];
-    let mut read_total = 0;
-    while read_total < length {
-        match file.read(&mut buffer[read_total..]) {
-            Ok(0) => break,
-            Ok(n) => read_total += n,
-            Err(_) => return Err(FilesystemError::new("FILE_NOT_FOUND")),
-        }
+fn read_regular_file(
+    file: &mut File,
+    max_bytes: usize,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, FilesystemError> {
+    let meta = file.metadata().map_err(|_| denied())?;
+    if !meta.is_file() {
+        return Err(denied());
     }
-    buffer.truncate(read_total);
-    Ok(buffer)
+    if meta.len() > max_bytes as u64 {
+        return Err(FilesystemError::new("FILE_TOO_LARGE"));
+    }
+    read_file_chunks(file, max_bytes, None, cancelled)
 }
 
-fn read_ignore_patterns(root: &Path) -> Vec<String> {
-    let Ok(content) = fs::read_to_string(root.join(".gitignore")) else {
+/// Shared bounded reads for whole files and grep's partial byte budget.
+fn read_file_chunks(
+    reader: &mut impl Read,
+    max_bytes: usize,
+    deadline: Option<Instant>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<u8>, FilesystemError> {
+    let mut bytes = Vec::new();
+    let mut buffer = [0u8; 64 * 1024];
+    loop {
+        ensure_before_deadline(deadline, cancelled)?;
+        let limit = buffer.len().min(max_bytes + 1 - bytes.len());
+        let count = reader.read(&mut buffer[..limit]).map_err(|_| denied())?;
+        if count == 0 {
+            break;
+        }
+        bytes.extend_from_slice(&buffer[..count]);
+        if bytes.len() > max_bytes {
+            return Err(FilesystemError::new("FILE_TOO_LARGE"));
+        }
+    }
+    Ok(bytes)
+}
+
+fn read_ignore_patterns(root: &Descriptor, cancelled: Option<&AtomicBool>) -> Vec<String> {
+    let Ok(mut file) = open_child(root, ".gitignore", false) else {
         return Vec::new();
     };
-    content
+    let Ok(bytes) = read_regular_file(&mut file, MAX_FILE_BYTES, cancelled) else {
+        return Vec::new();
+    };
+    String::from_utf8_lossy(&bytes)
         .lines()
         .map(str::trim)
         .filter(|line| !line.is_empty() && !line.starts_with('#') && !line.starts_with('!'))
@@ -1083,61 +1098,207 @@ enum WalkControl {
 }
 
 fn walk_file_entries(
-    root: &Path,
-    current: &Path,
+    directory: &Descriptor,
+    prefix: &str,
     ignored: &[String],
     deadline: Option<Instant>,
-    on_file: &mut dyn FnMut(&str) -> Result<WalkControl, FilesystemError>,
+    cancelled: Option<&AtomicBool>,
+    on_file: &mut dyn FnMut(&mut File, &str) -> Result<WalkControl, FilesystemError>,
 ) -> Result<WalkControl, FilesystemError> {
-    ensure_before_deadline(deadline)?;
-    let mut entries = fs::read_dir(current)
-        .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-    entries.sort_by_key(|entry| entry.file_name());
-    for entry in entries {
-        ensure_before_deadline(deadline)?;
-        let file_type = entry
-            .file_type()
-            .map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
-        if file_type.is_symlink() {
+    ensure_before_deadline(deadline, cancelled)?;
+    if prefix.split('/').count() > MAX_TRAVERSAL_DEPTH {
+        return Err(FilesystemError::new("DIRECTORY_TOO_DEEP"));
+    }
+    for (name, entry_type) in directory_entries(directory, deadline, cancelled)? {
+        ensure_before_deadline(deadline, cancelled)?;
+        if entry_type == FsEntryType::Symlink {
             continue;
         }
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        if is_atomic_write_temp(&name) {
-            continue;
-        }
-        let absolute = entry.path();
-        let relative = absolute
-            .strip_prefix(root)
-            .map_err(|_| FilesystemError::new(WORKSPACE_ACCESS_DENIED))?
-            .to_string_lossy()
-            .replace('\\', "/");
+        let relative = if prefix.is_empty() {
+            name.clone()
+        } else {
+            format!("{prefix}/{name}")
+        };
         if ignored
             .iter()
             .any(|pattern| gitignore_matches(pattern, &relative))
         {
             continue;
         }
-        if file_type.is_dir() {
-            if matches!(
-                walk_file_entries(root, &absolute, ignored, deadline, on_file)?,
-                WalkControl::Stop
-            ) {
-                return Ok(WalkControl::Stop);
-            }
-        } else if file_type.is_file() {
-            match on_file(&relative)? {
-                WalkControl::Continue => {}
-                WalkControl::Stop => return Ok(WalkControl::Stop),
-            }
+        // Directory contents can change after enumeration. No-follow opens
+        // either pin the entry or skip a disappeared/retyped child.
+        let Some(mut file) =
+            open_traversal_child(directory, &name, entry_type == FsEntryType::Directory)?
+        else {
+            continue;
+        };
+        let control = if entry_type == FsEntryType::Directory {
+            let child = file.into();
+            walk_file_entries(&child, &relative, ignored, deadline, cancelled, on_file)?
+        } else {
+            // Pass the pinned file to grep rather than opening its name again.
+            on_file(&mut file, &relative)?
+        };
+        if matches!(control, WalkControl::Stop) {
+            return Ok(WalkControl::Stop);
         }
     }
     Ok(WalkControl::Continue)
 }
 
-fn ensure_before_deadline(deadline: Option<Instant>) -> Result<(), FilesystemError> {
+#[cfg(unix)]
+fn open_child_descriptor(
+    parent: &Descriptor,
+    name: &str,
+    directory: bool,
+) -> Result<Descriptor, rustix::io::Errno> {
+    use rustix::fs::{openat, Mode, OFlags};
+    let mut flags = OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::NONBLOCK | OFlags::CLOEXEC;
+    if directory {
+        flags |= OFlags::DIRECTORY;
+    }
+    openat(parent, name, flags, Mode::empty())
+}
+
+#[cfg(unix)]
+fn open_child(parent: &Descriptor, name: &str, directory: bool) -> Result<File, FilesystemError> {
+    open_child_descriptor(parent, name, directory)
+        .map(File::from)
+        .map_err(|error| {
+            if error == rustix::io::Errno::NOENT {
+                FilesystemError::new("FILE_NOT_FOUND")
+            } else {
+                denied()
+            }
+        })
+}
+
+#[cfg(not(unix))]
+fn open_child(
+    _parent: &Descriptor,
+    _name: &str,
+    _directory: bool,
+) -> Result<File, FilesystemError> {
+    Err(denied())
+}
+
+#[cfg(unix)]
+fn open_traversal_child(
+    parent: &Descriptor,
+    name: &str,
+    directory: bool,
+) -> Result<Option<File>, FilesystemError> {
+    use rustix::io::Errno;
+    let file = match open_child_descriptor(parent, name, directory) {
+        Ok(fd) => File::from(fd),
+        Err(Errno::NOENT | Errno::NOTDIR | Errno::LOOP) => return Ok(None),
+        Err(_) => return Err(denied()),
+    };
+    let meta = file.metadata().map_err(|_| denied())?;
+    if (directory && !meta.is_dir()) || (!directory && !meta.is_file()) {
+        return Ok(None);
+    }
+    Ok(Some(file))
+}
+
+#[cfg(not(unix))]
+fn open_traversal_child(
+    _parent: &Descriptor,
+    _name: &str,
+    _directory: bool,
+) -> Result<Option<File>, FilesystemError> {
+    Err(denied())
+}
+
+#[cfg(unix)]
+fn open_verified_entry(root: &Path, input: &str) -> Result<File, FilesystemError> {
+    use rustix::fs::{open, Mode, OFlags};
+    let real_root = fs::canonicalize(root).map_err(|_| FilesystemError::new("FILE_NOT_FOUND"))?;
+    let target = join_resolved(&real_root, input);
+    if target == real_root {
+        return open(
+            &real_root,
+            OFlags::RDONLY | OFlags::DIRECTORY | OFlags::NOFOLLOW | OFlags::CLOEXEC,
+            Mode::empty(),
+        )
+        .map(File::from)
+        .map_err(|_| denied());
+    }
+    let (parent, name) = open_verified_parent(root, input, false)?
+        .ok_or_else(|| FilesystemError::new("FILE_NOT_FOUND"))?;
+    open_child(&parent, &name, false)
+}
+
+#[cfg(not(unix))]
+fn open_verified_entry(_root: &Path, _input: &str) -> Result<File, FilesystemError> {
+    Err(denied())
+}
+
+#[cfg(unix)]
+fn open_verified_directory(root: &Path, input: &str) -> Result<Descriptor, FilesystemError> {
+    let file = open_verified_entry(root, input)?;
+    if !file.metadata().map_err(|_| denied())?.is_dir() {
+        return Err(FilesystemError::new("FILE_NOT_FOUND"));
+    }
+    Ok(file.into())
+}
+
+#[cfg(not(unix))]
+fn open_verified_directory(_root: &Path, _input: &str) -> Result<Descriptor, FilesystemError> {
+    Err(denied())
+}
+
+#[cfg(unix)]
+fn directory_entries(
+    directory: &Descriptor,
+    deadline: Option<Instant>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<Vec<(String, FsEntryType)>, FilesystemError> {
+    use rustix::fs::{statat, AtFlags, Dir, FileType};
+    let mut entries = Vec::new();
+    for entry in Dir::read_from(directory).map_err(|_| denied())? {
+        ensure_before_deadline(deadline, cancelled)?;
+        let entry = entry.map_err(|_| denied())?;
+        let name = entry.file_name().to_str().map_err(|_| denied())?;
+        if name == "." || name == ".." || is_atomic_write_temp(name) {
+            continue;
+        }
+        if entries.len() == MAX_DIRECTORY_ENTRIES {
+            return Err(FilesystemError::new("DIRECTORY_TOO_LARGE"));
+        }
+        let meta = match statat(directory, entry.file_name(), AtFlags::SYMLINK_NOFOLLOW) {
+            Ok(meta) => meta,
+            Err(rustix::io::Errno::NOENT) => continue,
+            Err(_) => return Err(denied()),
+        };
+        let entry_type = match FileType::from_raw_mode(meta.st_mode) {
+            FileType::Directory => FsEntryType::Directory,
+            FileType::Symlink => FsEntryType::Symlink,
+            FileType::RegularFile => FsEntryType::File,
+            _ => continue,
+        };
+        entries.push((name.to_owned(), entry_type));
+    }
+    entries.sort_by(|a, b| a.0.cmp(&b.0));
+    Ok(entries)
+}
+
+#[cfg(not(unix))]
+fn directory_entries(
+    _directory: &Descriptor,
+    _deadline: Option<Instant>,
+    _cancelled: Option<&AtomicBool>,
+) -> Result<Vec<(String, FsEntryType)>, FilesystemError> {
+    Err(denied())
+}
+
+fn ensure_before_deadline(
+    deadline: Option<Instant>,
+    cancelled: Option<&AtomicBool>,
+) -> Result<(), FilesystemError> {
+    if cancelled.is_some_and(|flag| flag.load(Ordering::Acquire)) {
+        return Err(FilesystemError::new("SESSION_CLOSED"));
+    }
     if deadline.is_some_and(|deadline| Instant::now() >= deadline) {
         Err(FilesystemError::new(DEADLINE_EXCEEDED))
     } else {
@@ -1243,6 +1404,189 @@ mod tests {
         let mut roots = HashMap::new();
         roots.insert("fixture".to_owned(), dir.path().to_path_buf());
         (dir, WorkspaceFilesystem::new(roots))
+    }
+
+    #[test]
+    fn chunked_reads_observe_cancellation_and_deadline_between_reads() {
+        struct CancellingReader<'a> {
+            cancelled: &'a AtomicBool,
+            reads: usize,
+        }
+        impl Read for CancellingReader<'_> {
+            fn read(&mut self, bytes: &mut [u8]) -> std::io::Result<usize> {
+                self.reads += 1;
+                bytes.fill(b'x');
+                self.cancelled.store(true, Ordering::Release);
+                Ok(bytes.len())
+            }
+        }
+        let cancelled = AtomicBool::new(false);
+        let mut reader = CancellingReader {
+            cancelled: &cancelled,
+            reads: 0,
+        };
+        assert_eq!(
+            read_file_chunks(&mut reader, MAX_GREP_BYTES, None, Some(&cancelled))
+                .unwrap_err()
+                .code,
+            crate::dispatch::SESSION_CLOSED
+        );
+        assert_eq!(reader.reads, 1);
+        cancelled.store(false, Ordering::Release);
+        let expired = Instant::now() - std::time::Duration::from_millis(1);
+        assert_eq!(
+            read_file_chunks(&mut reader, MAX_GREP_BYTES, Some(expired), Some(&cancelled))
+                .unwrap_err()
+                .code,
+            DEADLINE_EXCEEDED
+        );
+        assert_eq!(reader.reads, 1);
+    }
+
+    #[test]
+    fn invalid_utf8_is_consistent_across_reads_and_mutations() {
+        let (dir, workspace) = fixture();
+        let path = dir.path().join("invalid.txt");
+        fs::write(&path, [0xff, 0xfe]).unwrap();
+        let read = workspace.read(&FsReadParams {
+            workspace: "fixture".into(),
+            path: "invalid.txt".into(),
+            start_line: 1,
+            max_lines: 1,
+        });
+        let write = workspace.write(&FsWriteParams {
+            workspace: "fixture".into(),
+            path: "invalid.txt".into(),
+            content: "new".into(),
+            mode: FsWriteMode::Overwrite,
+            if_match: None,
+        });
+        let edit = workspace.edit(&FsEditParams {
+            workspace: "fixture".into(),
+            path: "invalid.txt".into(),
+            old_string: "x".into(),
+            new_string: "y".into(),
+            replace_all: false,
+            if_match: None,
+        });
+        for code in [
+            read.unwrap_err().code,
+            write.unwrap_err().code,
+            edit.unwrap_err().code,
+        ] {
+            assert_eq!(code, "INVALID_UTF8");
+        }
+        assert_eq!(fs::read(&path).unwrap(), [0xff, 0xfe]);
+        assert_eq!(
+            workspace
+                .read(&FsReadParams {
+                    workspace: "fixture".into(),
+                    path: ".".into(),
+                    start_line: 1,
+                    max_lines: 1
+                })
+                .unwrap_err()
+                .code,
+            "FILE_NOT_FOUND"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn read_and_stat_reject_fifo_without_waiting_for_writer() {
+        let (dir, workspace) = fixture();
+        assert!(std::process::Command::new("mkfifo")
+            .arg(dir.path().join("fifo"))
+            .status()
+            .unwrap()
+            .success());
+        assert_eq!(
+            workspace
+                .read(&FsReadParams {
+                    workspace: "fixture".into(),
+                    path: "fifo".into(),
+                    start_line: 1,
+                    max_lines: 1
+                })
+                .unwrap_err()
+                .code,
+            WORKSPACE_ACCESS_DENIED
+        );
+        assert_eq!(
+            workspace
+                .stat(&FsStatParams {
+                    workspace: "fixture".into(),
+                    path: "fifo".into()
+                })
+                .unwrap_err()
+                .code,
+            WORKSPACE_ACCESS_DENIED
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn traversal_uses_pinned_directory_after_path_is_replaced() {
+        use std::os::unix::fs::symlink;
+        let (dir, _) = fixture();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        let directory = open_verified_directory(dir.path(), "nested").unwrap();
+        fs::rename(dir.path().join("nested"), dir.path().join("original")).unwrap();
+        symlink(outside.path(), dir.path().join("nested")).unwrap();
+        let mut contents = Vec::new();
+        walk_file_entries(&directory, "", &[], None, None, &mut |file, _| {
+            contents.push(read_regular_file(file, MAX_FILE_BYTES, None)?);
+            Ok(WalkControl::Continue)
+        })
+        .unwrap();
+        assert_eq!(contents, vec![b"needle\nother\n".to_vec()]);
+        assert!(open_verified_directory(dir.path(), "nested").is_err());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn traversal_skips_retyped_children_and_reads_the_pinned_file() {
+        use std::os::unix::fs::symlink;
+        let dir = tempfile::tempdir().unwrap();
+        let outside = tempfile::tempdir().unwrap();
+        fs::write(outside.path().join("secret.txt"), "outside").unwrap();
+        for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt", "z.txt"] {
+            fs::write(dir.path().join(name), name).unwrap();
+        }
+        fs::create_dir(dir.path().join("f-dir")).unwrap();
+        let directory = open_verified_directory(dir.path(), ".").unwrap();
+        let mut contents = Vec::new();
+        walk_file_entries(&directory, "", &[], None, None, &mut |file, path| {
+            if path == "a.txt" {
+                for name in ["a.txt", "b.txt", "c.txt", "d.txt", "e.txt"] {
+                    fs::remove_file(dir.path().join(name)).unwrap();
+                }
+                symlink(outside.path().join("secret.txt"), dir.path().join("a.txt")).unwrap();
+                assert!(std::process::Command::new("mkfifo")
+                    .arg(dir.path().join("b.txt"))
+                    .status()
+                    .unwrap()
+                    .success());
+                fs::create_dir(dir.path().join("c.txt")).unwrap();
+                symlink(outside.path().join("secret.txt"), dir.path().join("d.txt")).unwrap();
+                fs::remove_dir(dir.path().join("f-dir")).unwrap();
+                symlink(outside.path(), dir.path().join("f-dir")).unwrap();
+            }
+            contents.push((
+                path.to_owned(),
+                read_regular_file(file, MAX_FILE_BYTES, None)?,
+            ));
+            Ok(WalkControl::Continue)
+        })
+        .unwrap();
+        assert_eq!(
+            contents,
+            vec![
+                ("a.txt".into(), b"a.txt".to_vec()),
+                ("z.txt".into(), b"z.txt".to_vec())
+            ]
+        );
     }
 
     #[test]

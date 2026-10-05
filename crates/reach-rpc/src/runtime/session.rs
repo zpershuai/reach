@@ -81,6 +81,7 @@ impl<'a> SessionContext<'a> {
         started_at_ms: i64,
         workspace: &'a mut WorkspaceFilesystem,
     ) -> SessionContext<'a> {
+        workspace.begin_session();
         SessionContext {
             session_id,
             lease_expires_at_ms,

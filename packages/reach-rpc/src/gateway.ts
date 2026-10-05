@@ -2,6 +2,9 @@ import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { z } from "zod";
+import { canonicalizeInvocation } from "./canonical.js";
+import { GrantStore, normalizeWorkspacePath } from "./grants.js";
+export { normalizeWorkspacePath } from "./grants.js";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   CLOSURE_AGENT_REQUESTED,
@@ -60,6 +63,7 @@ const sessionWantedRequestSchema = z.object({
 
 const sessionOpenRequestSchema = z.object({
   engineId: z.string().min(1).optional(),
+  sessionId: z.string().min(1).optional(),
 });
 
 const grantRequestSchema = z.object({
@@ -68,8 +72,7 @@ const grantRequestSchema = z.object({
   methods: z.array(z.enum(["fs.write", "fs.edit"])).min(1),
 });
 
-const GRANT_TTL_MS = 5 * 60 * 1000;
-const toolCallSchema = z.object({ name: z.string().min(1), arguments: z.unknown() });
+const sessionControlSchema = z.object({ sessionId: z.string().min(1).optional() });
 
 export interface GatewayOptions {
   logger?: (message: string) => void;
@@ -96,13 +99,6 @@ interface LiveSession {
   /** True while draining after close/expiry: no new data-plane requests. */
   closed: boolean;
   leaseExpiresAt: number;
-}
-
-interface WriteGrant {
-  workspace: string;
-  path: string;
-  methods: readonly ("fs.write" | "fs.edit")[];
-  expiresAt: number;
 }
 
 interface PendingRpc {
@@ -149,89 +145,17 @@ function isoDate(epochMs: number): string {
   return new Date(epochMs).toISOString();
 }
 
-/** Lexically normalize a workspace-relative path; reject empty / absolute / `..` escapes. */
-export function normalizeWorkspacePath(path: string): string | undefined {
-  const trimmed = path.trim();
-  if (!trimmed || trimmed.startsWith("/") || trimmed.includes("\0")) return undefined;
-  const parts: string[] = [];
-  for (const part of trimmed.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") return undefined;
-    parts.push(part);
-  }
-  return parts.join("/");
-}
-
-/**
- * Unwrap any depth of `tool.call` so nested mutations remain visible to grant checks.
- * Malformed tool chains resolve to an empty method (never treated as a mutation).
- */
-function effectiveMethod(method: string, params: unknown): { method: string; params: unknown } {
-  let currentMethod = method;
-  let currentParams = params;
-  // Bound unwrap depth to avoid pathological nesting.
-  for (let depth = 0; depth < 8 && currentMethod === "tool.call"; depth += 1) {
-    const tool = toolCallSchema.safeParse(currentParams);
-    if (!tool.success) return { method: "", params: undefined };
-    currentMethod = tool.data.name;
-    currentParams = tool.data.arguments;
-  }
-  if (currentMethod === "tool.call") return { method: "", params: undefined };
-  return { method: currentMethod, params: currentParams };
-}
-
-/** True when `tool.call` nests another `tool.call` (or unwrap fails into an empty leaf). */
-function isNestedToolCall(method: string, params: unknown): boolean {
-  if (method !== "tool.call") return false;
-  let currentMethod = method;
-  let currentParams = params;
-  let depth = 0;
-  for (; depth < 8 && currentMethod === "tool.call"; depth += 1) {
-    const tool = toolCallSchema.safeParse(currentParams);
-    // A malformed outer wrapper is invalid too; otherwise it would evade this
-    // Gateway-side reject and be needlessly forwarded to the Engine.
-    if (!tool.success) return true;
-    currentMethod = tool.data.name;
-    currentParams = tool.data.arguments;
-  }
-  return depth > 1 || currentMethod === "tool.call";
-}
-
 function leafMutation(
-  method: string,
-  params: unknown,
+  leaf: ReturnType<typeof canonicalizeInvocation>,
 ): { method: "fs.write" | "fs.edit"; params: { workspace: string; path: string } } | undefined {
-  const leaf = effectiveMethod(method, params);
   if (leaf.method !== "fs.write" && leaf.method !== "fs.edit") return undefined;
   const parsed = leaf.method === "fs.write" ? parseFsWriteParams(leaf.params) : parseFsEditParams(leaf.params);
   return { method: leaf.method, params: parsed };
 }
 
-function purgeExpiredGrants(grants: Map<string, WriteGrant>, nowMs: number): void {
-  for (const [grantId, grant] of grants) {
-    if (grant.expiresAt <= nowMs) grants.delete(grantId);
-  }
-}
-
-function hasMatchingGrant(
-  grants: ReadonlyMap<string, WriteGrant>,
-  grantId: string,
-  method: "fs.write" | "fs.edit",
-  workspace: string,
-  path: string,
-): boolean {
-  const grant = grants.get(grantId);
-  if (!grant || grant.expiresAt <= Date.now()) return false;
-  const requestPath = normalizeWorkspacePath(path);
-  const grantPath = normalizeWorkspacePath(grant.path);
-  if (!requestPath || !grantPath) return false;
-  return grant.workspace === workspace
-    && grant.methods.includes(method)
-    && (requestPath === grantPath || requestPath.startsWith(`${grantPath}/`));
-}
-
 export function createGateway(options: GatewayOptions = {}): Server {
   let sessionWanted = false;
+  let wantedSessionId: string | undefined;
   let pendingSession: PendingSession | undefined;
   let liveSession: LiveSession | undefined;
   /** Last Engine-reported or observed closure reason, kept for session status. */
@@ -243,7 +167,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
   /** Request IDs already forwarded in the live session (including timed-out ones). */
   const seenRequestIds = new Set<string>();
   /**
-   * Request IDs that hit the RPC timeout. Unlike `seenRequestIds` — which the
+   * Request IDs with a timeout or uncertain session-closing outcome. Unlike
+   * `seenRequestIds` — which the
    * socket close handler clears — this survives session teardown, so a
    * timed-out mutation (which the Engine may already have applied on disk)
    * cannot be re-executed by retrying the same requestId in a fresh session.
@@ -264,9 +189,9 @@ export function createGateway(options: GatewayOptions = {}): Server {
       if (oldest !== undefined) seenRequestIds.delete(oldest);
     }
   };
-  const grants = new Map<string, WriteGrant>();
   const logger = options.logger ?? console.log;
   const now = options.now ?? Date.now;
+  const grants = new GrantStore(now);
   const sessionLeaseMs = options.sessionDurationMs ?? SESSION_LEASE_MS;
   const sessionIdleMs = options.sessionIdleMs ?? SESSION_IDLE_MS;
   const sessionRpcTimeoutMs = options.sessionRpcTimeoutMs ?? SESSION_RPC_TIMEOUT_MS;
@@ -275,6 +200,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
   const clearPendingRpcs = (reason: string) => {
     for (const [requestId, pending] of pendingRpcs) {
       clearTimeout(pending.timer);
+      noteTimedOutRequest(requestId);
       pending.reject(new Error(reason));
       pendingRpcs.delete(requestId);
     }
@@ -289,7 +215,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     }
   };
 
-  const forwardToEngine = (envelope: Record<string, unknown>): Promise<Record<string, unknown>> => {
+  const forwardToEngine = (envelope: Record<string, unknown>, closeOnTimeout: boolean): Promise<Record<string, unknown>> => {
     const session = liveSession;
     if (!session || session.socket.readyState !== WebSocket.OPEN || session.closed) {
       return Promise.reject(new Error("no ready session"));
@@ -310,14 +236,16 @@ export function createGateway(options: GatewayOptions = {}): Server {
     return new Promise<Record<string, unknown>>((resolve, reject) => {
       const timer = setTimeout(() => {
         pendingRpcs.delete(requestId);
-        // The session close this timeout triggers clears `seenRequestIds`, so
-        // retain the id in `timedOutRequestIds` (which survives teardown) to
-        // keep a timed-out mutation from being retried and re-applied.
+        // Keep timed-out mutation IDs across teardown to prevent re-application.
         noteTimedOutRequest(requestId);
+        if (!closeOnTimeout) {
+          resolve({ type: "error", requestId, error: { code: "DEADLINE_EXCEEDED" } });
+          return;
+        }
         reject(new Error("session rpc timeout"));
-        // Tear down the live session so in-flight Engine work is aborted.
+        // Stop forwarding; a mutation already past its commit boundary may finish.
         closeLiveSession(1011, "session rpc timeout");
-      }, sessionRpcTimeoutMs);
+      }, Math.max(1, Date.parse(envelope.deadlineAt as string) - now()));
       pendingRpcs.set(requestId, { resolve, reject, timer });
       resetIdleTimer?.();
       try {
@@ -339,11 +267,19 @@ export function createGateway(options: GatewayOptions = {}): Server {
     });
   };
 
-  const openSession = () => {
+  const openSession = (sessionId?: string) => {
     if (liveSession) {
       return { statusCode: 409 as const, payload: { error: "session already active" } };
     }
+    if (sessionWanted) {
+      if (sessionId && sessionId !== wantedSessionId) {
+        return { statusCode: 409 as const, payload: { error: "session binding mismatch" } };
+      }
+      // Retrying the same intent must preserve its pending token and lease.
+      return { statusCode: 200 as const, payload: { wanted: true, status: "wanted" } };
+    }
     sessionWanted = true;
+    wantedSessionId = sessionId ?? randomUUID();
     pendingSession = undefined;
     lastClosureReason = undefined;
     return { statusCode: 200 as const, payload: { wanted: true, status: "wanted" } };
@@ -375,6 +311,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       };
     }
     sessionWanted = false;
+    wantedSessionId = undefined;
     pendingSession = undefined;
     return { statusCode: 200 as const, payload: { status: "none" } };
   };
@@ -426,14 +363,30 @@ export function createGateway(options: GatewayOptions = {}): Server {
     return {
       wanted: sessionWanted,
       status,
-      sessionId: session?.sessionId ?? pendingSession?.sessionId,
+      sessionId: session?.sessionId ?? pendingSession?.sessionId ?? wantedSessionId,
       endpoint: pendingSession && !session ? SESSION_ENDPOINT_PATH : undefined,
       leaseExpiresAt: (session ?? pendingSession) ? isoDate((session ?? pendingSession)!.leaseExpiresAt) : undefined,
       closureReason: lastClosureReason,
     };
   };
 
+  const validateControlBinding = async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
+    try {
+      const control = sessionControlSchema.parse(await readOptionalJsonBody(request));
+      const currentId = liveSession?.sessionId ?? pendingSession?.sessionId ?? wantedSessionId;
+      if (control.sessionId && control.sessionId !== currentId) {
+        sendJson(response, 409, { error: "session binding mismatch" });
+        return false;
+      }
+      return true;
+    } catch (error) {
+      sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session control payload" });
+      return false;
+    }
+  };
+
   const gateway = createServer(async (request, response) => {
+    const receivedAt = now();
     if (request.method !== "POST" && request.url !== "/session/status") {
       sendJson(response, 404, { error: "not found" });
       return;
@@ -456,7 +409,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       pendingSession ??= {
         token: randomUUID(),
         expiresAt: now() + SESSION_TOKEN_TTL_MS,
-        sessionId: randomUUID(),
+        sessionId: wantedSessionId ?? randomUUID(),
         leaseExpiresAt: now() + sessionLeaseMs,
       };
       sendJson(response, 200, {
@@ -483,18 +436,20 @@ export function createGateway(options: GatewayOptions = {}): Server {
     }
 
     if (request.url === "/session/open") {
+      let intent: z.infer<typeof sessionOpenRequestSchema>;
       try {
-        sessionOpenRequestSchema.parse(await readOptionalJsonBody(request));
-      } catch {
-        sendJson(response, 400, { error: "invalid session-open payload" });
+        intent = sessionOpenRequestSchema.parse(await readOptionalJsonBody(request));
+      } catch (error) {
+        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-open payload" });
         return;
       }
-      const result = openSession();
-      sendJson(response, result.statusCode, result.payload);
+      const result = openSession(intent.sessionId);
+      sendJson(response, result.statusCode, { ...result.payload, ...(result.statusCode === 200 ? { sessionId: wantedSessionId } : {}) });
       return;
     }
 
     if (request.url === "/session/renew") {
+      if (!await validateControlBinding(request, response)) return;
       const result = renewSession();
       sendJson(response, result.statusCode, result.payload);
       return;
@@ -506,7 +461,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     }
 
     if (request.url === "/session/close") {
-      // Accept an empty body; a body is not required.
+      if (!await validateControlBinding(request, response)) return;
       const result = requestClose();
       sendJson(response, result.statusCode, result.payload);
       return;
@@ -527,11 +482,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
-      purgeExpiredGrants(grants, Date.now());
-      const grantId = randomUUID();
-      const expiresAt = Date.now() + GRANT_TTL_MS;
-      grants.set(grantId, { ...grantRequest, path: normalizedPath, expiresAt });
-      sendJson(response, 200, { grantId, expiresAt: new Date(expiresAt).toISOString() });
+      sendJson(response, 200, grants.issue(grantRequest.workspace, normalizedPath, grantRequest.methods));
       return;
     }
 
@@ -570,21 +521,24 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
+      let invocation: ReturnType<typeof canonicalizeInvocation>;
+      try {
+        invocation = canonicalizeInvocation(envelope.method, envelope.params);
+      } catch {
+        sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } });
+        return;
+      }
       try {
         // Reject nested/pathological `tool.call` before any grant lookup so the
         // response code never depends on grant state (kills the
         // PERMISSION_DENIED-vs-INVALID_PARAMS oracle). Single-level `tool.call`
-        // is still unwrapped by `leafMutation` below for grant visibility.
-        if (isNestedToolCall(envelope.method, envelope.params)) {
-          sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } });
-          return;
-        }
-        const mutation = leafMutation(envelope.method, envelope.params);
+        // remains visible to `leafMutation` for grant validation.
+        const mutation = leafMutation(invocation);
         if (mutation) {
           const permission = permissionSchema.safeParse(envelope.permission);
           if (
             !permission.success
-            || !hasMatchingGrant(grants, permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path)
+            || !grants.matches(permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path)
           ) {
             sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } });
             return;
@@ -595,8 +549,14 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
+      const deadlineMs = Math.min(receivedAt + sessionRpcTimeoutMs, envelope.deadlineAt ? Date.parse(envelope.deadlineAt) : Infinity);
+      if (deadlineMs <= now()) {
+        sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "DEADLINE_EXCEEDED" } });
+        return;
+      }
       try {
         const reply = await forwardToEngine({
+          deadlineAt: isoDate(deadlineMs),
           type: "request",
           protocol: envelope.protocol,
           version: envelope.version,
@@ -605,7 +565,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
           method: envelope.method,
           params: envelope.params,
           ...(envelope.permission ? { permission: envelope.permission } : {}),
-        });
+        }, deadlineMs === receivedAt + sessionRpcTimeoutMs);
         sendJson(response, 200, reply);
       } catch (error) {
         const message = error instanceof Error ? error.message : "session rpc failed";
@@ -638,6 +598,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     // the WebSocket handshake succeeds. A failed handshake must not brick the gateway.
     pendingSession = undefined;
     sessionWanted = false;
+    wantedSessionId = undefined;
 
     let upgraded = false;
     const failHandshake = () => {
@@ -676,11 +637,14 @@ export function createGateway(options: GatewayOptions = {}): Server {
       leaseTimer = setTimeout(sessionLimitReached, Math.max(0, session.leaseExpiresAt - now()));
     };
     leakTimer();
-    idleTimer = setTimeout(sessionLimitReached, sessionIdleMs);
     resetIdleTimer = () => {
       if (idleTimer) clearTimeout(idleTimer);
-      idleTimer = setTimeout(sessionLimitReached, sessionIdleMs);
+      idleTimer = setTimeout(() => {
+        if (pendingRpcs.size > 0) resetIdleTimer?.();
+        else sessionLimitReached();
+      }, sessionIdleMs);
     };
+    resetIdleTimer();
 
     webSocket.on("error", (error) => {
       logger(`Reach session socket error: ${error instanceof Error ? error.message : String(error)}`);
@@ -698,7 +662,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
         return;
       }
 
-      let message: { type?: unknown; requestId?: unknown };
+      let message: { type?: unknown; requestId?: unknown; error?: { code?: unknown } };
       try {
         message = JSON.parse(text.toString()) as typeof message;
       } catch {
@@ -713,6 +677,9 @@ export function createGateway(options: GatewayOptions = {}): Server {
         if (!pending) return;
         clearTimeout(pending.timer);
         pendingRpcs.delete(requestId);
+        if (message.type === "error" && (message.error?.code === "DEADLINE_EXCEEDED" || message.error?.code === "SESSION_CLOSED")) {
+          noteTimedOutRequest(requestId);
+        }
         pending.resolve(message as Record<string, unknown>);
         return;
       }
@@ -803,6 +770,6 @@ export function createGateway(options: GatewayOptions = {}): Server {
 
 async function readOptionalJsonBody(request: IncomingMessage): Promise<unknown> {
   const length = Number(request.headers["content-length"] ?? 0);
-  if (length === 0) return {};
+  if (length === 0 && !request.headers["transfer-encoding"]) return {};
   return readJsonBody(request);
 }

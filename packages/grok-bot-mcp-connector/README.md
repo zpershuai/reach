@@ -31,3 +31,16 @@ REACH_MCP_TOOL_MODE=static node packages/grok-bot-mcp-connector/dist/main.js
 ```
 
 Static mode advertises the filesystem and `session.close` tools from startup. Each requires a `deviceId` argument, then opens and binds that configured device for the call. It is less convenient than Path 2, but remains fully Gateway-mediated and works without tool-list refresh support.
+
+
+## Session recovery and time budgets
+
+The default readiness timeout is 150 seconds, covering the Engine's 120-second idle heartbeat interval plus connection setup. `REACH_MCP_READY_TIMEOUT_MS` and `REACH_MCP_READY_POLL_MS` override readiness polling. `REACH_MCP_REQUEST_TIMEOUT_MS` defaults to 35 seconds and bounds each HTTP request, including response-body reads. An unsuccessful readiness wait releases its own pending intent when the Gateway remains reachable.
+
+The connector checks the selected session before each filesystem call. Idle sessions may naturally expire; a subsequent call opens a new session before sending RPC. Switching devices closes and drains the old session first. RPC, renew, and close carry the selected session id so stale state cannot act on a replacement session. A failed forwarded RPC is returned once without automatic replay. If cleanup also fails, the connector hides stale dynamic tools and retains the uncertain owner so a later selection drains it before opening another session. A request-scoped deadline error preserves a healthy selection. Stdio EOF closes the selected session after already-received requests finish.
+
+An id returned by `/session/open` is bound immediately and later status must match it. Legacy Gateways that omit this id are supported by adopting the first id returned during acquisition, then enforcing that identity. Those Gateways lack intent ownership checks and require one controller; mixed-version operation cannot provide the newer Gateway's protection against concurrent controllers.
+
+Known HTTP request rejections (invalid parameters, oversized payload, duplicate request id, or a full forwarding queue) return a tool error while keeping a healthy selection. A lost response, RPC timeout, or missing live session still triggers lifecycle cleanup. Neither path automatically retries the filesystem call.
+
+For testing, install the shared compiler dependencies with `npm --prefix packages/reach-rpc ci --ignore-scripts`, then run `npm --prefix packages/grok-bot-mcp-connector test`. The build also builds the adjacent RPC package, which supplies the real Gateway integration fixture.

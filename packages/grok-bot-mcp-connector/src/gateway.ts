@@ -2,10 +2,16 @@ import { randomUUID } from "node:crypto";
 import type { DeviceConfig } from "./config.js";
 
 export interface ReadySession {
+  sessionId?: string;
   leaseExpiresAt?: string;
 }
 
+export interface SessionStatus extends ReadySession {
+  status: string;
+}
+
 export interface GatewayClient {
+  status(): Promise<SessionStatus>;
   openAndWait(): Promise<ReadySession>;
   renew(): Promise<ReadySession>;
   rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>>;
@@ -15,36 +21,74 @@ export interface GatewayClient {
 
 export type FetchLike = (input: string, init?: RequestInit) => Promise<Response>;
 
+export class SessionReplacedError extends Error {
+  public constructor() { super("selected session was replaced"); }
+}
+
+export class GatewayHttpError extends Error {
+  public constructor(public readonly path: string, public readonly status: number, message: string) { super(message); }
+
+  /** Known pre-forwarding rejection: no uncertain execution to drain. */
+  public get isRequestRejection(): boolean {
+    if (this.path !== "/session/rpc") return false;
+    return this.status === 400 || this.status === 413 || this.status === 429
+      || (this.status === 409 && this.message === "duplicate requestId")
+      || (this.status === 503 && (this.message === "too many pending rpcs" || this.message === "message too large"));
+  }
+}
+
 function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 export class HttpGatewayClient implements GatewayClient {
+  private sessionId: string | undefined;
+
   public constructor(
     private readonly device: DeviceConfig,
     private readonly readyTimeoutMs: number,
     private readonly readyPollMs: number,
     private readonly request: FetchLike = fetch,
+    private readonly requestTimeoutMs = 35_000,
   ) {}
 
   public async openAndWait(): Promise<ReadySession> {
-    await this.post("/session/open", {});
     const deadline = Date.now() + this.readyTimeoutMs;
+    const sessionId = randomUUID();
+    this.sessionId = sessionId;
     let lastStatus = "unknown";
-    while (Date.now() <= deadline) {
-      const status = await this.post("/session/status");
-      if (typeof status.status === "string") lastStatus = status.status;
-      if (status.status === "ready") {
-        return { leaseExpiresAt: typeof status.leaseExpiresAt === "string" ? status.leaseExpiresAt : undefined };
+    try {
+      const opened = await this.post("/session/open", { sessionId }, this.remaining(deadline));
+      // An id in the open reply acknowledges binding before polling. Legacy
+      // Gateways omit it and generate their own id at heartbeat acquisition.
+      this.sessionId = typeof opened.sessionId === "string" ? opened.sessionId : undefined;
+      while (Date.now() < deadline) {
+        const status = this.parseStatus(await this.post("/session/status", undefined, this.remaining(deadline)));
+        lastStatus = status.status;
+        if (this.sessionId && status.sessionId && status.sessionId !== this.sessionId) throw new SessionReplacedError();
+        if (status.sessionId) this.sessionId = status.sessionId;
+        if (status.status === "ready") {
+          if (!status.sessionId) throw new Error("Gateway ready status returned no session id");
+          return status;
+        }
+        await wait(Math.min(this.readyPollMs, this.remaining(deadline)));
       }
-      await wait(this.readyPollMs);
+      throw new Error(`device ${this.device.id} did not become ready (last status: ${lastStatus})`);
+    } catch (cause) {
+      // Release our pending intent as well as a connection that arrived late.
+      await this.close().catch(() => undefined);
+      throw cause;
     }
-    throw new Error(`device ${this.device.id} did not become ready (last status: ${lastStatus})`);
+  }
+
+  public async status(): Promise<SessionStatus> {
+    return this.parseStatus(await this.post("/session/status"));
   }
 
   public async renew(): Promise<ReadySession> {
-    const reply = await this.post("/session/renew", {});
-    return { leaseExpiresAt: typeof reply.leaseExpiresAt === "string" ? reply.leaseExpiresAt : undefined };
+    const reply = await this.post("/session/renew", this.sessionBinding());
+    if (typeof reply.leaseExpiresAt !== "string") throw new Error("Gateway renewal returned no lease expiry");
+    return { sessionId: this.sessionId, leaseExpiresAt: reply.leaseExpiresAt };
   }
 
   public async rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>> {
@@ -52,6 +96,7 @@ export class HttpGatewayClient implements GatewayClient {
       requestId: randomUUID(),
       method,
       params,
+      ...this.sessionBinding(),
       ...(permission ? { permission } : {}),
     });
   }
@@ -63,14 +108,55 @@ export class HttpGatewayClient implements GatewayClient {
   }
 
   public async close(): Promise<void> {
-    await this.post("/session/close", {});
+    const current = await this.status();
+    if (current.status === "none") {
+      this.sessionId = undefined;
+      return;
+    }
+    this.checkBinding(current);
+    await this.post("/session/close", this.sessionBinding());
+    const deadline = Date.now() + this.requestTimeoutMs;
+    while (Date.now() < deadline) {
+      const status = this.parseStatus(await this.post("/session/status", undefined, this.remaining(deadline)));
+      if (status.status === "none") {
+        this.sessionId = undefined;
+        return;
+      }
+      this.checkBinding(status);
+      await wait(Math.min(this.readyPollMs, this.remaining(deadline)));
+    }
+    throw new Error(`device ${this.device.id} did not close its session`);
   }
 
-  private async post(path: string, body?: unknown): Promise<Record<string, unknown>> {
+  private sessionBinding(): { sessionId?: string } {
+    return this.sessionId ? { sessionId: this.sessionId } : {};
+  }
+
+  private checkBinding(status: SessionStatus): void {
+    if (!this.sessionId) return;
+    if (!status.sessionId) throw new Error("Gateway active status returned no session id");
+    if (status.sessionId !== this.sessionId) throw new SessionReplacedError();
+  }
+
+  private remaining(deadline: number): number {
+    return Math.max(1, Math.min(this.requestTimeoutMs, deadline - Date.now()));
+  }
+
+  private parseStatus(reply: Record<string, unknown>): SessionStatus {
+    if (typeof reply.status !== "string") throw new Error("Gateway returned no session status");
+    return {
+      status: reply.status,
+      sessionId: typeof reply.sessionId === "string" ? reply.sessionId : undefined,
+      leaseExpiresAt: typeof reply.leaseExpiresAt === "string" ? reply.leaseExpiresAt : undefined,
+    };
+  }
+
+  private async post(path: string, body?: unknown, timeoutMs = this.requestTimeoutMs): Promise<Record<string, unknown>> {
     const response = await this.request(`${this.device.gatewayUrl}${path}`, {
       method: "POST",
       headers: body === undefined ? undefined : { "content-type": "application/json" },
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+      signal: AbortSignal.timeout(timeoutMs),
     });
     let payload: unknown;
     try {
@@ -80,8 +166,9 @@ export class HttpGatewayClient implements GatewayClient {
     }
     if (!response.ok) {
       const payloadError = typeof payload === "object" && payload !== null ? (payload as Record<string, unknown>).error : undefined;
-      const message = typeof payloadError === "string" ? payloadError : `Gateway ${path} failed with HTTP ${response.status}`;
-      throw new Error(message);
+      const code = typeof payloadError === "object" && payloadError !== null ? (payloadError as Record<string, unknown>).code : undefined;
+      const message = typeof payloadError === "string" ? payloadError : typeof code === "string" ? code : `Gateway ${path} failed with HTTP ${response.status}`;
+      throw new GatewayHttpError(path, response.status, message);
     }
     if (typeof payload !== "object" || payload === null) throw new Error(`Gateway ${path} returned invalid JSON`);
     return payload as Record<string, unknown>;

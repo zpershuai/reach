@@ -63,3 +63,10 @@ The system SHALL represent Engine readiness as a `session.ready` control message
 #### Scenario: Gateway waits for Engine readiness
 - **WHEN** a WebSocket has upgraded successfully but the Engine has not sent a valid `session.ready`
 - **THEN** the Gateway does not forward an Agent RPC onto that session
+
+### Requirement: Optional absolute RPC deadline
+Generic request envelopes and typed fs.read request fixtures MAY contain RFC3339 `deadlineAt`. Rust and TypeScript MUST preserve a valid deadline through parsing and serialization and reject malformed or null deadlines. Requests without this field MUST remain compatible. The Gateway MUST stamp a forwarded request with a deadline no later than its own RPC budget from HTTP receipt or the caller's earlier deadline.
+
+#### Scenario: Shared deadline fixture
+- **WHEN** both language implementations round-trip a request containing `deadlineAt`
+- **THEN** both preserve the same logical deadline and normalized defaults

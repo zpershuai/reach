@@ -167,10 +167,14 @@ fn resolve_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
         .unwrap_or(host);
-    (bare, port)
+    let addresses: Vec<SocketAddr> = (bare, port)
         .to_socket_addrs()
         .map(|addrs| addrs.collect())
-        .map_err(|error| format!("cannot resolve host {host}: {error}"))
+        .map_err(|error| format!("cannot resolve host {host}: {error}"))?;
+    if addresses.is_empty() || addresses.iter().any(|address| !address.ip().is_loopback()) {
+        return Err("Gateway must resolve exclusively to loopback addresses".into());
+    }
+    Ok(addresses)
 }
 
 /// Open a TCP stream to the first reachable candidate address, bounded overall
@@ -227,10 +231,8 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
     fn heartbeat(&mut self) -> Result<HeartbeatOutcome, String> {
         let origin = &self.config.origin;
         let authority = origin.authority();
-        let request_body = format!(
-            r#"{{"device":{{"id":"{}","platform":"rust"}}}}"#,
-            self.device_id
-        );
+        let request_body =
+            serde_json::json!({"device": {"id": self.device_id, "platform": "rust"}}).to_string();
         let path = &self.config.heartbeat_path;
         // Bound every phase of the round trip: resolve, connect (trying each
         // address within one shared budget), write, and read.
@@ -259,9 +261,7 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
                 Ok(read) => {
                     response.extend_from_slice(&buffer[..read]);
                     if response.len() > MAX_HEARTBEAT_RESPONSE_BYTES {
-                        return Err(
-                            "gateway heartbeat response exceeded the size limit".to_owned()
-                        );
+                        return Err("gateway heartbeat response exceeded the size limit".to_owned());
                     }
                 }
                 // The read timeout bounds a Gateway that accepts but never
@@ -381,10 +381,7 @@ impl SessionTransportFactory for LocalWebSocketSessionTransportFactory {
         // `localhost` resolves to both `::1` and `127.0.0.1`.
         let addresses = resolve_addresses(&origin.host, origin.port)?;
         let stream = connect_try_all(&addresses, connection_timeout).map_err(|error| {
-            format!(
-                "session connect to {} failed: {error}",
-                origin.authority()
-            )
+            format!("session connect to {} failed: {error}", origin.authority())
         })?;
         // Bound the HTTP upgrade read too; a stalled Gateway cannot hang us.
         stream
@@ -467,7 +464,10 @@ mod tests {
     }
 
     /// A heartbeat transport pointed at a live loopback listener.
-    fn heartbeat_transport(config: GatewayConfig, io_timeout: Duration) -> LocalHttpHeartbeatTransport {
+    fn heartbeat_transport(
+        config: GatewayConfig,
+        io_timeout: Duration,
+    ) -> LocalHttpHeartbeatTransport {
         LocalHttpHeartbeatTransport::new(config, "test-device", io_timeout)
     }
 
@@ -531,10 +531,8 @@ mod tests {
             let _ = stream.read(&mut request);
             std::thread::sleep(Duration::from_secs(5));
         });
-        let mut transport = heartbeat_transport(
-            loopback_gateway_config(address),
-            Duration::from_millis(200),
-        );
+        let mut transport =
+            heartbeat_transport(loopback_gateway_config(address), Duration::from_millis(200));
         let started = Instant::now();
         assert!(transport.heartbeat().is_err());
         assert!(

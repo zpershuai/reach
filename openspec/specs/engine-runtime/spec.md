@@ -2,7 +2,7 @@
 
 ## Purpose
 
-TBD: Define the runtime lifecycle contract. Update Purpose after archive.
+Defines the resident Engine lifecycle, bounded leases, session cleanup, and local Gateway transport policy.
 
 ## Requirements
 
@@ -23,6 +23,12 @@ The Runtime SHALL keep an active session only while it has a valid lease from it
 ### Requirement: Runtime safety limits
 The Runtime SHALL enforce bounded connection setup, RPC execution, session inactivity, and continuous connection age. The Engine MUST treat configured values as upper bounds and MUST NOT accept an Agent or Gateway request that relaxes its hard maximum. The initial defaults SHALL be 15 seconds for connection setup, five minutes for idle and lease duration, 30 seconds for an unspecified RPC deadline, and eight hours for continuous session rotation.
 
+Running a Tool MUST count as activity even when the configured idle timeout is shorter than its RPC execution bound. The idle window MUST restart after the worker drains. Lease expiry, rotation, and the hard execution bound MUST remain enforceable during active work.
+
+#### Scenario: A Tool executes longer than the idle interval
+- **WHEN** a Tool runs beyond the idle interval while within its lease, rotation, and execution bounds
+- **THEN** the Runtime does not close it for inactivity and starts a fresh idle window when the worker finishes
+
 #### Scenario: Continuous session reaches rotation limit
 - **WHEN** an otherwise healthy session reaches the configured continuous connection age limit
 - **THEN** the Engine enters draining, reports a rotation closure reason, closes the transport, and obtains any replacement session through a new heartbeat lease
@@ -40,3 +46,21 @@ The Runtime SHALL connect only to the configured Gateway origin. A session endpo
 #### Scenario: Heartbeat attempts endpoint redirection
 - **WHEN** a heartbeat lease supplies a WebSocket endpoint with a different origin from the configured Gateway
 - **THEN** the Engine rejects the lease, does not open a connection to that endpoint, and applies its heartbeat failure/backoff policy
+
+### Requirement: Initial lease and local transport bounds
+The Engine MUST cap both initial and renewed lease expiry at the current time plus its configured lease ceiling. Its current plaintext transport MUST accept only HTTP loopback IP literals or localhost, and resolved socket addresses MUST all be loopback addresses.
+
+#### Scenario: Gateway supplies an excessive initial lease
+- **WHEN** an initial lease exceeds the Engine lease ceiling
+- **THEN** the Engine closes at its own ceiling even if the Gateway remains connected
+
+#### Scenario: Reject a non-local plaintext Gateway
+- **WHEN** startup specifies a non-loopback host or resolution yields a non-loopback address
+- **THEN** the Engine rejects the configuration or transport attempt without connecting
+
+### Requirement: Bounded consumable lifecycle events
+The Runtime MUST retain at most 1,024 lifecycle events, evicting the oldest on overflow. Its drain API MUST consume events. The production outer loop MUST consume events when reporting lifecycle messages and structured JSON events.
+
+#### Scenario: Consume events after a long-running session
+- **WHEN** the Runtime emits more than its event buffer capacity and the consumer drains it
+- **THEN** memory remains bounded and a second drain returns no previously consumed events

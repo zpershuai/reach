@@ -4,11 +4,13 @@ import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { GrantStore, GRANT_TTL_MS } from "./grants.js";
 import {
   ContractError,
   INVALID_PARAMS,
   parseFsReadRequest,
   parseFsReadResult,
+  parseRequestEnvelope,
   parseFsEditParams,
   parseFsGlobParams,
   parseFsGrepParams,
@@ -50,6 +52,16 @@ test("defaults line parameters and serializes camelCase", () => {
     ...validRequest,
     params: { workspace: "repo", path: "README.md", startLine: 1, maxLines: 200 },
   });
+});
+
+test("shared absolute deadline survives typed and generic parsing", () => {
+  const fixture = JSON.parse(readFileSync(new URL("../../../fixtures/fs.read.deadline.request.json", import.meta.url), "utf8"));
+  assert.equal(parseRequestEnvelope(fixture).deadlineAt, fixture.deadlineAt);
+  assert.equal(JSON.parse(serializeRequest(parseFsReadRequest(fixture))).deadlineAt, fixture.deadlineAt);
+  for (const deadlineAt of [null, "not-a-time", 123]) {
+    assert.throws(() => parseRequestEnvelope({ ...fixture, deadlineAt }), ContractError);
+    assert.throws(() => parseFsReadRequest({ ...fixture, deadlineAt }), ContractError);
+  }
 });
 
 test("strips unknown fields", () => {
@@ -284,6 +296,20 @@ test("workspace names, cursor creation, and file operations stay within hard bou
   } finally { await fs.rm(root, { recursive: true, force: true }); }
 });
 
+test("completed pages release snapshots and invalidate exhausted cursors", async () => {
+  const { root, workspace } = await fixtureWorkspace();
+  try {
+    for (let index = 0; index < 40; index += 1) {
+      await workspace.list({ workspace: "fixture", path: ".", maxEntries: 100 });
+      let page = await workspace.list({ workspace: "fixture", path: ".", maxEntries: 1 });
+      const exhausted = page.cursor;
+      while (page.cursor) page = await workspace.list({ workspace: "fixture", path: ".", maxEntries: 1, cursor: page.cursor });
+      assert.equal(page.cursor, undefined);
+      await assert.rejects(() => workspace.list({ workspace: "fixture", path: ".", maxEntries: 1, cursor: exhausted }), (cause: unknown) => cause instanceof FilesystemError && cause.code === INVALID_CURSOR);
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("grep treats patterns literally and bounds incremental work and output", async () => {
   const { root, workspace } = await fixtureWorkspace();
   try {
@@ -338,5 +364,44 @@ test("descriptor-relative mutations reject symlink traversal and replacement", a
   } finally {
     await fs.rm(root, { recursive: true, force: true });
     await fs.rm(outside, { recursive: true, force: true });
+  }
+});
+test("grant issuance and expiry use the same injected clock", () => {
+  let now = 1_000;
+  const grants = new GrantStore(() => now);
+  const grant = grants.issue("fixture", "notes", ["fs.write"]);
+  assert.equal(Date.parse(grant.expiresAt), now + GRANT_TTL_MS);
+  assert.equal(grants.matches(grant.grantId, "fs.write", "fixture", "notes/a.txt"), true);
+  assert.equal(grants.matches(grant.grantId, "fs.edit", "fixture", "notes/a.txt"), false);
+  now += GRANT_TTL_MS;
+  assert.equal(grants.matches(grant.grantId, "fs.write", "fixture", "notes/a.txt"), false);
+});
+
+test("grant storage normalizes paths and owns its method list", () => {
+  const grants = new GrantStore(() => 1_000);
+  const methods: Array<"fs.write" | "fs.edit"> = ["fs.write"];
+  const grant = grants.issue("fixture", " ./notes// ", methods);
+  methods.push("fs.edit");
+  assert.equal(grants.matches(grant.grantId, "fs.write", "fixture", "notes/a.txt"), true);
+  assert.equal(grants.matches(grant.grantId, "fs.edit", "fixture", "notes/a.txt"), false);
+  assert.throws(() => grants.issue("fixture", "../outside", ["fs.write"]), /invalid grant path/);
+});
+
+test("text reads and supported mutations reject invalid UTF-8 without modifying the file", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-utf8-"));
+  try {
+    const workspace = new WorkspaceFilesystem({ fixture: root });
+    const bytes = Buffer.from([0xff, 0xfe]);
+    await fs.writeFile(join(root, "invalid.txt"), bytes);
+    const invalidUtf8 = (error: unknown) => error instanceof FilesystemError && error.code === "INVALID_UTF8";
+    const mutationError = process.platform === "linux" ? invalidUtf8
+      : (error: unknown) => error instanceof FilesystemError && error.code === "WORKSPACE_ACCESS_DENIED";
+    await assert.rejects(workspace.read({ workspace: "fixture", path: "invalid.txt", startLine: 1, maxLines: 1 }), invalidUtf8);
+    await assert.rejects(workspace.write({ workspace: "fixture", path: "invalid.txt", content: "new", mode: "overwrite" }), mutationError);
+    await assert.rejects(workspace.edit({ workspace: "fixture", path: "invalid.txt", oldString: "x", newString: "y", replaceAll: false }), mutationError);
+    assert.deepEqual(await fs.readFile(join(root, "invalid.txt")), bytes);
+    await assert.rejects(workspace.read({ workspace: "fixture", path: ".", startLine: 1, maxLines: 1 }), (error: unknown) => error instanceof FilesystemError && error.code === "FILE_NOT_FOUND");
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
   }
 });

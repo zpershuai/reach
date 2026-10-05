@@ -101,10 +101,14 @@ pub struct InvocationContext<'a> {
 }
 
 impl InvocationContext<'_> {
-    /// True when the Runtime's deadline window had already elapsed at dispatch
-    /// start: queued work that has not started must not begin.
+    /// True once this invocation's monotonic deadline has elapsed.
     pub fn expired(&self) -> bool {
         Instant::now() >= self.deadline
+    }
+
+    /// True when the Runtime has requested session teardown.
+    pub fn cancelled(&self) -> bool {
+        self.workspace.is_cancelled()
     }
 }
 
@@ -157,6 +161,9 @@ pub(crate) mod test_support {
                 &self.descriptor
             }
             fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
+                if context.cancelled() {
+                    return Err(ToolError::new(crate::dispatch::SESSION_CLOSED));
+                }
                 if context.expired() {
                     return Err(ToolError::new("DEADLINE_EXCEEDED"));
                 }

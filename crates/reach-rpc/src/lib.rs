@@ -89,13 +89,18 @@ pub struct RequestEnvelope {
     pub request_id: String,
     pub method: String,
     pub params: Value,
+    /// Absolute Gateway deadline; optional for older callers.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Permission>,
 }
 
 pub fn parse_request_envelope(input: &str) -> Result<RequestEnvelope, ContractError> {
     let value: Value = serde_json::from_str(input).map_err(|_| ContractError)?;
-    if value.get("permission").is_some_and(Value::is_null) {
+    if value.get("permission").is_some_and(Value::is_null)
+        || value.get("deadlineAt").is_some_and(Value::is_null)
+    {
         return Err(ContractError);
     }
     let request: RequestEnvelope = serde_json::from_value(value).map_err(|_| ContractError)?;
@@ -106,6 +111,10 @@ pub fn parse_request_envelope(input: &str) -> Result<RequestEnvelope, ContractEr
         || !is_non_empty(&request.session_id)
         || !is_non_empty(&request.request_id)
         || !request.params.is_object()
+        || request
+            .deadline_at
+            .as_ref()
+            .is_some_and(|value| !is_valid_lease_expiry(value))
         || request
             .permission
             .as_ref()
@@ -138,6 +147,8 @@ pub struct FsReadRequest {
     pub request_id: String,
     pub method: String,
     pub params: FsReadParams,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deadline_at: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub permission: Option<Permission>,
 }
@@ -314,7 +325,9 @@ pub struct FsGrepResult {
 
 pub fn parse_fs_read_request(input: &str) -> Result<FsReadRequest, ContractError> {
     let value: Value = serde_json::from_str(input).map_err(|_| ContractError)?;
-    if value.get("permission").is_some_and(Value::is_null) {
+    if value.get("permission").is_some_and(Value::is_null)
+        || value.get("deadlineAt").is_some_and(Value::is_null)
+    {
         return Err(ContractError);
     }
     let request: FsReadRequest = serde_json::from_value(value).map_err(|_| ContractError)?;
@@ -414,6 +427,10 @@ fn validate_request(request: &FsReadRequest) -> Result<(), ContractError> {
         || request.params.start_line < 1
         || !(1..=MAX_MAX_LINES).contains(&request.params.max_lines)
         || request
+            .deadline_at
+            .as_ref()
+            .is_some_and(|value| !is_valid_lease_expiry(value))
+        || request
             .permission
             .as_ref()
             .is_some_and(|permission| !is_non_empty(&permission.grant_id))
@@ -512,6 +529,27 @@ mod tests {
         "method": "fs.read",
         "params": { "workspace": "repo", "path": "README.md" }
     }"#;
+
+    #[test]
+    fn deadline_survives_typed_and_generic_requests() {
+        let fixture = include_str!("../../../fixtures/fs.read.deadline.request.json");
+        let typed = parse_fs_read_request(fixture).unwrap();
+        assert_eq!(typed.deadline_at.as_deref(), Some("2030-01-01T00:00:00Z"));
+        assert_eq!(
+            parse_request_envelope(fixture).unwrap().deadline_at,
+            typed.deadline_at
+        );
+        for value in [
+            serde_json::Value::Null,
+            serde_json::json!("bad-time"),
+            serde_json::json!(123),
+        ] {
+            let mut invalid: serde_json::Value = serde_json::from_str(fixture).unwrap();
+            invalid["deadlineAt"] = value;
+            assert!(parse_request_envelope(&invalid.to_string()).is_err());
+            assert!(parse_fs_read_request(&invalid.to_string()).is_err());
+        }
+    }
 
     #[test]
     fn defaults_line_parameters_and_uses_camel_case() {
