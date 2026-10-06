@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { spawn, execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import type { Socket } from "node:net";
@@ -10,6 +11,8 @@ import test from "node:test";
 import { createGateway } from "../../reach-rpc/dist/gateway.js";
 import { loadConfig } from "./config.js";
 import { McpServer } from "./server.js";
+import { MCP_VERSION } from "./version.js";
+import { GATEWAY_VERSION } from "../../reach-rpc/dist/version.js";
 
 test("MCP drives a real Gateway and Rust Engine through mutation, renewal and close", async () => {
   const repository = fileURLToPath(new URL("../../..", import.meta.url));
@@ -32,6 +35,11 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
   try {
     const build = spawn("cargo", ["build", "--quiet", "--locked", "--offline", "-p", "reach-rpc", "--bin", "engine"], { cwd: repository, stdio: "ignore" });
     assert.equal((await once(build, "exit"))[0], 0, "Rust Engine must build");
+    const engineVersion = execFileSync(join(repository, "target/debug/engine"), ["--version"], {
+      env: { ...process.env, REACH_ENGINE_ID: "" }, encoding: "utf8", timeout: 5000,
+    }).trim();
+    const manifest = readFileSync(join(repository, "crates/reach-rpc/Cargo.toml"), "utf8");
+    assert.equal(engineVersion, manifest.match(/^version = "([^"]+)"/m)![1]);
     await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
     const selecting = call(2, "pick_device", { deviceId: "engine" });
     // Start after open intent is pending, avoiding the 120-second idle interval.
@@ -46,6 +54,8 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
       stdio: "ignore",
     });
     assert.equal((await selecting).isError, undefined);
+    const versions = JSON.parse((await call(7, "get_versions", {})).content[0].text);
+    assert.deepEqual(versions, { deviceId: "engine", mcpVersion: MCP_VERSION, gatewayVersion: GATEWAY_VERSION, engineVersion });
     const identity = await (await fetch(`${gatewayUrl}/session/status`)).json() as { sessionId: string };
     assert.equal((await call(6, "fs.write", { workspace: "default", path: "invalid.txt" })).isError, true);
     assert.equal(await fs.stat(join(root, "invalid.txt")).catch(() => undefined), undefined);

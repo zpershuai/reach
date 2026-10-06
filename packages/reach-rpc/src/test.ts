@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
+import { GATEWAY_VERSION } from "./version.js";
 import { GrantStore, GRANT_TTL_MS } from "./grants.js";
 import {
   ContractError,
@@ -183,6 +186,15 @@ test("rejects malformed session control messages", () => {
   throws({ type: "request", protocol: "reach-rpc", version: "1.0", sessionId: "s", requestId: "r", method: "fs.read", params: {} });
 });
 
+test("Gateway CLI reports its package version before validating startup configuration", () => {
+  const output = execFileSync(process.execPath, [fileURLToPath(new URL("./gateway-main.js", import.meta.url)), "--version"], {
+    env: { ...process.env, GATEWAY_PORT: "invalid" }, encoding: "utf8", timeout: 5000,
+  });
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+  assert.equal(output.trim(), manifest.version);
+  assert.equal(GATEWAY_VERSION, manifest.version);
+});
+
 test("session control messages round-trip with a discriminated type", () => {
   const ready: SessionReady = {
     type: "session.ready",
@@ -190,6 +202,7 @@ test("session control messages round-trip with a discriminated type", () => {
     version: VERSION,
     sessionId: "s",
     engineId: "engine",
+    engineVersion: "2.3.4",
     workspaces: ["default"],
     methods: ["fs.read"],
   };
@@ -198,6 +211,7 @@ test("session control messages round-trip with a discriminated type", () => {
   assert.ok(text.includes('"sessionId":"s"'));
   const parsed = parseSessionMessage(JSON.parse(text));
   assert.equal(parsed.type, "session.ready");
+  assert.equal("engineVersion" in parsed && parsed.engineVersion, "2.3.4");
 });
 
 async function fixtureWorkspace(): Promise<{ root: string; workspace: WorkspaceFilesystem }> {

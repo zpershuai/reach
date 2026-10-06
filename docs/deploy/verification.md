@@ -81,7 +81,7 @@ node scripts/verify-mcp-remote.mjs "$HOME/.config/reach/mcp.json"
 
 [verify-mcp-remote.mjs](../../scripts/verify-mcp-remote.mjs) 从参数指定的客户端配置读取 `mcpServers.reach` 并启动真实安装入口，不使用源码入口代替安装产物。它仍固定读取仓库的 `.reach/deployment.json`；该文件必须含本机可读的 `workspaceRoot`，设备 JSON 的 `id` 必须与其中 `engineId` 相同。
 
-此验证要求动态模式：初始化只见两个选择工具，选中设备后出现文件工具，关闭会话后恢复两工具。静态模式是正常受支持配置，但不满足这个验证器的断言，运行验证时应使用动态配置。
+此验证要求动态模式：初始化显示 `list_devices`、`get_versions`、`pick_device`，选中设备后出现文件工具，关闭会话后恢复这三个工具。静态模式是正常受支持配置，但不满足这个验证器的断言，运行验证时应使用动态配置。
 
 检查三组行为：初始化/设备选择/动态工具，真实文件写入读取编辑及 Mac 文件核对，关闭会话及工具列表复位。最后关闭 stdin 并检查子进程正常退出，成功报告为 `.reach/mcp-verification.json`，文件保留在 `mcp-tests/<UUID>.txt`。
 

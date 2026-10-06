@@ -4,6 +4,10 @@ Gateway, device Engine, and a generic MCP connector. Protocol: reach-rpc/1.0.
 
 Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clients: [installation instructions](docs/deploy/mcp.md). Deployment history: [verification record](docs/deploy/current-deployment.md).
 
+MCP, Engine and Gateway have independent release versions, exposed through `--version`, Gateway health/session status and the MCP `get_versions` tool. See [component versions and upgrades](docs/deploy/versions.md).
+
+Each Engine installation automatically installs a pinned, checksum-verified Node.js runtime under `~/.reach/runtime/node` for Gateway and MCP processes on that host. The generated MCP configuration uses its stable `bin/node` path. After building, `bash scripts/start-gateway.sh` starts a local Gateway with this runtime. It can also be installed independently with `python3 scripts/install-node-runtime.py`.
+
 **Model B topology:** the Gateway is the single Agent-facing control plane; a long-running Engine Runtime on the device owns the workspace and executes `fs.*` RPC. Local development uses loopback (`127.0.0.1`) with two processes.
 
 ## Two-process loopback deployment

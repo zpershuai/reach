@@ -2,6 +2,8 @@
 
 Gateway 是公网控制入口，在 VPS 上由 Docker Compose 常驻，宿主 Caddy 处理 TLS。当前配置使用容器端口 `8787`、VPS 回环端口 `28787`、公网域名 `gateway.example.com`。
 
+本机直接运行 Gateway 时，可共用 Engine 安装到 `~/.reach/runtime/node/bin/node` 的独立 runtime。先完成下面的 npm 构建，然后在仓库根目录执行 `bash scripts/start-gateway.sh`；该入口通过独立 runtime 启动已构建的 Gateway。没有安装 Engine 的 Mac/Linux 主机可先执行 `python3 scripts/install-node-runtime.py`（支持 x64、arm64）。Docker 部署继续使用镜像自身的 Node，宿主与其他设备的 runtime 不跨主机共享。
+
 ## 1. 准备配置和构建产物
 
 先完成 [配置与凭证](configuration.md)，确保存在 `.reach/gateway.env`。首次部署需要已安装 Docker、Compose 插件与 Caddy，并配置域名 DNS 和 80/443 网络访问。

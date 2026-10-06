@@ -2,6 +2,7 @@ import { createInterface } from "node:readline";
 import type { ConnectorConfig, DeviceConfig } from "./config.js";
 import { GatewayHttpError, HttpGatewayClient, SessionReplacedError, type GatewayClient, type ReadySession } from "./gateway.js";
 import { deviceScopedTools, deviceTools, staticDeviceScopedTools } from "./tools.js";
+import { MCP_VERSION } from "./version.js";
 
 export const MCP_PROTOCOL_VERSION = "2025-03-26";
 
@@ -82,7 +83,8 @@ export class McpServer {
         return {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: true } },
-          serverInfo: { name: "reach-mcp", version: "0.1.0" },
+          serverInfo: { name: "reach-mcp", version: MCP_VERSION },
+          instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node. Gateway and MCP processes on the same host can use this runtime without a system Node.js installation. Filesystem tools execute on the selected Engine through its Gateway.",
         };
       case "notifications/initialized":
         return {};
@@ -109,6 +111,8 @@ export class McpServer {
     switch (call.name) {
       case "list_devices":
         return toolText({ devices: this.config.devices.map(({ id }) => ({ id })) });
+      case "get_versions":
+        return this.getVersions(call.arguments);
       case "pick_device":
         return this.pickDevice(call.arguments);
       case "fs.read":
@@ -132,6 +136,26 @@ export class McpServer {
     }
     const selected = await this.selectDevice((argumentsValue as Record<string, unknown>).deviceId as string, this.config.toolMode === "dynamic");
     return selected instanceof Error ? toolError(selected.message) : toolText({ selectedDeviceId: selected.device.id, status: "ready" });
+  }
+
+  private async getVersions(argumentsValue: unknown): Promise<Record<string, unknown>> {
+    const args = argumentsValue ?? {};
+    if (typeof args !== "object" || args === null || Array.isArray(args)) return toolError("Tool arguments must be an object");
+    const deviceId = (args as Record<string, unknown>).deviceId;
+    if (deviceId !== undefined && (typeof deviceId !== "string" || !deviceId)) return toolError("deviceId must be a non-empty string");
+    const device = deviceId === undefined ? this.selected?.device : this.config.devices.find((candidate) => candidate.id === deviceId);
+    if (deviceId !== undefined && !device) return toolError(`Unknown device: ${deviceId}`);
+    try {
+      const status = device ? await this.gateways(device, this.config).status() : undefined;
+      return toolText({
+        mcpVersion: MCP_VERSION,
+        ...(device ? { deviceId: device.id } : {}),
+        gatewayVersion: status?.gatewayVersion ?? null,
+        engineVersion: status?.engineVersion ?? null,
+      });
+    } catch (cause) {
+      return toolError(cause instanceof Error ? cause.message : "Version query failed");
+    }
   }
 
   private async callFilesystemForMode(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {

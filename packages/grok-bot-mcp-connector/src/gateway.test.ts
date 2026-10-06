@@ -28,6 +28,16 @@ test("default readiness budget includes idle heartbeat and connection setup", ()
   assert.equal(loadConfig({}).readyTimeoutMs, 150_000);
 });
 
+test("HTTP status preserves component versions and tolerates unversioned peers", async () => {
+  let reply: Record<string, unknown> = { status: "none", gatewayVersion: "2.0.0", engineVersion: "1.2.3" };
+  const client = new HttpGatewayClient({ id: "mac", gatewayUrl: "https://reach.example" }, 1000, 1, async () => new Response(JSON.stringify(reply)));
+  assert.equal((await client.status()).gatewayVersion, "2.0.0");
+  assert.equal((await client.status()).engineVersion, "1.2.3");
+  reply = { status: "none", engineVersion: null };
+  assert.equal((await client.status()).gatewayVersion, undefined);
+  assert.equal((await client.status()).engineVersion, undefined);
+});
+
 test("status retries transient transport failures but not authentication rejection", async () => {
   let requests = 0;
   const client = new HttpGatewayClient({ id: "mac", gatewayUrl: "https://reach.example" }, 1000, 1, async (_url, init) => {

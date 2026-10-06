@@ -6,11 +6,15 @@
 
 use reach_rpc::{
     default_registry, EngineConfig, EngineRuntime, LocalHttpHeartbeatTransport,
-    LocalWebSocketSessionTransportFactory, SystemClock, WorkspaceFilesystem,
+    LocalWebSocketSessionTransportFactory, SystemClock, WorkspaceFilesystem, ENGINE_VERSION,
 };
 
 fn main() {
     let gateway_url = std::env::args().nth(1);
+    if matches!(gateway_url.as_deref(), Some("--version" | "-V")) {
+        println!("{ENGINE_VERSION}");
+        return;
+    }
     let config = match EngineConfig::parse_from_env(gateway_url.as_deref()) {
         Ok(config) => config,
         Err(error) => {
@@ -46,8 +50,8 @@ fn main() {
     );
 
     println!(
-        "Reach engine ({}) heartbeating {}",
-        config.engine_id, config.gateway.base_url
+        "Reach engine v{} ({}) heartbeating {}",
+        ENGINE_VERSION, config.engine_id, config.gateway.base_url
     );
     if let Err(error) = runtime.run() {
         eprintln!("Reach engine failed: {error}");

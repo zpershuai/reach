@@ -12,18 +12,21 @@ Reach MCP Connector 是通用 stdio MCP 服务。支持本地 MCP 子进程的�
 {
   "mcpServers": {
     "reach": {
-      "command": "/opt/homebrew/opt/node/bin/node",
+      "command": "/Users/example/.reach/runtime/node/bin/node",
       "args": ["/Users/example/.local/share/reach/mcp/dist/main.js"],
       "env": {
         "REACH_MCP_DEVICES_FILE": "/Users/example/.config/reach/mcp-devices.json",
-        "REACH_MCP_READY_POLL_MS": "1000"
+        "REACH_MCP_READY_POLL_MS": "1000",
+        "REACH_NODE_BIN": "/Users/example/.reach/runtime/node/bin/node"
       }
     }
   }
 }
 ```
 
-以生成文件中的 Node 路径为准；换用户、Node 安装位置或设备时替换绝对路径。配置文件已生成，但并未自动注册到某个 MCP 客户端。客户端配置格式和重新加载方式由所用客户端决定。
+每次 Engine 安装都会自动把独立 Node.js runtime 安装到 `~/.reach/runtime/node`，MCP 使用其中 `bin/node` 的固定绝对路径，不依赖 Homebrew 或系统 Node。换用户或设备时替换绝对路径。配置文件已生成，但并未自动注册到某个 MCP 客户端。客户端配置格式和重新加载方式由所用客户端决定。
+
+MCP 初始化的 `instructions` 和 `list_devices` 工具的 description 也说明这个 runtime 的安装位置与用途。同一主机上的 Gateway、MCP 可以共用该 runtime；连接其他设备不会把远端 Node 当成本地可执行程序。
 
 Controller token 存放在独立设备 JSON 中，不需要嵌入上述共享启动配置。确认目标客户端进程能够读取该文件，并能执行指定 Node。纯云端客户端如果不能运行本地 stdio 子进程，无法直接使用此安装方式。
 
@@ -55,7 +58,7 @@ npm --prefix packages/grok-bot-mcp-connector run build
 }
 ```
 
-用 `command -v node` 确定可执行文件路径。不要把 `npm run build`、`npm start` 或带输出提示的 wrapper 作为 stdio 启动入口，stdout 必须只包含 MCP JSON-RPC。构建步骤在接入客户端前单独执行。
+已安装 Engine 时可将 `command` 设置为本机 `~/.reach/runtime/node/bin/node` 的绝对路径；否则用 `command -v node` 确定已有 Node 的路径。不要把 `npm run build`、`npm start` 或带输出提示的 wrapper 作为 stdio 启动入口，stdout 必须只包含 MCP JSON-RPC。构建步骤在接入客户端前单独执行。
 
 ## 方式 C：只安装 MCP 的稳定运行目录
 
@@ -66,14 +69,16 @@ mkdir -p "$HOME/.local/share/reach/mcp/dist" "$HOME/.config/reach"
 chmod 700 "$HOME/.local/share/reach" "$HOME/.config/reach"
 install -m 644 packages/grok-bot-mcp-connector/package.json \
   "$HOME/.local/share/reach/mcp/package.json"
-for module in main config gateway server tools; do
+for module in main config gateway server tools version; do
   install -m 644 "packages/grok-bot-mcp-connector/dist/$module.js" \
     "$HOME/.local/share/reach/mcp/dist/$module.js"
 done
+install -m 644 packages/grok-bot-mcp-connector/dist/version.json \
+  "$HOME/.local/share/reach/mcp/dist/version.json"
 install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 ```
 
-保留 `package.json` 的 `type: module`，不要只复制入口文件。当前运行依赖是这五个 JS 模块与 Node 标准库，不需复制 `node_modules`。再按方式 A 的结构填写本机 Node、入口和配置文件绝对路径。升级复制前先关闭客户端启动的 Connector。
+保留 `package.json` 的 `type: module`、六个 JS 模块及构建时生成的 `dist/version.json`，不要只复制入口文件。运行依赖均为 Node 标准库，不需复制 `node_modules`。可先执行 `python3 scripts/install-node-runtime.py` 单独安装相同的独立 runtime（支持 Mac/Linux 的 x64、arm64），再按方式 A 的结构填写本机 Node、入口和配置文件绝对路径。升级复制前先关闭客户端启动的 Connector。
 
 若 Engine 与客户端都在当前 Mac，也可使用 [Engine 安装器](engine.md) 一并安装以上文件。
 
@@ -113,7 +118,7 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 
 ## 首次使用与工具列表
 
-动态模式初始化只展示 `list_devices`、`pick_device`：
+动态模式初始化展示 `list_devices`、`get_versions`、`pick_device`：
 
 1. 调用 `list_devices` 查看配置条目。
 2. 调用 `pick_device`，参数为 `{"deviceId":"mac-engine-a"}`。

@@ -1,4 +1,10 @@
 import { createGateway } from "./gateway.js";
+import { GATEWAY_VERSION } from "./version.js";
+
+if (process.argv.includes("--version") || process.argv.includes("-V")) {
+  console.log(GATEWAY_VERSION);
+  process.exit(0);
+}
 
 const port = Number(process.env.GATEWAY_PORT ?? 8787);
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -31,5 +37,5 @@ if (process.env.REACH_HTTP_LOG === "1") {
   });
 }
 gateway.listen(port, host, () => {
-  console.log(`Reach gateway listening on http://${host}:${port}`);
+  console.log(`Reach gateway v${GATEWAY_VERSION} listening on http://${host}:${port}`);
 });

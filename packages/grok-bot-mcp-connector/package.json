@@ -7,7 +7,7 @@
     "reach-grok-mcp": "dist/main.js"
   },
   "scripts": {
-    "build": "npm --prefix ../reach-rpc run build && ../reach-rpc/node_modules/.bin/tsc --project tsconfig.json",
+    "build": "npm --prefix ../reach-rpc run build && ../reach-rpc/node_modules/.bin/tsc --project tsconfig.json && node ../../scripts/write-build-version.mjs",
     "start": "node dist/main.js",
     "test": "npm run build && node --test --test-timeout=30000 dist/test.js dist/gateway.test.js dist/stdio-proof.js dist/integration.test.js"
   }

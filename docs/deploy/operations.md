@@ -99,7 +99,7 @@ install -m 600 "$HOME/.config/reach/mcp-devices.json" .reach/devices-upgrade.jso
 bash scripts/install-engine-macos.sh .reach/engine-upgrade.env .reach/devices-upgrade.json
 ```
 
-此示例适用于 Engine 与 MCP 均已安装；仅更新 Engine 时省略 npm 构建、设备 JSON 暂存和安装器第二个参数。首次构建仍需先安装 `reach-rpc` 的 npm 编译依赖。安装器会重新生成 `mcp.json`，如果此前自定义静态模式或超时，应在备份基础上重新合并这些选项。
+此示例适用于 Engine 与 MCP 均已安装；仅更新 Engine 时省略 npm 构建、设备 JSON 暂存和安装器第二个参数。首次构建仍需先安装 `reach-rpc` 的 npm 编译依赖。安装器会更新 `mcp.json` 中的入口与独立 Node runtime 路径，保留已有的静态模式、超时等环境选项。即使本次只升级 Engine，已安装 MCP 的启动配置也会切换到独立 runtime。
 
 回滚 Engine 时先 `bootout`，从私有备份恢复 `~/.local/share/reach/engine`（755）与 `~/.config/reach/engine.env`（600），再 `bootstrap` 原 plist。回滚 MCP 时关闭客户端子进程，恢复整个运行目录和设备 JSON，再重新加载客户端。文件工作区不跟随二进制回滚。
 
