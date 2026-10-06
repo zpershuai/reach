@@ -36,7 +36,7 @@ test("initialize declares tools.listChanged", async () => {
     result: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: true } },
-      serverInfo: { name: "reach-grok-bot-mcp", version: "0.1.0" },
+      serverInfo: { name: "reach-mcp", version: "0.1.0" },
     },
   }]);
 });

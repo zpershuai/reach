@@ -9,7 +9,7 @@ use crate::runtime::config::{GatewayConfig, Origin};
 /// Resolve a heartbeat-supplied session endpoint to an absolute WebSocket URL,
 /// or reject it. A relative path like `/session` is resolved against the
 /// configured Gateway origin; an absolute URL must match that origin (host and
-/// port; the current loopback transport supports `ws://` only).
+/// port, and corresponding `ws://` or `wss://` scheme).
 pub fn resolve_session_endpoint(config: &GatewayConfig, endpoint: &str) -> Result<String, String> {
     let trimmed = endpoint.trim();
     if trimmed.is_empty() {
@@ -95,7 +95,12 @@ mod tests {
     }
 
     #[test]
-    fn https_gateway_is_rejected_until_tls_transport_exists() {
-        assert!(GatewayConfig::new("https://reach.example:8443").is_err());
+    fn https_gateway_resolves_to_pinned_wss_endpoint() {
+        let config = GatewayConfig::new("https://reach.example:8443").unwrap();
+        assert_eq!(
+            resolve_session_endpoint(&config, "/session").unwrap(),
+            "wss://reach.example:8443/session"
+        );
+        assert!(resolve_session_endpoint(&config, "ws://reach.example:8443/session").is_err());
     }
 }

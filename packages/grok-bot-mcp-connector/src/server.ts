@@ -82,7 +82,7 @@ export class McpServer {
         return {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: true } },
-          serverInfo: { name: "reach-grok-bot-mcp", version: "0.1.0" },
+          serverInfo: { name: "reach-mcp", version: "0.1.0" },
         };
       case "notifications/initialized":
         return {};
@@ -310,7 +310,7 @@ export function startStdioServer(config: ConnectorConfig): void {
   });
   input.on("close", () => {
     pending = pending.then(() => server.shutdown()).catch((cause) => {
-      process.stderr.write(`reach-grok-mcp: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+      process.stderr.write(`reach-mcp: ${cause instanceof Error ? cause.message : String(cause)}\n`);
     });
   });
 }

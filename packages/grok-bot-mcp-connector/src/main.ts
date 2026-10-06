@@ -5,6 +5,6 @@ import { startStdioServer } from "./server.js";
 try {
   startStdioServer(loadConfig());
 } catch (error) {
-  process.stderr.write(`reach-grok-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
+  process.stderr.write(`reach-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
   process.exitCode = 1;
 }

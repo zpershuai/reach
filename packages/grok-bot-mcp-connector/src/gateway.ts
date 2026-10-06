@@ -41,6 +41,15 @@ function wait(milliseconds: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
+function isTransientTransportError(error: unknown): boolean {
+  if (error instanceof DOMException) return error.name === "TimeoutError" || error.name === "AbortError";
+  if (!(error instanceof TypeError) || error.message !== "fetch failed") return false;
+  const cause = error.cause;
+  if (typeof cause !== "object" || cause === null || !("code" in cause)) return false;
+  return ["ECONNRESET", "ECONNREFUSED", "ETIMEDOUT", "EPIPE", "EAI_AGAIN",
+    "UND_ERR_CONNECT_TIMEOUT", "UND_ERR_SOCKET", "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT"].includes(String(cause.code));
+}
+
 export class HttpGatewayClient implements GatewayClient {
   private sessionId: string | undefined;
 
@@ -63,7 +72,7 @@ export class HttpGatewayClient implements GatewayClient {
       // Gateways omit it and generate their own id at heartbeat acquisition.
       this.sessionId = typeof opened.sessionId === "string" ? opened.sessionId : undefined;
       while (Date.now() < deadline) {
-        const status = this.parseStatus(await this.post("/session/status", undefined, this.remaining(deadline)));
+        const status = await this.observeStatus(deadline);
         lastStatus = status.status;
         if (this.sessionId && status.sessionId && status.sessionId !== this.sessionId) throw new SessionReplacedError();
         if (status.sessionId) this.sessionId = status.sessionId;
@@ -76,13 +85,28 @@ export class HttpGatewayClient implements GatewayClient {
       throw new Error(`device ${this.device.id} did not become ready (last status: ${lastStatus})`);
     } catch (cause) {
       // Release our pending intent as well as a connection that arrived late.
+      const readinessExpired = isTransientTransportError(cause) && Date.now() >= deadline;
       await this.close().catch(() => undefined);
+      if (readinessExpired) throw new Error(`device ${this.device.id} did not become ready (last status: ${lastStatus})`, { cause });
       throw cause;
     }
   }
 
   public async status(): Promise<SessionStatus> {
-    return this.parseStatus(await this.post("/session/status"));
+    return this.observeStatus(Date.now() + this.requestTimeoutMs);
+  }
+
+  /** Retry only status observations within one deadline. Forwarded RPC,
+   * session controls and grant issuance are never automatically replayed. */
+  private async observeStatus(deadline: number): Promise<SessionStatus> {
+    while (true) {
+      try {
+        return this.parseStatus(await this.post("/session/status", undefined, Math.min(5000, this.remaining(deadline))));
+      } catch (error) {
+        if (!isTransientTransportError(error) || Date.now() >= deadline) throw error;
+        await wait(Math.min(this.readyPollMs, Math.max(0, deadline - Date.now())));
+      }
+    }
   }
 
   public async renew(): Promise<ReadySession> {
@@ -117,7 +141,7 @@ export class HttpGatewayClient implements GatewayClient {
     await this.post("/session/close", this.sessionBinding());
     const deadline = Date.now() + this.requestTimeoutMs;
     while (Date.now() < deadline) {
-      const status = this.parseStatus(await this.post("/session/status", undefined, this.remaining(deadline)));
+      const status = await this.observeStatus(deadline);
       if (status.status === "none") {
         this.sessionId = undefined;
         return;
@@ -152,16 +176,21 @@ export class HttpGatewayClient implements GatewayClient {
   }
 
   private async post(path: string, body?: unknown, timeoutMs = this.requestTimeoutMs): Promise<Record<string, unknown>> {
+    const headers: Record<string, string> = {};
+    if (body !== undefined) headers["content-type"] = "application/json";
+    if (this.device.controllerToken) headers.authorization = `Bearer ${this.device.controllerToken}`;
     const response = await this.request(`${this.device.gatewayUrl}${path}`, {
       method: "POST",
-      headers: body === undefined ? undefined : { "content-type": "application/json" },
+      headers,
+      redirect: "error",
       ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       signal: AbortSignal.timeout(timeoutMs),
     });
     let payload: unknown;
     try {
       payload = await response.json();
-    } catch {
+    } catch (error) {
+      if (isTransientTransportError(error)) throw error;
       payload = undefined;
     }
     if (!response.ok) {

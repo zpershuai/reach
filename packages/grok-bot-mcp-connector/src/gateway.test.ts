@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createServer, type RequestListener } from "node:http";
 import type { Socket } from "node:net";
 import test from "node:test";
@@ -23,6 +26,77 @@ async function withHttp(handler: RequestListener, check: (url: string) => Promis
 
 test("default readiness budget includes idle heartbeat and connection setup", () => {
   assert.equal(loadConfig({}).readyTimeoutMs, 150_000);
+});
+
+test("status retries transient transport failures but not authentication rejection", async () => {
+  let requests = 0;
+  const client = new HttpGatewayClient({ id: "mac", gatewayUrl: "https://reach.example" }, 1000, 1, async (_url, init) => {
+    assert.equal(init?.method, "POST");
+    requests++;
+    if (requests === 1) throw new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) });
+    return new Response(JSON.stringify({ status: "none" }), { status: 200 });
+  }, 1000);
+  assert.equal((await client.status()).status, "none");
+  assert.equal(requests, 2);
+  requests = 0;
+  const unauthorized = new HttpGatewayClient({ id: "mac", gatewayUrl: "https://reach.example" }, 1000, 1, async () => {
+    requests++;
+    return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+  }, 1000);
+  await assert.rejects(unauthorized.status(), /unauthorized/);
+  assert.equal(requests, 1);
+});
+
+test("readiness tolerates a lost status response without replaying session open", async () => {
+  let sessionId = "";
+  let opens = 0;
+  let polls = 0;
+  const client = new HttpGatewayClient({ id: "mac", gatewayUrl: "https://reach.example" }, 1000, 1, async (url, init) => {
+    if (url.endsWith("/session/open")) {
+      opens++;
+      sessionId = JSON.parse(init?.body as string).sessionId;
+      return new Response(JSON.stringify({ sessionId }));
+    }
+    assert.ok(url.endsWith("/session/status"));
+    polls++;
+    if (polls === 1) throw new TypeError("fetch failed", { cause: Object.assign(new Error("reset"), { code: "ECONNRESET" }) });
+    return new Response(JSON.stringify({ status: "ready", sessionId }));
+  }, 1000);
+  assert.equal((await client.openAndWait()).sessionId, sessionId);
+  assert.equal(opens, 1);
+  assert.equal(polls, 2);
+});
+
+test("Connector loads private device credentials from a config file", () => {
+  const directory = mkdtempSync(join(tmpdir(), "reach-config-"));
+  const path = join(directory, "devices.json");
+  const device = { id: "mac", gatewayUrl: "https://reach.example", controllerToken: "c".repeat(48) };
+  try {
+    writeFileSync(path, JSON.stringify([device]), { mode: 0o600 });
+    assert.deepEqual(loadConfig({ REACH_MCP_DEVICES_FILE: path }).devices, [device]);
+    assert.throws(() => loadConfig({ REACH_MCP_DEVICES_FILE: path, REACH_MCP_DEVICES: "[]" }));
+  } finally {
+    rmSync(directory, { recursive: true });
+  }
+});
+
+test("Connector authenticates status and refuses redirects that could leak credentials", async () => {
+  const controllerToken = "c".repeat(48);
+  await withHttp((request, response) => {
+    assert.equal(request.headers.authorization, `Bearer ${controllerToken}`);
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ status: "none" }));
+  }, async (gatewayUrl) => {
+    const client = new HttpGatewayClient({ id: "mac", gatewayUrl, controllerToken }, 1000, 10);
+    assert.equal((await client.status()).status, "none");
+  });
+  await withHttp((_request, response) => {
+    response.writeHead(302, { location: "http://127.0.0.1:1/credential-leak" });
+    response.end();
+  }, async (gatewayUrl) => {
+    const client = new HttpGatewayClient({ id: "mac", gatewayUrl, controllerToken }, 1000, 10);
+    await assert.rejects(client.status());
+  });
 });
 
 test("readiness timeout clears the same pending session intent", async () => {

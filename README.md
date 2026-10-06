@@ -1,6 +1,8 @@
 # Reach
 
-Gateway and engine for Grok Bot. Protocol: reach-rpc/1.0.
+Gateway, device Engine, and a generic MCP connector. Protocol: reach-rpc/1.0.
+
+Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clients: [installation instructions](docs/deploy/mcp.md). Deployment history: [verification record](docs/deploy/current-deployment.md).
 
 **Model B topology:** the Gateway is the single Agent-facing control plane; a long-running Engine Runtime on the device owns the workspace and executes `fs.*` RPC. Local development uses loopback (`127.0.0.1`) with two processes.
 
@@ -31,7 +33,7 @@ REACH_IDLE_SECS=300                     # session inactivity bound
 REACH_ROTATION_SECS=28800               # continuous connection max age (8h)
 ```
 
-The Engine accepts exactly one **`http://` loopback Gateway** origin. HTTPS/WSS is rejected until a TLS-capable transport is added; a second origin, invalid scheme, invalid timeout, or empty Engine identifier fails fast before any heartbeat.
+The Engine accepts exactly one configured Gateway origin: plaintext HTTP on loopback for local development, or verified HTTPS/WSS with `REACH_ENGINE_TOKEN` for remote deployment. A second origin, invalid scheme, invalid timeout, or empty Engine identifier fails fast before any heartbeat.
 
 ## Agent session lifecycle
 
@@ -90,7 +92,7 @@ Control API summary:
 
 ## Engine Runtime behavior
 
-- While no session is wanted the Engine posts a heartbeat every **120s** (idle interval). Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
+- While no session is wanted the Engine posts a heartbeat every **120s** by default; the current remote deployment sets `REACH_HEARTBEAT_INTERVAL_SECS=15`. Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
 - The lease `endpoint` is a Gateway-relative path (`/session`); the Engine resolves it against its **configured** Gateway origin and refuses a lease that points anywhere else.
 - After opening the WebSocket the Engine sends `session.ready` (protocol/version, Engine id, workspace names, supported methods). The Gateway forwards no data-plane request until it has seen a valid `ready`.
 - Tools execute serially on one worker while the Runtime continues receiving close/renew control messages. Close, lease expiry, rotation, or the hard RPC execution timeout sets a cooperative cancellation flag, drops queued work, drains the worker, and then releases the session. An atomic mutation already past its commit boundary may finish.
@@ -107,7 +109,7 @@ Control API summary:
 | Idle (no RPC, renewal, or control) | 5 min |
 | Continuous connection rotation | 8 h |
 
-These are Engine **hard maxima**: both the initial lease and every renewal are capped by the Engine policy. Startup validates the HTTP loopback origin; resolved addresses must also be loopback addresses.
+These are Engine **hard maxima**: both the initial lease and every renewal are capped by the Engine policy. Plaintext HTTP origins and their resolved addresses must be loopback; remote connections use verified TLS.
 
 ### Closure reasons
 
@@ -145,7 +147,7 @@ HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. Eve
 
 ## Out of scope (for now)
 
-Public bind addresses, TLS termination, remote authentication, multi-device session targeting, and multiple simultaneous Engine sessions are not part of this loopback Model B deployment.
+Multi-device session targeting and multiple simultaneous Engine sessions remain out of scope. Remote deployment supports one configured Engine, separate Controller/Engine credentials, and an external TLS terminator. See the deployment guide for configuration and the retained local development mode.
 
 
 ## RPC deadlines and retry behavior
