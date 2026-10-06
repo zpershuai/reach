@@ -1,6 +1,30 @@
 # 当前部署与历史验收记录
 
-本页记录 2026-10-05 部署验收时的配置和结果，是历史快照。编写文档时未重新执行远端发布或故障注入；服务当前状态按 [运维检查](operations.md) 查询，不能仅凭本页认定实时在线。
+本页记录 2026-10-05 首次部署和 2026-10-06 更新验收时的配置与结果，是历史快照。服务当前状态按 [运维检查](operations.md) 查询，不能仅凭本页认定实时在线。
+
+## 2026-10-06 Engine 与 Gateway 更新
+
+从源码提交 `367b1f84aef561e5c4a40125f34cbd0b75f91838` 构建并替换本机 Engine 与 VPS Gateway。两端组件版本均为 `0.1.0`，已支持版本上报与查询。本机独立 Node runtime 为 `v24.21.0`，稳定入口为 `~/.reach/runtime/node/bin/node`。
+
+| 验证 | 当次结果 |
+| --- | --- |
+| VPS Gateway | `deploy-gateway-1` healthy，容器 CLI 与 `/healthz` 返回 `0.1.0` |
+| 本机 Engine | LaunchAgent running，PID `63389`，CLI 返回 `0.1.0`，已安装二进制摘要与 release 构建一致 |
+| 公网认证及文件 RPC | 12 项通过，包括真实 Mac 文件读写、路径边界、续租、关闭与重新建立会话 |
+| 在线版本查询 | Gateway 状态返回 `gatewayVersion=0.1.0`、`engineVersion=0.1.0` |
+| 已有 MCP | 保留已有运行模块，启动配置切换到独立 Node runtime；初始化与工具列表检查通过 |
+| 配置及会话 | 原有 Engine 配置一致，Gateway 私有配置沿用；验收结束后会话为 `none` |
+
+本机更新前备份在仓库 `.reach/backups/20261006T124409Z/local-engine.tgz`，VPS 备份在 `/srv/reach-backups/20261006T124409Z/gateway.tgz`，旧镜像保留为 `reach-gateway:backup-20261006T124409Z`。备份包含私有配置，不提交到 Git。
+
+无凭证更新报告为 `.reach/upgrade-verification.json`，公网 RPC 报告为 `.reach/remote-verification.json`；本机安装版本记录为 `~/.reach/versions.json`。本次没有重新执行故障注入，也没有更新 MCP 的运行模块。
+
+| 新产物 | SHA-256 |
+| --- | --- |
+| Gateway Docker 镜像 ID | `8f308a2452b18e46eeda8eb9c9243570f7b74443654814759c8d8f73bbd597fe` |
+| Gateway `dist/gateway.js` | `1e7ff24b02e73ce410d912c35164d1ad2a3c1598c974438d39d14f7e26bce7c2` |
+| Gateway `dist/gateway-main.js` | `83453fcf3d1690239e882125c78666617de51ad4fb9d7a0b013f78335dba68b9` |
+| Engine 二进制 | `69b3c0f1c0325dc56203691b40c1cff1dc1afe83848001f3c87f5efe23195708` |
 
 ## VPS Gateway
 
