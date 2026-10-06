@@ -4,6 +4,7 @@ import type { Duplex } from "node:stream";
 import { z } from "zod";
 import { canonicalizeInvocation } from "./canonical.js";
 import { GrantStore, normalizeWorkspacePath } from "./grants.js";
+import { GATEWAY_VERSION } from "./version.js";
 export { normalizeWorkspacePath } from "./grants.js";
 import { WebSocket, WebSocketServer } from "ws";
 import {
@@ -54,7 +55,7 @@ const MAX_TIMED_OUT_REQUEST_IDS = 4096;
 const MAX_SEEN_REQUEST_IDS = 65_536;
 
 const heartbeatRequestSchema = z.object({
-  device: z.record(z.unknown()),
+  device: z.object({ engineVersion: z.string().min(1).optional() }).passthrough(),
 });
 
 const sessionWantedRequestSchema = z.object({
@@ -169,6 +170,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
   let wantedSessionId: string | undefined;
   let pendingSession: PendingSession | undefined;
   let liveSession: LiveSession | undefined;
+  // Last version advertised by the configured Engine; not an online-status indicator.
+  let engineVersion: string | undefined;
   /** Last Engine-reported or observed closure reason, kept for session status. */
   let lastClosureReason: string | undefined;
   let leaseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -372,6 +375,8 @@ export function createGateway(options: GatewayOptions = {}): Server {
           : "wanted"
         : "none";
     return {
+      gatewayVersion: GATEWAY_VERSION,
+      engineVersion: engineVersion ?? null,
       wanted: sessionWanted,
       status,
       sessionId: session?.sessionId ?? pendingSession?.sessionId ?? wantedSessionId,
@@ -399,7 +404,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
   const gateway = createServer(async (request, response) => {
     const receivedAt = now();
     if (request.method === "GET" && request.url === "/healthz") {
-      sendJson(response, 200, { status: "ok", protocol: "reach-rpc/1.0" });
+      sendJson(response, 200, { status: "ok", protocol: "reach-rpc/1.0", gatewayVersion: GATEWAY_VERSION });
       return;
     }
     if (authentication) {
@@ -423,6 +428,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
           sendJson(response, 403, { error: "engine identity mismatch" });
           return;
         }
+        engineVersion = heartbeat.device.engineVersion;
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
         return;
@@ -723,6 +729,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
             return;
           }
           session.ready = true;
+          engineVersion = ready.engineVersion;
           logger("Reach session ready");
         } catch {
           webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));

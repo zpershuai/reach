@@ -8,6 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import WebSocket from "ws";
+import { GATEWAY_VERSION } from "./version.js";
 import {
   createGateway,
   type GatewayOptions,
@@ -51,6 +52,27 @@ async function withGateway(
 function wsBaseUrl(baseUrl: string): string {
   return baseUrl.replace("http://", "ws://");
 }
+
+test("Gateway reports its own version and the last accepted Engine version without opening a session", async () => {
+  await withGateway(async (url) => {
+    const health = await (await fetch(`${url}/healthz`)).json() as { gatewayVersion: string };
+    assert.equal(health.gatewayVersion, GATEWAY_VERSION);
+    const status = () => fetch(`${url}/session/status`).then((response) => response.json()) as Promise<{ status: string; gatewayVersion: string; engineVersion: string | null }>;
+    assert.equal((await status()).engineVersion, null);
+    const heartbeat = (engineVersion?: unknown) => fetch(`${url}/heartbeat`, {
+      method: "POST", headers: { "content-type": "application/json" },
+      body: JSON.stringify({ device: { id: "engine", engineVersion } }),
+    });
+    assert.equal((await heartbeat("1.2.3")).status, 200);
+    assert.equal((await status()).gatewayVersion, GATEWAY_VERSION);
+    assert.equal((await status()).engineVersion, "1.2.3");
+    assert.equal((await status()).status, "none");
+    assert.equal((await heartbeat(123)).status, 400);
+    assert.equal((await status()).engineVersion, "1.2.3");
+    await heartbeat();
+    assert.equal((await status()).engineVersion, null);
+  });
+});
 
 test("remote Gateway separates controller and Engine credentials and binds device identity", async () => {
   const controllerToken = "c".repeat(48);

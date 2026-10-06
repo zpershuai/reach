@@ -233,14 +233,18 @@ impl LocalHttpHeartbeatTransport {
 
 impl HeartbeatTransport for LocalHttpHeartbeatTransport {
     fn heartbeat(&mut self) -> Result<HeartbeatOutcome, String> {
+        let request_body = serde_json::json!({"device": {
+            "id": self.device_id,
+            "platform": "rust",
+            "engineVersion": crate::ENGINE_VERSION,
+        }})
+        .to_string();
         if self.config.origin.scheme == "https" {
             let agent = ureq::Agent::config_builder()
                 .timeout_global(Some(self.io_timeout))
                 .max_redirects(0)
                 .build()
                 .new_agent();
-            let body = serde_json::json!({"device": {"id": self.device_id, "platform": "rust"}})
-                .to_string();
             let mut request = agent
                 .post(self.config.heartbeat_url())
                 .header("Content-Type", "application/json");
@@ -248,7 +252,7 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
                 request = request.header("Authorization", format!("Bearer {token}"));
             }
             let mut response = request
-                .send(body.as_str())
+                .send(request_body.as_str())
                 .map_err(|error| format!("HTTPS heartbeat failed: {error}"))?;
             let body = response
                 .body_mut()
@@ -262,8 +266,6 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
         }
         let origin = &self.config.origin;
         let authority = origin.authority();
-        let request_body =
-            serde_json::json!({"device": {"id": self.device_id, "platform": "rust"}}).to_string();
         let path = &self.config.heartbeat_path;
         // Bound every phase of the round trip: resolve, connect (trying each
         // address within one shared budget), write, and read.
@@ -529,7 +531,11 @@ mod tests {
             let (mut stream, _) = listener.accept().unwrap();
             // Drain the request to EOF (the client sends Connection: close) so
             // closing with unread data does not RST the response back.
-            std::io::copy(&mut stream, &mut std::io::sink()).ok();
+            let mut request = String::new();
+            stream.read_to_string(&mut request).unwrap();
+            let payload: serde_json::Value =
+                serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
+            assert_eq!(payload["device"]["engineVersion"], crate::ENGINE_VERSION);
             let body = r#"{"intervalSeconds":30}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

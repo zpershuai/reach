@@ -1,8 +1,14 @@
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
+import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.js";
 import { GatewayHttpError, SessionReplacedError, type SessionStatus } from "./gateway.js";
 import { McpServer, MCP_PROTOCOL_VERSION } from "./server.js";
+import { MCP_VERSION } from "./version.js";
 
 function readyGateway(overrides: Partial<{
   rpc: (method: string, params: Record<string, unknown>, permission?: { grantId: string }) => Promise<Record<string, unknown>>;
@@ -27,6 +33,59 @@ function testServer() {
   return { server, messages };
 }
 
+test("MCP CLI reports its package version without loading private configuration or starting stdio", () => {
+  const output = execFileSync(process.execPath, [fileURLToPath(new URL("./main.js", import.meta.url)), "--version"], {
+    env: { ...process.env, REACH_MCP_DEVICES: "invalid" }, encoding: "utf8", timeout: 5000,
+  });
+  const manifest = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string };
+  assert.equal(output.trim(), manifest.version);
+  assert.equal(MCP_VERSION, manifest.version);
+});
+
+test("standalone MCP keeps its built version when the package manifest changes without rebuilding", () => {
+  const directory = mkdtempSync(join(tmpdir(), "reach-mcp-version-"));
+  try {
+    mkdirSync(join(directory, "dist"));
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ type: "module", version: "9.9.9" }));
+    for (const file of ["main.js", "config.js", "gateway.js", "server.js", "tools.js", "version.js", "version.json"]) {
+      copyFileSync(new URL(file, import.meta.url), join(directory, "dist", file));
+    }
+    const output = execFileSync(process.execPath, [join(directory, "dist/main.js"), "--version"], { encoding: "utf8", timeout: 5000 });
+    assert.equal(output.trim(), MCP_VERSION);
+  } finally {
+    rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("get_versions observes configured devices without opening, closing or selecting a session", async () => {
+  const messages: Record<string, unknown>[] = [];
+  let status: SessionStatus = { status: "none", gatewayVersion: "2.0.0", engineVersion: "1.2.3" };
+  let queries = 0;
+  const server = new McpServer(loadConfig({}), (message) => messages.push(message), () => ({
+    ...readyGateway(),
+    status: async () => { queries++; return status; },
+    openAndWait: async () => { throw new Error("must not open"); },
+    close: async () => { throw new Error("must not close"); },
+  }));
+  await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
+  const query = async (argumentsValue?: unknown) => {
+    await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_versions", arguments: argumentsValue } });
+    return messages.at(-1)!.result as { content: Array<{ text: string }>; isError?: boolean };
+  };
+  assert.deepEqual(JSON.parse((await query()).content[0].text), { mcpVersion: MCP_VERSION, gatewayVersion: null, engineVersion: null });
+  assert.equal(queries, 0);
+  assert.equal((await query({ deviceId: "unknown" })).isError, true);
+  assert.equal((await query({ deviceId: 123 })).isError, true);
+  assert.deepEqual(JSON.parse((await query({ deviceId: "local-engine" })).content[0].text), {
+    mcpVersion: MCP_VERSION, deviceId: "local-engine", gatewayVersion: "2.0.0", engineVersion: "1.2.3",
+  });
+  status = { status: "none" };
+  assert.deepEqual(JSON.parse((await query({ deviceId: "local-engine" })).content[0].text), {
+    mcpVersion: MCP_VERSION, deviceId: "local-engine", gatewayVersion: null, engineVersion: null,
+  });
+  await server.shutdown();
+});
+
 test("initialize declares tools.listChanged", async () => {
   const { server, messages } = testServer();
   await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_PROTOCOL_VERSION } });
@@ -36,7 +95,8 @@ test("initialize declares tools.listChanged", async () => {
     result: {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: true } },
-      serverInfo: { name: "reach-mcp", version: "0.1.0" },
+      serverInfo: { name: "reach-mcp", version: MCP_VERSION },
+      instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node. Gateway and MCP processes on the same host can use this runtime without a system Node.js installation. Filesystem tools execute on the selected Engine through its Gateway.",
     },
   }]);
 });
@@ -69,7 +129,7 @@ test("only configured devices can be picked after their Gateway is ready", async
   }));
   await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
   await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.deepEqual(((messages[1].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "pick_device"]);
+  assert.deepEqual(((messages[1].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
   await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "missing" } } });
   assert.equal((messages[2].result as { isError: boolean }).isError, true);
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "remote" } } });
@@ -78,7 +138,7 @@ test("only configured devices can be picked after their Gateway is ready", async
   assert.deepEqual(messages[4], { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
   const refreshed = (messages[5].result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
-  assert.deepEqual(refreshed.map((tool) => tool.name), ["list_devices", "pick_device", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
+  assert.deepEqual(refreshed.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
   assert.equal("deviceId" in refreshed.find((tool) => tool.name === "fs.read")!.inputSchema.properties, false);
 });
 
@@ -105,7 +165,7 @@ test("filesystem calls renew then forward through the selected Gateway and close
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "session.close", arguments: {} } });
   assert.equal(calls[2], "close");
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
-  assert.deepEqual(((messages[6].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "pick_device"]);
+  assert.deepEqual(((messages[6].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
 });
 
 test("writes obtain a matching Gateway grant before forwarding permission", async () => {
@@ -185,7 +245,7 @@ test("an uncertain write is sent once and removes stale dynamic tools", async ()
   assert.equal(closed, 1);
   assert.equal((messages.find((message) => message.id === 3)!.result as { isError: boolean }).isError, true);
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/list" });
-  assert.deepEqual((messages.at(-1)!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name), ["list_devices", "pick_device"]);
+  assert.deepEqual((messages.at(-1)!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
 });
 
 test("a failed status check drains ownership before selecting the device again", async () => {
@@ -238,7 +298,7 @@ test("failed drains hide tools but retain the old owner until a later switch suc
   await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "b" } } });
   assert.deepEqual(calls, ["open:a", "close:a", "close:a"]);
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/list" });
-  assert.deepEqual((messages.at(-1)!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name), ["list_devices", "pick_device"]);
+  assert.deepEqual((messages.at(-1)!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
   failClose = false;
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "b" } } });
   assert.deepEqual(calls, ["open:a", "close:a", "close:a", "close:a", "open:b"]);

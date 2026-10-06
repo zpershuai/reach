@@ -62,7 +62,7 @@ test("stdio client re-fetches the expanded tool list after tools/list_changed", 
 
     request(2, "tools/list");
     const initialList = await waitFor(messages, (message) => message.id === 2);
-    assert.deepEqual(((initialList.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "pick_device"]);
+    assert.deepEqual(((initialList.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
 
     request(3, "tools/call", { name: "pick_device", arguments: { deviceId: "proof-device" } });
     await waitFor(messages, (message) => message.id === 3);
@@ -70,7 +70,7 @@ test("stdio client re-fetches the expanded tool list after tools/list_changed", 
 
     request(4, "tools/list");
     const refreshed = await waitFor(messages, (message) => message.id === 4);
-    assert.deepEqual(((refreshed.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "pick_device", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
+    assert.deepEqual(((refreshed.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
   } finally {
     child.stdin.end();
     await once(child, "exit");

@@ -4,6 +4,8 @@ import type { DeviceConfig } from "./config.js";
 export interface ReadySession {
   sessionId?: string;
   leaseExpiresAt?: string;
+  gatewayVersion?: string;
+  engineVersion?: string;
 }
 
 export interface SessionStatus extends ReadySession {
@@ -172,6 +174,8 @@ export class HttpGatewayClient implements GatewayClient {
       status: reply.status,
       sessionId: typeof reply.sessionId === "string" ? reply.sessionId : undefined,
       leaseExpiresAt: typeof reply.leaseExpiresAt === "string" ? reply.leaseExpiresAt : undefined,
+      gatewayVersion: typeof reply.gatewayVersion === "string" ? reply.gatewayVersion : undefined,
+      engineVersion: typeof reply.engineVersion === "string" ? reply.engineVersion : undefined,
     };
   }
 

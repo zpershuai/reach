@@ -9,7 +9,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{is_non_empty, ContractError, PROTOCOL, VERSION};
+use crate::{is_non_empty, ContractError, ENGINE_VERSION, PROTOCOL, VERSION};
 
 pub const MESSAGE_READY: &str = "session.ready";
 pub const MESSAGE_RENEW: &str = "session.renew";
@@ -34,6 +34,8 @@ pub struct SessionReady {
     pub version: String,
     pub session_id: String,
     pub engine_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub engine_version: Option<String>,
     pub workspaces: Vec<String>,
     pub methods: Vec<String>,
 }
@@ -105,6 +107,10 @@ fn validate_ready(ready: &SessionReady) -> Result<(), ContractError> {
         || ready.version != VERSION
         || !is_non_empty(&ready.session_id)
         || !is_non_empty(&ready.engine_id)
+        || ready
+            .engine_version
+            .as_deref()
+            .is_some_and(|version| !is_non_empty(version))
         || ready.workspaces.is_empty()
         || ready.methods.is_empty()
         || ready.workspaces.iter().any(|name| !is_non_empty(name))
@@ -234,6 +240,7 @@ pub fn session_ready(
         version: VERSION.to_owned(),
         session_id: session_id.to_owned(),
         engine_id: engine_id.to_owned(),
+        engine_version: Some(ENGINE_VERSION.to_owned()),
         workspaces,
         methods,
     }
@@ -266,6 +273,7 @@ mod tests {
     fn parses_shared_ready_fixture() {
         let ready =
             parse_session_ready(include_str!("../../../fixtures/session.ready.json")).unwrap();
+        assert_eq!(ready.engine_version, None);
         assert_eq!(ready.session_id, "session-1");
         assert_eq!(ready.engine_id, "reach-engine");
         assert_eq!(ready.workspaces, ["default", "fixture"]);
@@ -371,5 +379,12 @@ mod tests {
         let text = serialize_session_message(&SessionMessage::Ready(ready)).unwrap();
         assert!(text.contains("\"type\":\"session.ready\""));
         assert!(text.contains("\"sessionId\":\"s\""));
+        assert_eq!(
+            parse_session_ready(&text)
+                .unwrap()
+                .engine_version
+                .as_deref(),
+            Some(ENGINE_VERSION)
+        );
     }
 }

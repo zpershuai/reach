@@ -2,6 +2,8 @@
 
 `@reach/grok-bot-mcp-connector` is a generic stdio MCP server that sends filesystem requests to a Reach Engine through its Gateway. Filesystem tools execute on the Engine; the connector reads its own optional private configuration file. See [installation instructions](../../docs/deploy/mcp.md) and the [deployment guide](../../docs/deploy/README.md).
 
+Every Engine installation automatically provisions a private Node.js runtime under `~/.reach/runtime/node`. The generated MCP configuration uses its stable `bin/node` path; Gateway and MCP processes on that host can share it without a system Node installation. This is also described in the MCP initialization instructions and the `list_devices` tool description. Standalone clients can install the same runtime with `python3 scripts/install-node-runtime.py`.
+
 By default it exposes the `local-engine` device at `http://127.0.0.1:8787`:
 
 ```sh
@@ -18,7 +20,7 @@ REACH_MCP_DEVICES='[{"id":"workstation-a","gatewayUrl":"http://127.0.0.1:8787"}]
 
 ## Dynamic Path 2 (default)
 
-The connector declares `capabilities.tools.listChanged: true`. Initially `tools/list` contains only `list_devices` and `pick_device`. A successful `pick_device` opens the selected Gateway session, waits until it is ready, then emits `notifications/tools/list_changed`. A host that re-fetches `tools/list` receives local-feel `fs.read`, `fs.write`, `fs.edit`, `fs.list`, `fs.glob`, `fs.stat`, `fs.grep`, and `session.close` tools already bound to that selected device.
+The connector declares `capabilities.tools.listChanged: true`. Initially `tools/list` contains `list_devices`, `get_versions`, and `pick_device`. A successful `pick_device` opens the selected Gateway session, waits until it is ready, then emits `notifications/tools/list_changed`. A host that re-fetches `tools/list` receives local-feel `fs.read`, `fs.write`, `fs.edit`, `fs.list`, `fs.glob`, `fs.stat`, `fs.grep`, and `session.close` tools already bound to that selected device.
 
 The connector opens and checks readiness through `/session/open` and `/session/status`, renews with `/session/renew` as a lease nears expiry, sends filesystem calls to `/session/rpc`, and closes with `/session/close`. `fs.write` and `fs.edit` first obtain a path- and method-scoped Gateway grant from `/grants`.
 

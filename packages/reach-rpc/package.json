@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --project tsconfig.json",
+    "build": "tsc --project tsconfig.json && node ../../scripts/write-build-version.mjs",
     "test": "npm run build && node --test --test-timeout=30000 dist/test.js dist/gateway.test.js",
     "roundtrip": "npm run build && node dist/roundtrip.js",
     "gateway": "npm run build && node dist/gateway-main.js"

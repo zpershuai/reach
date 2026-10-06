@@ -55,7 +55,9 @@ bash scripts/install-engine-macos.sh .reach/engine.env
 bash scripts/install-engine-macos.sh .reach/engine.env .reach/devices.json
 ```
 
-二选一执行即可。第二种安装方式要求 `dist` 已构建，并且 `node` 能从当前 PATH 找到。安装器将实际 Node 绝对路径写入客户端配置。
+二选一执行即可。第二种安装方式要求 `dist` 已构建。每次安装 Engine 都会自动准备独立的 Node.js runtime，不要求系统 PATH 中存在 Node。安装器将 `~/.reach/runtime/node/bin/node` 的绝对路径写入 MCP 客户端配置。
+
+Node 版本和各平台 SHA-256 固定在 [node-runtime.json](../../scripts/node-runtime.json)，发行包来自 `https://nodejs.org/dist/`。首次安装需要联网下载；后续安装校验已安装 runtime，完整且版本匹配时复用，缺失或损坏时重新安装。下载、校验或执行检查失败会中止 Engine 安装，保留原有 runtime 和后台服务。runtime 更新通过原子替换符号链接完成，旧发行目录保留供已启动的进程使用。
 
 [安装器](../../scripts/install-engine-macos.sh) 复制构建产物和配置，生成启动 wrapper 与 plist，然后卸载已有同名服务并重新注册。因此重复安装会重启 Engine、中断当前会话；它不会重新编译代码。
 
@@ -67,6 +69,10 @@ bash scripts/install-engine-macos.sh .reach/engine.env .reach/devices.json
 | --- | --- |
 | `~/.local/share/reach/engine` | 可执行文件，模式 755 |
 | `~/.local/share/reach/start-engine.sh` | 加载私有 env 后执行 Engine，模式 700 |
+| `~/.reach/runtime/node/bin/node` | 独立 Node.js runtime 的稳定入口，随 Engine 自动安装 |
+| `~/.reach/runtime/node/bin/npm`、`npx` | 发行包附带的包管理入口 |
+| `~/.reach/versions.json` | 已安装的 Engine、MCP、Node 发布号 |
+| `~/.local/share/reach/run-node.sh` | 使用独立 runtime 执行 JS，模式 755 |
 | `~/.config/reach/engine.env` | Engine 配置，模式 600 |
 | `~/Library/LaunchAgents/top.zpershuai.reach-engine.plist` | 用户后台任务 |
 | `~/.local/share/reach/engine.log` | 标准输出，包含生命周期事件 |
@@ -75,6 +81,15 @@ bash scripts/install-engine-macos.sh .reach/engine.env .reach/devices.json
 | `~/.config/reach/mcp.json` | 仅同时安装 MCP 时生成，客户端启动配置 |
 
 运行文件目录和配置目录均设为 700。MCP 安装的细节见 [mcp.md](mcp.md)。
+
+Engine 启动 wrapper 设置 `REACH_NODE_BIN` 为上述 Node 绝对路径，并把 runtime 的 `bin` 加到 PATH。Gateway 和 MCP 在同一台设备上可共用它：
+
+```bash
+"$HOME/.local/share/reach/run-node.sh" /absolute/path/to/gateway-main.js
+"$HOME/.local/share/reach/run-node.sh" /absolute/path/to/mcp/dist/main.js
+```
+
+源码构建仍需要 Rust 与 Node/npm 工具链。安装器中的 Python 3 和归档解包工具也必须可用；runtime 的下载和安装本身不依赖系统 Node。
 
 LaunchAgent label 为 `top.zpershuai.reach-engine`，配置 `RunAtLoad=true`、`KeepAlive=true` 与 `ThrottleInterval=10`。进程异常退出后由 launchd 拉起；持续配置错误可能造成反复重启，应查看 stderr 并修正配置。
 

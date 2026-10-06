@@ -2,6 +2,9 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;
 
+/// Engine release version, compiled from its package manifest.
+pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 pub mod dispatch;
 pub mod runtime;
 pub mod session;

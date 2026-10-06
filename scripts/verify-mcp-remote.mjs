@@ -44,7 +44,7 @@ try {
   const initialized = await request("initialize", { protocolVersion: "2025-03-26", capabilities: {}, clientInfo: { name: "reach-deployment-verifier", version: "1.0" } });
   assert.equal(initialized.serverInfo.name, "reach-mcp");
   child.stdin.write(JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) + "\n");
-  assert.deepEqual((await request("tools/list", {})).tools.map((item) => item.name), ["list_devices", "pick_device"]);
+  assert.deepEqual((await request("tools/list", {})).tools.map((item) => item.name), ["list_devices", "get_versions", "pick_device"]);
   assert.ok((await tool("list_devices")).devices.some((item) => item.id === deployment.engineId));
   await tool("pick_device", { deviceId: deployment.engineId });
   assert.ok((await request("tools/list", {})).tools.some((item) => item.name === "fs.write"));
@@ -57,7 +57,7 @@ try {
   results.push("stdio MCP write, read, edit and local file proof");
   console.log("PASS installed stdio MCP writes, reads and edits the actual Mac file");
   await tool("session.close");
-  assert.deepEqual((await request("tools/list", {})).tools.map((item) => item.name), ["list_devices", "pick_device"]);
+  assert.deepEqual((await request("tools/list", {})).tools.map((item) => item.name), ["list_devices", "get_versions", "pick_device"]);
   results.push("session close and dynamic tools reset");
   console.log("PASS installed stdio MCP closes its session");
 } finally {
