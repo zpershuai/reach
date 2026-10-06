@@ -1,6 +1,6 @@
-# Reach Grok Bot MCP connector
+# Reach MCP connector
 
-`@reach/grok-bot-mcp-connector` is a stdio MCP server that sends filesystem requests to a Reach Engine through its Gateway. It never reads or writes the MCP host filesystem and does not use Grok's native `registerTool` API.
+`@reach/grok-bot-mcp-connector` is a generic stdio MCP server that sends filesystem requests to a Reach Engine through its Gateway. Filesystem tools execute on the Engine; the connector reads its own optional private configuration file. See [installation instructions](../../docs/deploy/mcp.md) and the [deployment guide](../../docs/deploy/README.md).
 
 By default it exposes the `local-engine` device at `http://127.0.0.1:8787`:
 

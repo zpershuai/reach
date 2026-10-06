@@ -1,0 +1,9 @@
+FROM node:24-alpine
+WORKDIR /app
+COPY packages/reach-rpc/package.json packages/reach-rpc/package-lock.json ./
+RUN npm ci --omit=dev --ignore-scripts
+COPY packages/reach-rpc/dist ./dist
+USER node
+ENV GATEWAY_HOST=0.0.0.0 GATEWAY_PORT=8787
+EXPOSE 8787
+CMD ["node", "dist/gateway-main.js"]

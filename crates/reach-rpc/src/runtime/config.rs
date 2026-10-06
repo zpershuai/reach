@@ -26,10 +26,7 @@ pub struct Origin {
 }
 
 impl Origin {
-    /// Parse the local loopback transport's absolute `http://` base URL into
-    /// its origin. HTTPS/WSS is deliberately rejected until a TLS transport is
-    /// implemented; accepting it would make the raw TCP adapters speak
-    /// plaintext to a TLS endpoint.
+    /// Parse an HTTPS Gateway or a loopback-only plaintext HTTP Gateway.
     /// Rejects a wrong scheme, a base path, or a malformed authority.
     pub fn parse_http_base_url(input: &str) -> Result<Origin, String> {
         let trimmed = input.trim().trim_end_matches('/');
@@ -39,9 +36,9 @@ impl Origin {
         let (scheme, remainder) = trimmed
             .split_once("://")
             .ok_or_else(|| format!("invalid gateway URL {input:?}: missing :// scheme"))?;
-        if scheme != "http" {
+        if scheme != "http" && scheme != "https" {
             return Err(format!(
-                "invalid gateway URL scheme {scheme:?}; this Engine transport supports only http://"
+                "invalid gateway URL scheme {scheme:?}; expected http:// or https://"
             ));
         }
         let (authority, path) = match remainder.split_once('/') {
@@ -53,7 +50,8 @@ impl Origin {
         }
         let (host, port) = parse_authority(authority, scheme)?;
         let address = host.trim_start_matches('[').trim_end_matches(']');
-        if !host.eq_ignore_ascii_case("localhost")
+        if scheme == "http"
+            && !host.eq_ignore_ascii_case("localhost")
             && !address
                 .parse::<std::net::IpAddr>()
                 .is_ok_and(|ip| ip.is_loopback())
@@ -100,7 +98,11 @@ impl Origin {
 
     /// The WebSocket scheme that corresponds to this gateway origin's scheme.
     pub fn ws_scheme(&self) -> &'static str {
-        "ws"
+        if self.scheme == "https" {
+            "wss"
+        } else {
+            "ws"
+        }
     }
 
     pub fn authority(&self) -> String {
@@ -108,7 +110,7 @@ impl Origin {
     }
 
     /// True when another WebSocket origin matches this gateway origin
-    /// (same host and port; http/ws and https/wss are scheme-equivalent).
+    /// (same host and port; the caller also checks the corresponding scheme).
     pub fn matches_ws(&self, other: &Origin) -> bool {
         self.host.eq_ignore_ascii_case(&other.host) && self.port == other.port
     }
@@ -168,12 +170,23 @@ fn parse_port(value: &str) -> Result<u16, String> {
 }
 
 /// The single Gateway the Engine is pinned to.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct GatewayConfig {
     pub origin: Origin,
     pub base_url: String,
     pub heartbeat_path: String,
     pub session_path: String,
+    pub engine_token: Option<String>,
+}
+
+impl std::fmt::Debug for GatewayConfig {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GatewayConfig")
+            .field("base_url", &self.base_url)
+            .field("authenticated", &self.engine_token.is_some())
+            .finish_non_exhaustive()
+    }
 }
 
 impl GatewayConfig {
@@ -184,6 +197,7 @@ impl GatewayConfig {
             base_url: base_url.trim_end_matches('/').to_owned(),
             heartbeat_path: "/heartbeat".to_owned(),
             session_path: "/session".to_owned(),
+            engine_token: None,
         })
     }
 
@@ -287,7 +301,21 @@ impl EngineConfig {
         if lookup("REACH_GATEWAY_URL").is_some() && gateway_url_arg.is_some() {
             return Err("gateway URL supplied both as an argument and REACH_GATEWAY_URL".into());
         }
-        let gateway = GatewayConfig::new(&base_url)?;
+        let mut gateway = GatewayConfig::new(&base_url)?;
+        gateway.engine_token = lookup("REACH_ENGINE_TOKEN");
+        if gateway.engine_token.as_ref().is_some_and(|token| {
+            token.len() < 32
+                || !token
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || b"-_.".contains(&byte))
+        }) {
+            return Err(
+                "REACH_ENGINE_TOKEN must contain at least 32 ASCII token characters".into(),
+            );
+        }
+        if gateway.origin.scheme == "https" && gateway.engine_token.is_none() {
+            return Err("remote Gateway requires REACH_ENGINE_TOKEN".into());
+        }
         let timeouts = TimeoutPolicy::parse_from(lookup)?;
 
         let engine_id = lookup("REACH_ENGINE_ID").unwrap_or_else(|| DEFAULT_ENGINE_ID.to_owned());
@@ -323,6 +351,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn remote_engine_requires_secret_and_redacts_it_in_debug() {
+        assert!(EngineConfig::parse(Some("https://reach.example"), &|_| None).is_err());
+        let token = "secret".repeat(8);
+        let config = EngineConfig::parse(Some("https://reach.example"), &|name| {
+            (name == "REACH_ENGINE_TOKEN").then(|| token.clone())
+        })
+        .unwrap();
+        assert_eq!(config.gateway.origin.ws_scheme(), "wss");
+        assert!(!format!("{config:?}").contains(&token));
+    }
+
+    #[test]
     fn rejects_invalid_gateway_urls() {
         for input in [
             "",
@@ -346,7 +386,12 @@ mod tests {
         assert_eq!(origin.host, "127.0.0.1");
         assert_eq!(origin.port, 8787);
         assert_eq!(origin.ws_scheme(), "ws");
-        assert!(Origin::parse_http_base_url("https://localhost:8443").is_err());
+        assert_eq!(
+            Origin::parse_http_base_url("https://localhost:8443")
+                .unwrap()
+                .ws_scheme(),
+            "wss"
+        );
     }
 
     #[test]

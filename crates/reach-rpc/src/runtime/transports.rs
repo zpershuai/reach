@@ -1,5 +1,5 @@
 //! Transport ports (`HeartbeatTransport`, `SessionTransport`) plus concrete
-//! local HTTP/WebSocket adapters for the loopback deployment.
+//! authenticated HTTPS/WSS and local loopback HTTP/WebSocket adapters.
 //!
 //! Runtime code depends only on the traits; tests inject fakes.
 
@@ -162,7 +162,11 @@ const MAX_HEARTBEAT_RESPONSE_BYTES: usize = 64 * 1024;
 
 /// Resolve a host/port pair into candidate socket addresses, tolerating a
 /// bracketed IPv6 literal (`[::1]`). An empty resolution is an error.
-fn resolve_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
+fn resolve_addresses(
+    host: &str,
+    port: u16,
+    loopback_only: bool,
+) -> Result<Vec<SocketAddr>, String> {
     let bare = host
         .strip_prefix('[')
         .and_then(|host| host.strip_suffix(']'))
@@ -171,7 +175,9 @@ fn resolve_addresses(host: &str, port: u16) -> Result<Vec<SocketAddr>, String> {
         .to_socket_addrs()
         .map(|addrs| addrs.collect())
         .map_err(|error| format!("cannot resolve host {host}: {error}"))?;
-    if addresses.is_empty() || addresses.iter().any(|address| !address.ip().is_loopback()) {
+    if addresses.is_empty()
+        || (loopback_only && addresses.iter().any(|address| !address.ip().is_loopback()))
+    {
         return Err("Gateway must resolve exclusively to loopback addresses".into());
     }
     Ok(addresses)
@@ -201,9 +207,7 @@ fn connect_try_all(addresses: &[SocketAddr], timeout: Duration) -> Result<TcpStr
 
 use serde::Deserialize;
 
-/// Concrete heartbeat adapter that POSTs raw JSON HTTP to the configured
-/// loopback Gateway endpoint. HTTPS/WSS is rejected by `GatewayConfig` until
-/// a TLS-capable transport is added.
+/// Heartbeat adapter using verified TLS remotely and raw HTTP on loopback.
 pub struct LocalHttpHeartbeatTransport {
     config: GatewayConfig,
     device_id: String,
@@ -229,6 +233,33 @@ impl LocalHttpHeartbeatTransport {
 
 impl HeartbeatTransport for LocalHttpHeartbeatTransport {
     fn heartbeat(&mut self) -> Result<HeartbeatOutcome, String> {
+        if self.config.origin.scheme == "https" {
+            let agent = ureq::Agent::config_builder()
+                .timeout_global(Some(self.io_timeout))
+                .max_redirects(0)
+                .build()
+                .new_agent();
+            let body = serde_json::json!({"device": {"id": self.device_id, "platform": "rust"}})
+                .to_string();
+            let mut request = agent
+                .post(self.config.heartbeat_url())
+                .header("Content-Type", "application/json");
+            if let Some(token) = &self.config.engine_token {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            let mut response = request
+                .send(body.as_str())
+                .map_err(|error| format!("HTTPS heartbeat failed: {error}"))?;
+            let body = response
+                .body_mut()
+                .with_config()
+                .limit(MAX_HEARTBEAT_RESPONSE_BYTES as u64)
+                .read_to_string()
+                .map_err(|error| format!("HTTPS heartbeat response failed: {error}"))?;
+            let parsed: HeartbeatResponse = serde_json::from_str(&body)
+                .map_err(|error| format!("gateway heartbeat body was invalid: {error}"))?;
+            return parsed.to_outcome();
+        }
         let origin = &self.config.origin;
         let authority = origin.authority();
         let request_body =
@@ -236,7 +267,7 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
         let path = &self.config.heartbeat_path;
         // Bound every phase of the round trip: resolve, connect (trying each
         // address within one shared budget), write, and read.
-        let addresses = resolve_addresses(&origin.host, origin.port)?;
+        let addresses = resolve_addresses(&origin.host, origin.port, true)?;
         let mut stream = connect_try_all(&addresses, self.io_timeout)
             .map_err(|error| format!("heartbeat connect failed: {error}"))?;
         stream
@@ -245,9 +276,15 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
         stream
             .set_read_timeout(Some(self.io_timeout))
             .map_err(|error| format!("heartbeat read timeout setup failed: {error}"))?;
+        let authorization = self
+            .config
+            .engine_token
+            .as_ref()
+            .map(|token| format!("Authorization: Bearer {token}\r\n"))
+            .unwrap_or_default();
         write!(
             stream,
-            "POST {path} HTTP/1.1\r\nHost: {authority}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{request_body}",
+            "POST {path} HTTP/1.1\r\nHost: {authority}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{request_body}",
             request_body.len()
         )
         .map_err(|error| format!("heartbeat write failed: {error}"))?;
@@ -287,33 +324,21 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
 /// switched to non-blocking reads so the Runtime can also honor its lease, idle,
 /// and rotation deadlines while no message is pending.
 pub struct LocalWebSocketSessionTransport {
-    socket: WebSocket<MaybeTlsTcp>,
+    socket: WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
     peer: String,
 }
 
-/// Minimal wrapper to reach the underlying TcpStream for non-blocking mode.
-pub struct MaybeTlsTcp(pub TcpStream);
-
-impl Read for MaybeTlsTcp {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        self.0.read(buf)
-    }
-}
-
-impl Write for MaybeTlsTcp {
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
-        self.0.write(buf)
-    }
-    fn flush(&mut self) -> std::io::Result<()> {
-        self.0.flush()
-    }
-}
-
 impl LocalWebSocketSessionTransport {
-    fn set_nonblocking(socket: &WebSocket<MaybeTlsTcp>, enabled: bool) -> Result<(), String> {
-        socket
-            .get_ref()
-            .0
+    fn set_nonblocking(
+        socket: &WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
+        enabled: bool,
+    ) -> Result<(), String> {
+        let stream = match socket.get_ref() {
+            tungstenite::stream::MaybeTlsStream::Plain(stream) => stream,
+            tungstenite::stream::MaybeTlsStream::Rustls(stream) => &stream.sock,
+            _ => return Err("unsupported TLS backend".into()),
+        };
+        stream
             .set_nonblocking(enabled)
             .map_err(|error| format!("failed to set session socket non-blocking: {error}"))
     }
@@ -364,7 +389,7 @@ impl SessionTransport for LocalWebSocketSessionTransport {
     }
 }
 
-/// Concrete factory that opens loopback WebSocket sessions with a bounded
+/// Concrete factory that opens pinned WebSocket sessions with a bounded
 /// connection attempt.
 pub struct LocalWebSocketSessionTransportFactory;
 
@@ -379,7 +404,7 @@ impl SessionTransportFactory for LocalWebSocketSessionTransportFactory {
         // Try every resolved address within the one connection budget, so the
         // session connect agrees with the heartbeat on dual-stack hosts where
         // `localhost` resolves to both `::1` and `127.0.0.1`.
-        let addresses = resolve_addresses(&origin.host, origin.port)?;
+        let addresses = resolve_addresses(&origin.host, origin.port, origin.scheme == "ws")?;
         let stream = connect_try_all(&addresses, connection_timeout).map_err(|error| {
             format!("session connect to {} failed: {error}", origin.authority())
         })?;
@@ -387,13 +412,16 @@ impl SessionTransportFactory for LocalWebSocketSessionTransportFactory {
         stream
             .set_read_timeout(Some(connection_timeout))
             .map_err(|error| format!("failed to set session read timeout: {error}"))?;
+        stream
+            .set_write_timeout(Some(connection_timeout))
+            .map_err(|error| format!("failed to set session write timeout: {error}"))?;
 
         let separator = if url.contains('?') { '&' } else { '?' };
         let session_url = format!("{url}{separator}token={token}");
         let request = session_url
             .into_client_request()
             .map_err(|error| format!("invalid session URL: {error}"))?;
-        let (socket, response) = tungstenite::client::client(request, MaybeTlsTcp(stream))
+        let (socket, response) = tungstenite::client_tls_with_config(request, stream, None, None)
             .map_err(|error| format!("session upgrade failed: {error}"))?;
         // A successful WebSocket upgrade is HTTP 101 Switching Protocols, not
         // a 2xx response.

@@ -52,6 +52,49 @@ function wsBaseUrl(baseUrl: string): string {
   return baseUrl.replace("http://", "ws://");
 }
 
+test("remote Gateway separates controller and Engine credentials and binds device identity", async () => {
+  const controllerToken = "c".repeat(48);
+  const engineToken = "e".repeat(48);
+  const engineId = "mac-engine";
+  await withGateway(async (url) => {
+    assert.equal((await fetch(`${url}/healthz`)).status, 200);
+    for (const path of ["/session/status", "/session/open", "/session/renew", "/session/close", "/session/rpc", "/grants"]) {
+      for (const token of [undefined, engineToken, "wrong"]) {
+        const response = await fetch(`${url}${path}`, { method: "POST", headers: token ? { authorization: `Bearer ${token}` } : {} });
+        assert.equal(response.status, 401, path);
+      }
+    }
+    const heartbeat = (token: string, id: string) => fetch(`${url}/heartbeat`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ device: { id } }),
+    });
+    assert.equal((await heartbeat(controllerToken, engineId)).status, 401);
+    assert.equal((await heartbeat(engineToken, "another-device")).status, 403);
+    assert.deepEqual(await (await heartbeat(engineToken, engineId)).json(), { intervalSeconds: 15 });
+    const opened = await fetch(`${url}/session/open`, { method: "POST", headers: { authorization: `Bearer ${controllerToken}`, "content-type": "application/json" }, body: "{}" });
+    assert.equal(opened.status, 200);
+    const lease = await (await heartbeat(engineToken, engineId)).json() as { endpoint: string; token: string; sessionId: string };
+    const socket = new WebSocket(`${wsBaseUrl(url)}${lease.endpoint}?token=${lease.token}`);
+    await once(socket, "open");
+    const ready = { type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: lease.sessionId, engineId, workspaces: ["default"], methods: ["fs.read"] };
+    const rejected = once(socket, "message");
+    socket.send(JSON.stringify({ ...ready, engineId: "another-device" }));
+    await rejected;
+    const status = () => fetch(`${url}/session/status`, { headers: { authorization: `Bearer ${controllerToken}` } }).then((response) => response.json()) as Promise<{ status: string }>;
+    assert.equal((await status()).status, "connecting");
+    socket.send(JSON.stringify(ready));
+    for (let attempt = 0; attempt < 20 && (await status()).status !== "ready"; attempt++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal((await status()).status, "ready");
+    socket.close();
+    await once(socket, "close");
+  }, { authentication: { controllerToken, engineToken, engineId }, heartbeatIntervalSeconds: 15 });
+});
+
+test("Gateway refuses incomplete or shared remote credentials", () => {
+  assert.throws(() => createGateway({ authentication: { controllerToken: "same".repeat(12), engineToken: "same".repeat(12), engineId: "mac" } }));
+  assert.throws(() => createGateway({ authentication: { controllerToken: "short", engineToken: "e".repeat(48), engineId: "mac" } }));
+});
+
 async function openEngineSession(
   baseUrl: string,
   options: { ready?: boolean } = {},

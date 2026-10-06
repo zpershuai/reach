@@ -1,6 +1,9 @@
+import { readFileSync } from "node:fs";
+
 export interface DeviceConfig {
   id: string;
   gatewayUrl: string;
+  controllerToken?: string;
 }
 
 export type ToolMode = "dynamic" | "static";
@@ -41,11 +44,22 @@ function normalizeDevice(value: unknown): DeviceConfig {
     throw new Error(`device ${candidate.id} gatewayUrl must use HTTP(S)`);
   }
   gatewayUrl.pathname = gatewayUrl.pathname.replace(/\/$/, "");
-  return { id: candidate.id.trim(), gatewayUrl: gatewayUrl.toString().replace(/\/$/, "") };
+  const controllerToken = candidate.controllerToken;
+  if (controllerToken !== undefined && (typeof controllerToken !== "string" || controllerToken.length < 32)) {
+    throw new Error("device controllerToken must contain at least 32 characters");
+  }
+  return {
+    id: candidate.id.trim(),
+    gatewayUrl: gatewayUrl.toString().replace(/\/$/, ""),
+    ...(controllerToken === undefined ? {} : { controllerToken }),
+  };
 }
 
 export function loadConfig(env: NodeJS.ProcessEnv = process.env): ConnectorConfig {
-  const rawDevices = env.REACH_MCP_DEVICES;
+  if (env.REACH_MCP_DEVICES && env.REACH_MCP_DEVICES_FILE) {
+    throw new Error("Use only one of REACH_MCP_DEVICES and REACH_MCP_DEVICES_FILE");
+  }
+  const rawDevices = env.REACH_MCP_DEVICES_FILE ? readFileSync(env.REACH_MCP_DEVICES_FILE, "utf8") : env.REACH_MCP_DEVICES;
   const devices = rawDevices
     ? (() => {
       let parsed: unknown;

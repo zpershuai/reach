@@ -1,0 +1,6 @@
+.git
+.reach
+target
+**/node_modules
+deploy/*.env
+**/*.log

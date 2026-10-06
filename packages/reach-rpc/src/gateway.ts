@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
 import { z } from "zod";
@@ -80,6 +80,8 @@ export interface GatewayOptions {
   sessionDurationMs?: number;
   sessionIdleMs?: number;
   sessionRpcTimeoutMs?: number;
+  heartbeatIntervalSeconds?: number;
+  authentication?: { controllerToken: string; engineToken: string; engineId: string };
 }
 
 interface PendingSession {
@@ -154,6 +156,15 @@ function leafMutation(
 }
 
 export function createGateway(options: GatewayOptions = {}): Server {
+  const authentication = options.authentication;
+  if (authentication && (authentication.controllerToken.length < 32 || authentication.engineToken.length < 32
+    || authentication.controllerToken === authentication.engineToken || !authentication.engineId.trim())) {
+    throw new Error("Gateway authentication requires distinct tokens of at least 32 characters and an engine id");
+  }
+  const heartbeatIntervalSeconds = options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS;
+  if (!Number.isInteger(heartbeatIntervalSeconds) || heartbeatIntervalSeconds <= 0) {
+    throw new Error("heartbeat interval must be a positive integer");
+  }
   let sessionWanted = false;
   let wantedSessionId: string | undefined;
   let pendingSession: PendingSession | undefined;
@@ -387,6 +398,19 @@ export function createGateway(options: GatewayOptions = {}): Server {
 
   const gateway = createServer(async (request, response) => {
     const receivedAt = now();
+    if (request.method === "GET" && request.url === "/healthz") {
+      sendJson(response, 200, { status: "ok", protocol: "reach-rpc/1.0" });
+      return;
+    }
+    if (authentication) {
+      const expected = request.url === "/heartbeat" ? authentication.engineToken : authentication.controllerToken;
+      const provided = Buffer.from(request.headers.authorization ?? "");
+      const required = Buffer.from(`Bearer ${expected}`);
+      if (provided.length !== required.length || !timingSafeEqual(provided, required)) {
+        sendJson(response, 401, { error: "unauthorized" });
+        return;
+      }
+    }
     if (request.method !== "POST" && request.url !== "/session/status") {
       sendJson(response, 404, { error: "not found" });
       return;
@@ -394,14 +418,18 @@ export function createGateway(options: GatewayOptions = {}): Server {
 
     if (request.url === "/heartbeat") {
       try {
-        heartbeatRequestSchema.parse(await readJsonBody(request));
+        const heartbeat = heartbeatRequestSchema.parse(await readJsonBody(request));
+        if (authentication && heartbeat.device.id !== authentication.engineId) {
+          sendJson(response, 403, { error: "engine identity mismatch" });
+          return;
+        }
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
         return;
       }
 
       if (!sessionWanted || liveSession) {
-        sendJson(response, 200, { intervalSeconds: DEFAULT_HEARTBEAT_INTERVAL_SECONDS });
+        sendJson(response, 200, { intervalSeconds: heartbeatIntervalSeconds });
         return;
       }
 
@@ -690,7 +718,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       if (message.type === MESSAGE_READY) {
         try {
           const ready = parseSessionReady(message);
-          if (ready.sessionId !== session.sessionId) {
+          if (ready.sessionId !== session.sessionId || (authentication && ready.engineId !== authentication.engineId)) {
             webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
             return;
           }
