@@ -19,7 +19,8 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
   const root = await fs.mkdtemp(join(tmpdir(), "reach-http-mcp-"));
   const controllerToken = "c".repeat(48);
   const engineToken = "e".repeat(48);
-  const gateway = createGateway({ logger: () => {}, heartbeatIntervalSeconds: 1, authentication: { controllerToken, engineToken, engineId: "engine-a" } });
+  const mcpOrigin = "https://client.example.com";
+  const gateway = createGateway({ logger: () => {}, heartbeatIntervalSeconds: 1, mcp: { allowedOrigins: [mcpOrigin] }, authentication: { controllerToken, engineToken, engineId: "engine-a" } });
   const sockets = new Set<Socket>();
   gateway.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
   gateway.listen(0, "127.0.0.1");
@@ -71,14 +72,23 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
     value(await tool("session_close"));
     assert.equal((await fetch(`${url}/mcp`, { method: "DELETE", headers })).status, 200);
     const deployment = join(root, "deployment.json");
-    await fs.writeFile(deployment, JSON.stringify({ gatewayUrl: url, engineId: "engine-a", controllerToken }), { mode: 0o600 });
-    const verifier = spawn(process.execPath, [join(repository, "scripts/verify-mcp-http.mjs"), deployment], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
-    let diagnostics = "";
-    verifier.stdout.on("data", (chunk) => { diagnostics += chunk; });
-    verifier.stderr.on("data", (chunk) => { diagnostics += chunk; });
-    assert.equal((await once(verifier, "exit"))[0], 0, diagnostics);
+    const verify = async () => {
+      const verifier = spawn(process.execPath, [join(repository, "scripts/verify-mcp-http.mjs"), deployment], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+      let diagnostics = "";
+      verifier.stdout.on("data", (chunk) => { diagnostics += chunk; });
+      verifier.stderr.on("data", (chunk) => { diagnostics += chunk; });
+      return { exitCode: (await once(verifier, "exit"))[0], diagnostics };
+    };
+    await fs.writeFile(deployment, JSON.stringify({ gatewayUrl: url, engineId: "engine-a", controllerToken, mcpOrigin: "https://blocked.example.com" }), { mode: 0o600 });
+    const denied = await verify();
+    assert.notEqual(denied.exitCode, 0);
+    assert.match(denied.diagnostics, /MCP Origin rejected: configure REACH_MCP_ALLOWED_ORIGINS/);
+    await fs.writeFile(deployment, JSON.stringify({ gatewayUrl: url, engineId: "engine-a", controllerToken, mcpOrigin }), { mode: 0o600 });
+    const verified = await verify();
+    assert.equal(verified.exitCode, 0, verified.diagnostics);
     const report = JSON.parse(await fs.readFile(join(root, ".reach/mcp-http-verification.json"), "utf8"));
     assert.equal(report.results.length, 4);
+    assert.equal(report.mcpOrigin, mcpOrigin);
   } finally {
     if (engine && engine.exitCode === null) { engine.kill(); await once(engine, "exit"); }
     for (const socket of sockets) socket.destroy();

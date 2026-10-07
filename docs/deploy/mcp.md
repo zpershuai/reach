@@ -6,7 +6,7 @@ Reach 提供两种 MCP 接入：桌面客户端启动本地 stdio Connector；Gr
 
 ## Grok Bot（remote HTTP）
 
-先构建并更新 Gateway，再安装仓库的 [grok-bot-plugin](../../grok-bot-plugin/README.md) 目录。设置 Gateway HTTPS 根 URL 与 **Controller token**，不用 Engine token，也不需要 `REACH_MCP_DEVICES` 或本地 Node 进程。通用客户端配置：
+先构建并更新 Gateway，再在仓库根目录运行 `node scripts/configure-grok-plugin.mjs .reach/deployment.json`，安装生成的 `.reach/grok-bot-plugin/` 私有目录，详见 [插件说明](../../grok-bot-plugin/README.md)。部署 JSON 的 `gatewayUrl` 必须是公网 HTTPS 根 URL，脚本生成完整 `/mcp` 地址；宿主只需通过私有提示框设置 **Controller token**。不用 Engine token，也不需要 `REACH_MCP_DEVICES` 或本地 Node 进程。通用客户端配置：
 
 ```json
 {
@@ -20,7 +20,7 @@ Reach 提供两种 MCP 接入：桌面客户端启动本地 stdio Connector；Gr
 }
 ```
 
-真实凭证只存客户端私有设置。Controller token 可读写全部注册 Engine 工作区。插件用 `${REACH_GATEWAY_URL}` 构造 URL；Grok Bot 的 URL 插值仍需在实际客户端确认，若不支持，在私有插件副本中填入完整 URL。不要把真实 URL 或 token 提交到仓库。
+真实凭证只存客户端私有设置。Controller token 可读写全部注册 Engine 工作区。插件 URL 使用完整字面值，只有 Authorization 头使用 token 变量，不依赖宿主支持 URL 插值。仓库内插件使用保留的示例地址，安装生成的私有副本。生成脚本不复制 token，也不覆盖已有副本；更换地址时在私有副本中修改。不要把真实 URL 或 token 提交到仓库。
 
 HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`session_close`。文件工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
 
