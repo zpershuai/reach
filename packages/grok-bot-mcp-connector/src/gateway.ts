@@ -183,7 +183,8 @@ export class HttpGatewayClient implements GatewayClient {
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
     if (this.device.controllerToken) headers.authorization = `Bearer ${this.device.controllerToken}`;
-    const response = await this.request(`${this.device.gatewayUrl}${path}`, {
+    const target = this.device.engineId ? `${path}?engineId=${encodeURIComponent(this.device.engineId)}` : path;
+    const response = await this.request(`${this.device.gatewayUrl}${target}`, {
       method: "POST",
       headers,
       redirect: "error",

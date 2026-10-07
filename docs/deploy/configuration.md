@@ -44,7 +44,7 @@ gateway_url = 'https://gateway.example.com'
 engine_id = 'mac-engine-a'
 workspace = str(Path.home() / '.reach/workspace')
 directory = Path('.reach')
-names = ['deployment.json', 'gateway.env', 'engine.env', 'devices.json']
+names = ['deployment.json', 'gateway.env', 'engine.env', 'devices.json', 'engines.json']
 if any((directory / name).exists() for name in names):
     raise SystemExit('已有部署配置：请复用或先单独备份，未生成新凭证。')
 directory.mkdir(mode=0o700, exist_ok=True)
@@ -56,11 +56,13 @@ deployment = dict(gatewayUrl=gateway_url, engineId=engine_id,
                   workspaceRoot=workspace)
 gateway_env = dict(REACH_CONTROLLER_TOKEN=controller,
                    REACH_ENGINE_TOKEN=engine, REACH_ENGINE_ID=engine_id,
-                   REACH_HEARTBEAT_INTERVAL_SECS='15')
+                   REACH_HEARTBEAT_INTERVAL_SECS='15',
+                   REACH_ENGINES_FILE='/run/reach/engines.json')
 engine_env = dict(REACH_GATEWAY_URL=gateway_url,
                   REACH_ENGINE_TOKEN=engine, REACH_ENGINE_ID=engine_id,
                   REACH_WORKSPACE_ROOTS='default:' + workspace)
 contents = {
+    'engines.json': '[]\n',
     'deployment.json': json.dumps(deployment, indent=2) + '\n',
     'gateway.env': ''.join(f'{key}={value}\n' for key, value in gateway_env.items()),
     'engine.env': ''.join(f'{key}={shlex.quote(value)}\n' for key, value in engine_env.items()),

@@ -8,6 +8,8 @@ Gateway 是公网控制入口，在 VPS 上由 Docker Compose 常驻，宿主 Ca
 
 先完成 [配置与凭证](configuration.md)，确保存在 `.reach/gateway.env`。首次部署需要已安装 Docker、Compose 插件与 Caddy，并配置域名 DNS 和 80/443 网络访问。
 
+Compose 还需要 `deploy/engines.json`：单设备部署复制 `deploy/engines.json.example`（空数组）；多设备部署按 [OpenWrt 与多设备](openwrt.md) 填入额外 Engine 并设置 `REACH_ENGINES_FILE`。部署目录限制为管理员访问，注册文件需可被容器的 node 用户读取。升级前备份并保留已有注册文件。
+
 在本地仓库根目录运行：
 
 ```bash
@@ -37,9 +39,11 @@ ssh root@vps.example.com 'mkdir -p /srv/reach-current; chmod 700 /srv/reach-curr
   < /private/tmp/reach-gateway-release.tgz
 ssh root@vps.example.com 'umask 077; cat > /srv/reach-current/deploy/gateway.env; chmod 600 /srv/reach-current/deploy/gateway.env' \
   < .reach/gateway.env
+ssh root@vps.example.com 'cat > /srv/reach-current/deploy/engines.json; chmod 644 /srv/reach-current/deploy/engines.json' \
+  < .reach/engines.json
 ```
 
-第二条命令会覆盖远端配置，首次部署使用生成的文件；升级时应复用当前凭证并先备份。不要把含 token 的配置粘贴到命令行参数、聊天或发布说明中。
+后两条命令会覆盖远端配置，首次部署使用生成的文件；升级时应复用当前凭证和 Engine 注册表并先备份。不要把含 token 的配置粘贴到命令行参数、聊天或发布说明中。
 
 上传后目录应为：
 

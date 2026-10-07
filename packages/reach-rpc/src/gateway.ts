@@ -83,6 +83,8 @@ export interface GatewayOptions {
   sessionRpcTimeoutMs?: number;
   heartbeatIntervalSeconds?: number;
   authentication?: { controllerToken: string; engineToken: string; engineId: string };
+  /** Additional Engines sharing the controller token; legacy requests target authentication.engineId. */
+  engines?: readonly { engineId: string; engineToken: string }[];
 }
 
 interface PendingSession {
@@ -157,6 +159,59 @@ function leafMutation(
 }
 
 export function createGateway(options: GatewayOptions = {}): Server {
+  if (options.engines === undefined) return createEngineGateway(options);
+  const authentication = options.authentication;
+  if (!authentication) throw new Error("Multiple Engines require Gateway authentication");
+  const engines = [authentication, ...options.engines];
+  if (new Set(engines.map((engine) => engine.engineId)).size !== engines.length
+    || new Set(engines.map((engine) => engine.engineToken)).size !== engines.length) {
+    throw new Error("Engine ids and Engine tokens must be unique");
+  }
+  const gateways = new Map<string, Server>();
+  for (const engine of engines) {
+    gateways.set(engine.engineId, createEngineGateway({
+      ...options,
+      authentication: { ...engine, controllerToken: authentication.controllerToken },
+    }, `${SESSION_ENDPOINT_PATH}?engineId=${encodeURIComponent(engine.engineId)}`));
+  }
+  const selectGateway = (request: IncomingMessage): Server | undefined => {
+    const url = new URL(request.url ?? "/", "http://localhost");
+    const selected = url.searchParams.get("engineId");
+    if (url.pathname === "/heartbeat") {
+      // Authenticate before parsing the body. Each Engine handler also checks device.id.
+      const provided = Buffer.from(request.headers.authorization ?? "");
+      const engine = engines.find(({ engineToken }) => {
+        const required = Buffer.from(`Bearer ${engineToken}`);
+        return provided.length === required.length && timingSafeEqual(provided, required);
+      });
+      if (!engine || (selected !== null && selected !== engine.engineId)) return undefined;
+      return gateways.get(engine.engineId);
+    }
+    return gateways.get(selected ?? authentication.engineId);
+  };
+  const gateway = createServer((request, response) => {
+    const target = selectGateway(request);
+    if (!target) {
+      const heartbeat = new URL(request.url ?? "/", "http://localhost").pathname === "/heartbeat";
+      sendJson(response, heartbeat ? 401 : 404, { error: "unknown or unauthorized engine" });
+      return;
+    }
+    request.url = new URL(request.url ?? "/", "http://localhost").pathname;
+    target.emit("request", request, response);
+  });
+  gateway.on("upgrade", (request, socket, head) => {
+    const target = selectGateway(request);
+    if (!target) return rejectUpgrade(socket);
+    target.emit("upgrade", request, socket, head);
+  });
+  gateway.on("close", () => {
+    for (const target of gateways.values()) target.emit("close");
+  });
+  return gateway;
+}
+
+/** One isolated state machine per Engine, owned by the listening Gateway. */
+function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_ENDPOINT_PATH): Server {
   const authentication = options.authentication;
   if (authentication && (authentication.controllerToken.length < 32 || authentication.engineToken.length < 32
     || authentication.controllerToken === authentication.engineToken || !authentication.engineId.trim())) {
@@ -380,7 +435,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       wanted: sessionWanted,
       status,
       sessionId: session?.sessionId ?? pendingSession?.sessionId ?? wantedSessionId,
-      endpoint: pendingSession && !session ? SESSION_ENDPOINT_PATH : undefined,
+      endpoint: pendingSession && !session ? sessionEndpoint : undefined,
       leaseExpiresAt: (session ?? pendingSession) ? isoDate((session ?? pendingSession)!.leaseExpiresAt) : undefined,
       closureReason: lastClosureReason,
     };
@@ -448,7 +503,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
       };
       sendJson(response, 200, {
         intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
-        endpoint: SESSION_ENDPOINT_PATH,
+        endpoint: sessionEndpoint,
         token: pendingSession.token,
         sessionId: pendingSession.sessionId,
         leaseExpiresAt: isoDate(pendingSession.leaseExpiresAt),
@@ -800,6 +855,12 @@ export function createGateway(options: GatewayOptions = {}): Server {
     });
   });
 
+  gateway.on("close", () => {
+    if (leaseTimer) clearTimeout(leaseTimer);
+    if (idleTimer) clearTimeout(idleTimer);
+    clearPendingRpcs("gateway closed");
+    liveSession?.socket.terminate();
+  });
   return gateway;
 }
 
