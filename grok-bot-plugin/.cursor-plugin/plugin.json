@@ -14,18 +14,13 @@
   "variables": {
     "type": "object",
     "properties": {
-      "REACH_GATEWAY_URL": {
-        "type": "string",
-        "title": "Reach Gateway URL",
-        "description": "Public HTTPS Gateway root, for example https://reach.example.com. Omit the trailing slash and path."
-      },
       "REACH_CONTROLLER_TOKEN": {
         "type": "string",
         "title": "Reach Controller token",
         "description": "Private Controller token, not the Engine token. Authorizes reads and writes across all registered Engine workspaces. Never share or echo it."
       }
     },
-    "required": ["REACH_GATEWAY_URL", "REACH_CONTROLLER_TOKEN"]
+    "required": ["REACH_CONTROLLER_TOKEN"]
   },
   "mcpServers": "./mcp.json",
   "skills": "./skills/"

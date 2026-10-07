@@ -2,7 +2,7 @@
   "mcpServers": {
     "reach": {
       "type": "http",
-      "url": "${REACH_GATEWAY_URL}/mcp",
+      "url": "https://reach.example.com/mcp",
       "headers": {
         "Authorization": "Bearer ${REACH_CONTROLLER_TOKEN}"
       }

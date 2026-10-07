@@ -109,6 +109,21 @@ Remote session_close SHALL report ENGINE_BUSY when this MCP session has no bound
 - **WHEN** a remote client without ownership calls session_close on an occupied Engine
 - **THEN** the tool returns ENGINE_BUSY and leaves the owner's session intact
 
+### Requirement: Private Grok plugin configuration
+The repository SHALL distribute a plugin template using a reserved example HTTPS endpoint and a generator that creates a private installation with a literal public HTTPS /mcp URL. Only the Authorization header SHALL use the Controller token setup variable. The generator MUST NOT copy deployment tokens and MUST refuse to overwrite an existing private installation. Verification SHALL optionally send the actual client's exact Origin and report an allowlist rejection without weakening the Gateway's Origin checks. Interactive deployment instructions SHALL configure a 15-second heartbeat without changing existing installations automatically.
+
+#### Scenario: Configure a public Gateway
+- **WHEN** the user generates a plugin from a private deployment JSON containing a public HTTPS Gateway root
+- **THEN** the private plugin contains a literal /mcp URL, preserves the token placeholder for host setup, and includes its manifest, skills and assets
+
+#### Scenario: Existing private plugin
+- **WHEN** a generated private plugin already exists
+- **THEN** generation fails without overwriting its configuration
+
+#### Scenario: Actual client Origin is not allowed
+- **WHEN** verification sends a configured mcpOrigin that is absent from the Gateway allowlist
+- **THEN** verification fails with a REACH_MCP_ALLOWED_ORIGINS setup hint, while unapproved requests remain rejected
+
 ### Requirement: Nonblocking remote readiness
 Remote pick_device and first filesystem calls SHALL immediately create an owned intent and report connecting with retryAfterMs when not ready. device_status SHALL observe that intent without canceling it. Independent Engine ownership SHALL coexist in one HTTP MCP session.
 

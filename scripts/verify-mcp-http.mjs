@@ -12,6 +12,12 @@ const deviceId = deployment.engineId;
 assert.ok(typeof deviceId === "string" && deviceId.length, "engineId is required");
 assert.ok(typeof deployment.controllerToken === "string" && deployment.controllerToken.length >= 32, "Controller token is required");
 const headers = { authorization: `Bearer ${deployment.controllerToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+if (deployment.mcpOrigin !== undefined) {
+  assert.equal(typeof deployment.mcpOrigin, "string", "mcpOrigin must be an exact HTTP(S) Origin");
+  const origin = new URL(deployment.mcpOrigin);
+  assert.ok(["https:", "http:"].includes(origin.protocol) && origin.origin === deployment.mcpOrigin, "mcpOrigin must be an exact HTTP(S) Origin without path, credentials, query or fragment");
+  headers.origin = origin.origin;
+}
 let sequence = 0;
 const init = () => ({ jsonrpc: "2.0", id: ++sequence, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "reach-http-verifier", version: "1" } } });
 const fetchMcp = (method, body, sessionHeaders = headers) => fetch(`${url}/mcp`, {
@@ -21,7 +27,9 @@ const fetchMcp = (method, body, sessionHeaders = headers) => fetch(`${url}/mcp`,
 
 async function connect() {
   const response = await fetchMcp("POST", init());
-  assert.equal(response.status, 200, "MCP initialize must succeed");
+  assert.equal(response.status, 200, response.status === 403
+    ? "MCP Origin rejected: configure REACH_MCP_ALLOWED_ORIGINS with the actual client's exact Origin, then recreate the Gateway container"
+    : "MCP initialize must succeed (404 means the deployed Gateway lacks /mcp)");
   const initialized = await response.json();
   assert.equal(initialized.result.serverInfo.name, "reach-mcp");
   const id = response.headers.get("mcp-session-id");
@@ -91,5 +99,5 @@ assert.equal((await closed.json()).status, "none");
 assert.equal((await fetchMcp("POST", { jsonrpc: "2.0", id: ++sequence, method: "ping" }, client.sessionHeaders)).status, 404);
 results.push("DELETE drain and expired-id rejection");
 await mkdir(".reach", { recursive: true, mode: 0o700 });
-await writeFile(".reach/mcp-http-verification.json", JSON.stringify({ checkedAt: new Date().toISOString(), gatewayUrl: url, deviceId, probe, results }, null, 2) + "\n", { mode: 0o600 });
+await writeFile(".reach/mcp-http-verification.json", JSON.stringify({ checkedAt: new Date().toISOString(), gatewayUrl: url, mcpOrigin: deployment.mcpOrigin ?? null, deviceId, probe, results }, null, 2) + "\n", { mode: 0o600 });
 console.log("PASS remote HTTP MCP authentication, tools, ownership, filesystem revisions and cleanup");
