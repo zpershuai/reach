@@ -193,6 +193,30 @@ function rpcBody(requestId: string, method: string, params: unknown, permission?
   };
 }
 
+test("Gateway checks process grants before HTTP forwarding and stamps claim type", async () => {
+  await withGateway(async (url) => {
+    const { socket } = await openEngineSession(url);
+    let forwarded = 0;
+    attachMockEngine(socket, (envelope) => {
+      forwarded++;
+      return { type: "response", requestId: envelope.requestId, result: { permission: envelope.permission } };
+    });
+    const post = async (path: string, body: unknown) => (await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json() as Promise<any>;
+    const status = await (await fetch(`${url}/session/status`)).json() as { sessionId: string };
+    const params = { workspace: "fixture", script: "main.cjs", launchId: "launch" };
+    const wrapped = { name: "process.run", arguments: params };
+    assert.equal((await post("/session/rpc", rpcBody("forged-run", "tool.call", wrapped, { grantId: "forged", kind: "execute" }))).error.code, "PERMISSION_DENIED");
+    assert.equal(forwarded, 0);
+    const grant = await post("/grants", { kind: "execute", sessionId: status.sessionId, ...params });
+    assert.equal((await post("/session/rpc", rpcBody("allowed-run", "tool.call", wrapped, { grantId: grant.grantId, kind: "control" }))).result.permission.kind, "execute");
+    assert.equal(forwarded, 1);
+    const nested = { name: "tool.call", arguments: wrapped };
+    assert.equal((await post("/session/rpc", rpcBody("nested-run", "tool.call", nested, { grantId: grant.grantId }))).error.code, "INVALID_PARAMS");
+    assert.equal(forwarded, 1);
+    socket.close(); await once(socket, "close");
+  });
+});
+
 test("session controls bind pending intent and reject a replacement id", async () => {
   await withGateway(async (baseUrl) => {
     const post = (path: string, body: unknown) => fetch(`${baseUrl}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });

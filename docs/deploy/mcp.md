@@ -22,7 +22,7 @@ Reach 提供两种 MCP 接入：桌面客户端启动本地 stdio Connector；Gr
 
 真实凭证只存客户端私有设置。Controller token 可读写全部注册 Engine 工作区。插件 URL 使用完整字面值，只有 Authorization 头使用 token 变量，不依赖宿主支持 URL 插值。仓库内插件使用保留的示例地址，安装生成的私有副本。生成脚本不复制 token，也不覆盖已有副本；更换地址时在私有副本中修改。不要把真实 URL 或 token 提交到仓库。
 
-HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`session_close`。文件工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
+HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`process_run`、`process_status`、`process_logs`、`process_stop`、`process_list`、`session_close`。文件、process 工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
 
 首次 `pick_device` 或文件调用立即创建连接意图；未 ready 时返回 `{"status":"connecting","retryAfterMs":1000}`，文件操作尚未执行。按返回间隔调用 `device_status`，直到 `ready` 且 `owned: true`，再执行文件工具。状态查询不会重新打开或取消意图。默认空闲心跳仍是 120 秒；可将 Gateway 的 `REACH_HEARTBEAT_INTERVAL_SECS` 设置为 `15`，代价是更多网络流量和设备耗电。
 
@@ -198,3 +198,8 @@ Connector 在使用工具前检查会话、按需重建或续租。切换设备�
 状态观察可在总预算内重试临时网络中断；文件 RPC、grant 和会话变更不会自动重放。写入丢失响应时先确认文件结果。不要同时让多个客户端抢占同一个 Engine 的会话；不同 Engine 的会话互相隔离。
 
 手工直接运行 `node .../dist/main.js` 后没有输出是正常的：stdio 服务在等待 MCP 输入。客户端诊断看 stderr；部署验收使用 [verification.md](verification.md) 中安装后 MCP 验证。文件工具读取的是 Engine 工作区，Connector 本身只读取自己的私有配置。
+
+
+## 脚本任务
+
+新增 `process_run/status/logs/stop/list` HTTP 工具，均要求 `deviceId`。stdio 使用 `process.run/status/logs/stop/list`；dynamic 模式操作已选设备，static 模式要求 `deviceId`。它们通过 Gateway 在目标 Engine 上执行，使用该设备的私有 Node runtime。执行默认关闭，配置和调用示例见 [脚本任务](processes.md)。

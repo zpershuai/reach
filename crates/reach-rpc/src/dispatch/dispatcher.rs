@@ -112,15 +112,22 @@ impl SessionDispatcher {
         // 8. Serial execution with an authorized invocation context.
         let mut context = InvocationContext {
             params: &invocation.params,
+            processes: &mut session.processes,
+            access: auth.access,
             workspace: &mut *session.workspace,
             deadline,
             write_claimed: auth.write_claimed,
             session_id: &self.session_id,
         };
         let result = tool.execute(&mut context).map_err(|error| error.code);
+        // Execute tools retain known pre-launch errors and cached spawn failures.
+        // A late deadline must not erase that outcome into an uncertain launch.
+        if tool.descriptor().access == crate::dispatch::AccessClass::Execute {
+            return result;
+        }
         // A write Tool reports success only after its commit boundary. Do not
         // turn that known outcome into an uncertain mutation during teardown.
-        if result.is_ok() && tool.descriptor().access.is_write() {
+        if result.is_ok() && tool.descriptor().access != crate::dispatch::AccessClass::Read {
             return result;
         }
         if context.workspace.is_cancelled() {
@@ -243,6 +250,7 @@ mod tests {
             json!({}),
             Some(Permission {
                 grant_id: "g".into(),
+                kind: None,
             }),
         );
         request.deadline_at = Some("1970-01-01T00:00:01Z".into());
@@ -295,6 +303,52 @@ mod tests {
     }
 
     #[test]
+    fn known_launch_failure_survives_elapsed_deadline() {
+        struct FailedLaunch(ToolDescriptor);
+        impl Tool for FailedLaunch {
+            fn descriptor(&self) -> &ToolDescriptor {
+                &self.0
+            }
+            fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
+                while !context.expired() {
+                    std::thread::yield_now();
+                }
+                Err(ToolError::new("REVISION_CONFLICT"))
+            }
+        }
+        let mut workspace = workspace();
+        let mut session = SessionContext::new("session-1".into(), 0, 0, &mut workspace);
+        let mut descriptor = ToolDescriptor::read("process.run");
+        descriptor.access = crate::dispatch::AccessClass::Execute;
+        descriptor.default_deadline = Some(Duration::from_millis(20));
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(FailedLaunch(descriptor)));
+        let mut dispatcher =
+            SessionDispatcher::new("session-1".into(), registry, Duration::from_secs(30));
+        let request = envelope(
+            "late-failure",
+            "process.run",
+            json!({}),
+            Some(Permission {
+                grant_id: "execution".into(),
+                kind: Some("execute".into()),
+            }),
+        );
+        assert_eq!(
+            dispatcher.dispatch(&mut session, &request, 0).unwrap_err(),
+            "REVISION_CONFLICT"
+        );
+        assert_eq!(
+            session
+                .processes
+                .status(&json!({"launchId":"late-failure"}))
+                .unwrap_err()
+                .code,
+            "PROCESS_NOT_FOUND"
+        );
+    }
+
+    #[test]
     fn committed_write_is_not_relabelled_when_its_deadline_elapses() {
         struct CommittingTool(ToolDescriptor);
         impl Tool for CommittingTool {
@@ -339,6 +393,7 @@ mod tests {
                     json!({}),
                     Some(Permission {
                         grant_id: "g".into(),
+                        kind: None,
                     }),
                 ),
                 0,
@@ -374,6 +429,7 @@ mod tests {
                 json!({}),
                 Some(Permission {
                     grant_id: "g1".into(),
+                    kind: None,
                 }),
             ),
             0,
@@ -405,6 +461,7 @@ mod tests {
             json!({ "name": "tool.call", "arguments": { "name": "fs.read", "arguments": {} } }),
             Some(Permission {
                 grant_id: "g1".into(),
+                kind: None,
             }),
         );
         assert_eq!(
@@ -487,7 +544,8 @@ mod tests {
                     "fs.edit",
                     json!({}),
                     Some(Permission {
-                        grant_id: "g".into()
+                        grant_id: "g".into(),
+                        kind: None,
                     })
                 ),
                 0

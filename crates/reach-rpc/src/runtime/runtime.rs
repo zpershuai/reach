@@ -125,6 +125,8 @@ pub struct EngineRuntime {
     pending: Option<(String, Lease)>,
     session_closure: Option<(String, SessionClosureReason)>,
     backoff_secs: u64,
+    process_cleanup: Option<crate::process::ProcessManager>,
+    cleanup_transport: Option<Box<dyn SessionTransport>>,
 }
 
 impl EngineRuntime {
@@ -150,6 +152,8 @@ impl EngineRuntime {
             pending: None,
             session_closure: None,
             backoff_secs: 1,
+            process_cleanup: None,
+            cleanup_transport: None,
         }
     }
 
@@ -208,6 +212,18 @@ impl EngineRuntime {
     /// Perform one state action. Non-blocking except when `ActiveSession` is
     /// entered: driving a live session reads from its transport until it ends.
     pub fn step(&mut self) -> Result<StepOutcome, String> {
+        self.step_with_shutdown(crate::process::shutdown_requested())
+    }
+
+    fn step_with_shutdown(&mut self, shutdown: bool) -> Result<StepOutcome, String> {
+        if shutdown
+            && !matches!(
+                self.state,
+                RuntimeState::ActiveSession | RuntimeState::Draining
+            )
+        {
+            self.transition(RuntimeState::Shutdown);
+        }
         match self.state {
             RuntimeState::Boot => {
                 self.transition(RuntimeState::Heartbeating);
@@ -270,7 +286,11 @@ impl EngineRuntime {
                     Ok(mut transport) => {
                         self.transition(RuntimeState::ActiveSession);
                         let reason = self.run_session(&mut transport, &lease);
-                        finalize_session(&mut transport, &lease.session_id, reason);
+                        if self.process_cleanup.is_some() {
+                            self.cleanup_transport = Some(transport);
+                        } else {
+                            finalize_session(&mut transport, &lease.session_id, reason);
+                        }
                         self.session_closure = Some((lease.session_id.clone(), reason));
                         self.transition(RuntimeState::Draining);
                     }
@@ -290,12 +310,25 @@ impl EngineRuntime {
                 self.transition(RuntimeState::Draining);
             }
             RuntimeState::Draining => {
+                if let Some(cleanup) = &mut self.process_cleanup {
+                    if cleanup.drain().is_err() {
+                        return Ok(self.cleanup_failed(shutdown));
+                    }
+                }
+                self.process_cleanup = None;
+                if let Some(mut transport) = self.cleanup_transport.take() {
+                    if let Some((id, reason)) = &self.session_closure {
+                        finalize_session(&mut transport, id, *reason);
+                    }
+                }
                 let (session_id, reason) = self
                     .session_closure
                     .take()
                     .unwrap_or(("<unbound>".into(), SessionClosureReason::PolicyError));
                 self.emit(RuntimeEvent::SessionClosed { session_id, reason });
-                if reason.is_error() {
+                if reason == SessionClosureReason::Shutdown {
+                    self.transition(RuntimeState::Shutdown);
+                } else if reason.is_error() {
                     self.transition(RuntimeState::Backoff);
                 } else {
                     self.backoff_secs = 1;
@@ -312,6 +345,20 @@ impl EngineRuntime {
             RuntimeState::Shutdown => return Ok(StepOutcome::Shutdown),
         }
         Ok(StepOutcome::Continue)
+    }
+
+    fn cleanup_failed(&mut self, shutdown: bool) -> StepOutcome {
+        self.emit(RuntimeEvent::Message {
+            line: "PROCESS_CLEANUP_FAILED: retaining session ownership".into(),
+        });
+        if shutdown {
+            // Exit without a successful SessionClosed event or releasing the
+            // session. Drop makes a final bounded cleanup attempt.
+            self.transition(RuntimeState::Shutdown);
+            StepOutcome::Shutdown
+        } else {
+            StepOutcome::Wait(Duration::from_secs(1))
+        }
     }
 
     /// Drive one active session to completion and return its closure reason.
@@ -339,6 +386,7 @@ impl EngineRuntime {
             self.clock.now_ms(),
             &mut self.workspace,
         );
+        context.processes = crate::process::ProcessManager::new(self.config.processes.clone());
         let mut dispatcher = SessionDispatcher::new(
             lease.session_id.clone(),
             self.registry.clone(),
@@ -372,6 +420,9 @@ impl EngineRuntime {
             last_activity_ms,
         };
         let reason = 'drive: loop {
+            if crate::process::shutdown_requested() {
+                break 'drive SessionClosureReason::Shutdown;
+            }
             let now_ms = self.clock.now_ms();
             // Lease expiry is enforced even if the socket remains open.
             if now_ms >= context.lease_expires_at_ms {
@@ -384,6 +435,9 @@ impl EngineRuntime {
             if now_ms.saturating_sub(context.started_at_ms) >= timeouts.rotation.as_millis() as i64
             {
                 break 'drive SessionClosureReason::Rotation;
+            }
+            if context.processes.active() {
+                last_activity_ms = now_ms;
             }
             // Idle timeout: no valid RPC, renewal, or control activity.
             if now_ms.saturating_sub(last_activity_ms) >= timeouts.idle_timeout.as_millis() as i64 {
@@ -461,6 +515,16 @@ impl EngineRuntime {
         };
         // `context` is dropped here (closes the cursor scope) before the
         // transport is finalized.
+        let mut processes = std::mem::take(&mut context.processes);
+        if let Err(error) = processes.drain() {
+            events.borrow_mut().push(RuntimeEvent::Message {
+                line: format!(
+                    "Reach process cleanup failed: {}; retaining owner session",
+                    error.code
+                ),
+            });
+            self.process_cleanup = Some(processes);
+        }
         drop(context);
         reason
     }
@@ -1079,6 +1143,7 @@ mod tests {
             gateway: GatewayConfig::new("http://127.0.0.1:8787").unwrap(),
             timeouts,
             workspace_roots: roots,
+            processes: Default::default(),
         }
     }
 
@@ -1097,6 +1162,28 @@ mod tests {
             clock,
             Box::new(|_| {}),
         )
+    }
+
+    #[test]
+    fn failed_cleanup_retries_until_shutdown_without_reporting_session_closed() {
+        let (factory, _, _) = factory(vec![], None, 0);
+        let mut engine = runtime(
+            test_config(0, TimeoutPolicy::default()),
+            Box::new(FakeHeartbeat::new(vec![])),
+            Box::new(factory),
+            Box::new(SharedClock::new(0)),
+        );
+        engine.state = RuntimeState::Draining;
+        engine.session_closure = Some(("owner".into(), SessionClosureReason::Shutdown));
+        assert!(matches!(engine.cleanup_failed(false), StepOutcome::Wait(_)));
+        assert_eq!(engine.state, RuntimeState::Draining);
+        assert!(matches!(engine.cleanup_failed(true), StepOutcome::Shutdown));
+        assert_eq!(engine.state, RuntimeState::Shutdown);
+        assert!(engine.session_closure.is_some());
+        assert!(!engine
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::SessionClosed { .. })));
     }
 
     #[test]

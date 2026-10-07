@@ -8,6 +8,7 @@ use reach_rpc::{
     default_registry, EngineConfig, EngineRuntime, LocalHttpHeartbeatTransport,
     LocalWebSocketSessionTransportFactory, SystemClock, WorkspaceFilesystem, ENGINE_VERSION,
 };
+use std::time::Duration;
 
 fn main() {
     let gateway_url = std::env::args().nth(1);
@@ -39,6 +40,7 @@ fn main() {
         config.timeouts.connection_timeout,
     );
     let registry = default_registry();
+    reach_rpc::process::install_shutdown_handlers();
     let mut runtime = EngineRuntime::new(
         config.clone(),
         workspace,
@@ -46,7 +48,16 @@ fn main() {
         Box::new(heartbeat),
         Box::new(LocalWebSocketSessionTransportFactory),
         Box::new(SystemClock),
-        Box::new(std::thread::sleep),
+        Box::new(|duration| {
+            let deadline = std::time::Instant::now() + duration;
+            while std::time::Instant::now() < deadline && !reach_rpc::process::shutdown_requested()
+            {
+                std::thread::sleep(
+                    Duration::from_millis(100)
+                        .min(deadline.saturating_duration_since(std::time::Instant::now())),
+                );
+            }
+        }),
     );
 
     println!(

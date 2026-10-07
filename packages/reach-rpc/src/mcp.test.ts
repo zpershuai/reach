@@ -30,7 +30,7 @@ async function client(url: string, version = "2025-06-18") {
   assert.equal(initialized.status, 200, await initialized.clone().text());
   const sessionId = initialized.headers.get("mcp-session-id")!;
   assert.match(sessionId, /^[a-f0-9-]+$/);
-  const result = await initialized.json() as { result: { protocolVersion: string } };
+  const result = await initialized.json() as { result: { protocolVersion: string; instructions: string } };
   const sessionHeaders = { ...headers, "mcp-session-id": sessionId, "mcp-protocol-version": result.result.protocolVersion };
   let sequence = 1;
   const post = (body: unknown, overrides: Record<string, string> = {}) => fetch(`${url}/mcp`, { method: "POST", headers: { ...sessionHeaders, ...overrides }, body: JSON.stringify(body) });
@@ -112,11 +112,20 @@ test("MCP negotiates versions and enforces session, initialization and HTTP mess
   await withGateway(async (url) => {
     const c = await client(url, "2099-01-01");
     assert.equal(c.initialized.result.protocolVersion, "2025-06-18");
+    assert.match(c.initialized.result.instructions, /trusted workspace scripts/);
+    assert.match(c.initialized.result.instructions, /Engine account privileges/);
+    assert.match(c.initialized.result.instructions, /launchId.*process_status/);
     assert.equal((await c.post({ jsonrpc: "2.0", id: 2, method: "tools/list" })).status, 400);
     const ack = await c.notify(); assert.equal(ack.status, 202); assert.equal(await ack.text(), "");
     assert.deepEqual(await c.request("ping"), {});
     const tools = (await c.request("tools/list")).tools;
-    assert.equal(tools.length, 12);
+    assert.equal(tools.length, 17);
+    const statusSchema = tools.find((tool: { name: string }) => tool.name === "process_status").inputSchema;
+    assert.deepEqual(statusSchema.oneOf, [
+      { required: ["processId"], not: { required: ["launchId"] } },
+      { required: ["launchId"], not: { required: ["processId"] } },
+    ]);
+    assert.ok(statusSchema.required.includes("deviceId"));
     for (const tool of tools) {
       assert.match(tool.name, /^[a-zA-Z0-9_-]{1,64}$/);
       if (tool.name.startsWith("fs_") || tool.name === "session_close") assert.ok(tool.inputSchema.required.includes("deviceId"));

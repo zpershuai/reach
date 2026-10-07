@@ -14,6 +14,66 @@ import { McpServer } from "./server.js";
 import { MCP_VERSION } from "./version.js";
 import { GATEWAY_VERSION } from "../../reach-rpc/dist/version.js";
 
+test("managed tasks drain on disconnect, lease, rotation and shutdown while live work prevents idle closure", async () => {
+  const repository = fileURLToPath(new URL("../../..", import.meta.url));
+  const build = spawn("cargo", ["build", "--quiet", "--locked", "--offline", "-p", "reach-rpc", "--bin", "engine"], { cwd: repository, stdio: "ignore" });
+  assert.equal((await once(build, "exit"))[0], 0);
+  for (const mode of ["disconnect", "lease", "rotation", "shutdown", "idle"] as const) {
+    const root = await fs.mkdtemp(join(tmpdir(), "reach-process-lifecycle-"));
+    const gateway = createGateway({ logger: () => {} });
+    const sockets = new Set<Socket>();
+    gateway.on("connection", socket => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
+    gateway.listen(0, "127.0.0.1"); await once(gateway, "listening");
+    const address = gateway.address(); assert.ok(address && typeof address !== "string");
+    const url = `http://127.0.0.1:${address.port}`;
+    const post = async (path: string, body: unknown) => (await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json() as Promise<any>;
+    const status = async (): Promise<any> => {
+      try { return await (await fetch(`${url}/session/status`)).json(); }
+      catch (error) { if (mode === "disconnect" && error instanceof TypeError) return { status: "transport-recovering" }; throw error; }
+    };
+    const waitFor = async (check: () => Promise<boolean>) => {
+      const deadline = Date.now() + 5000;
+      while (!await check()) { assert.ok(Date.now() < deadline, `lifecycle timeout: ${mode}`); await new Promise(resolve => setTimeout(resolve, 10)); }
+    };
+    let engine: ReturnType<typeof spawn> | undefined;
+    try {
+      await post("/session/open", { sessionId: `owner-${mode}` });
+      const env = { ...process.env, REACH_WORKSPACE_ROOTS: `default:${root}`, REACH_PROCESS_WORKSPACES: "default", REACH_PROCESS_NODE_BIN: process.env.REACH_TEST_NODE_BIN ?? process.execPath, REACH_PROCESS_STOP_GRACE_MS: "30",
+        ...(mode === "lease" ? { REACH_LEASE_SECS: "1" } : {}), ...(mode === "rotation" ? { REACH_ROTATION_SECS: "1" } : {}), ...(mode === "idle" ? { REACH_IDLE_SECS: "1" } : {}) };
+      engine = spawn(join(repository, "target/debug/engine"), [url], { env, stdio: "ignore" });
+      await waitFor(async () => (await status()).status === "ready");
+      await fs.writeFile(join(root, "job.cjs"), "const fs=require('node:fs');setInterval(()=>fs.appendFileSync('ticks','x'),10);");
+      const grant = await post("/grants", { kind: "execute", sessionId: `owner-${mode}`, workspace: "default", script: "job.cjs", launchId: "lifecycle" });
+      const launched = await post("/session/rpc", { requestId: "run", method: "process.run", params: { workspace: "default", script: "job.cjs", launchId: "lifecycle" }, permission: { grantId: grant.grantId } });
+      assert.equal(launched.type, "response", JSON.stringify(launched));
+      await waitFor(async () => (await fs.stat(join(root, "ticks")).catch(() => undefined)) !== undefined);
+      if (mode === "disconnect") { for (const socket of sockets) socket.destroy(); }
+      if (mode === "shutdown") { const exited = once(engine, "exit"); engine.kill("SIGTERM"); assert.equal((await exited)[0], 0); }
+      if (mode === "idle") {
+        await new Promise(resolve => setTimeout(resolve, 1200));
+        assert.equal((await status()).status, "ready");
+        await post("/session/close", { sessionId: `owner-${mode}` });
+      }
+      await waitFor(async () => (await status()).status === "none");
+      // On abrupt disconnect Gateway observes closure before Engine drains.
+      // Wait for observable task cleanup as well as Gateway ownership release.
+      if (mode === "disconnect") await waitFor(async () => {
+        const size = (await fs.stat(join(root, "ticks"))).size;
+        await new Promise(resolve => setTimeout(resolve, 100));
+        return (await fs.stat(join(root, "ticks"))).size === size;
+      });
+      const bytes = (await fs.stat(join(root, "ticks"))).size;
+      await new Promise(resolve => setTimeout(resolve, 100));
+      assert.equal((await fs.stat(join(root, "ticks"))).size, bytes, mode);
+    } finally {
+      if (engine && engine.exitCode === null) { const exited = once(engine, "exit"); engine.kill("SIGTERM"); await exited; }
+      for (const socket of sockets) socket.destroy();
+      await new Promise<void>(resolve => gateway.close(() => resolve()));
+      await fs.rm(root, { recursive: true, force: true });
+    }
+  }
+});
+
 test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and cleanup", async () => {
   const repository = fileURLToPath(new URL("../../..", import.meta.url));
   const root = await fs.mkdtemp(join(tmpdir(), "reach-http-mcp-"));
@@ -49,7 +109,7 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
     await request("notifications/initialized", undefined, true);
     assert.equal(value(await tool("pick_device")).status, "connecting");
     engine = spawn(join(repository, "target/debug/engine"), [url], {
-      cwd: repository, env: { ...process.env, REACH_ENGINE_ID: "engine-a", REACH_ENGINE_TOKEN: engineToken, REACH_WORKSPACE_ROOTS: `default:${root}` }, stdio: "ignore",
+      cwd: repository, env: { ...process.env, REACH_ENGINE_ID: "engine-a", REACH_ENGINE_TOKEN: engineToken, REACH_WORKSPACE_ROOTS: `default:${root}`, REACH_PROCESS_WORKSPACES: "default", REACH_PROCESS_NODE_BIN: process.env.REACH_TEST_NODE_BIN ?? process.execPath, REACH_PROCESS_STOP_GRACE_MS: "50" }, stdio: "ignore",
     });
     const deadline = Date.now() + 5_000;
     while (value(await tool("device_status")).status !== "ready") {
@@ -65,7 +125,23 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
     assert.equal(stale.isError, true); assert.match(stale.content[0].text, /^REVISION_CONFLICT:/);
     assert.equal(value(await tool("fs_read", args)).content, "updated");
     assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "updated");
+    value(await tool("fs_write", { workspace: "default", path: "job.cjs", mode: "create", content: "console.log('process-ready');setInterval(()=>{},1000)" }));
+    const launch = value(await tool("process_run", { workspace: "default", script: "job.cjs", launchId: "http-launch" }));
+    assert.ok(launch.processId);
+    assert.equal(value(await tool("process_status", { launchId: "http-launch" })).processId, launch.processId);
+    assert.equal(value(await tool("process_run", { workspace: "default", script: "job.cjs", launchId: "http-launch" })).processId, launch.processId);
+    const logsDeadline = Date.now() + 5000;
+    while (!value(await tool("process_logs", { processId: launch.processId })).records.some((r: any) => r.text.includes("process-ready"))) {
+      assert.ok(Date.now() < logsDeadline); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    value(await tool("process_stop", { processId: launch.processId }));
+    while (value(await tool("process_status", { processId: launch.processId })).state !== "stopped") {
+      assert.ok(Date.now() < logsDeadline); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    assert.equal(value(await tool("process_list")).processes.length, 1);
+    value(await tool("process_run", { workspace: "default", script: "job.cjs", launchId: "http-close-cleanup" }));
     value(await tool("session_close"));
+    assert.equal((await tool("process_status", { processId: launch.processId })).isError, true);
     const status = await fetch(`${url}/session/status`, { headers });
     assert.equal((await status.json() as { status: string }).status, "none");
     // Closing an already closed device must not open another session.
@@ -133,7 +209,7 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
     }
     engine = spawn(join(repository, "target/debug/engine"), [gatewayUrl], {
       cwd: repository,
-      env: { ...process.env, REACH_WORKSPACE_ROOTS: `default:${root}`, REACH_LEASE_SECS: "5" },
+      env: { ...process.env, REACH_WORKSPACE_ROOTS: `default:${root}`, REACH_PROCESS_WORKSPACES: "default", REACH_PROCESS_NODE_BIN: process.env.REACH_TEST_NODE_BIN ?? process.execPath, REACH_PROCESS_STOP_GRACE_MS: "50", REACH_LEASE_SECS: "5" },
       stdio: "ignore",
     });
     assert.equal((await selecting).isError, undefined);
@@ -150,6 +226,22 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
     assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "hello");
     const read = await call(4, "fs.read", { workspace: "default", path: "note.txt" });
     assert.equal(JSON.parse(read.content[0].text).content, "hello");
+    let processSequence = 100;
+    const processCall = async (name: string, args: Record<string, unknown>) => {
+      const reply = await call(++processSequence, name, args);
+      assert.equal(reply.isError, undefined, JSON.stringify(reply));
+      return JSON.parse(reply.content[0].text);
+    };
+    await processCall("fs.write", { workspace: "default", path: "task.mjs", mode: "create", content: "console.log('stdio-task');setInterval(()=>{},1000)" });
+    const task = await processCall("process.run", { workspace: "default", script: "task.mjs", launchId: "stdio-launch" });
+    assert.equal((await processCall("process.status", { launchId: "stdio-launch" })).processId, task.processId);
+    await processCall("process.stop", { processId: task.processId });
+    const stopDeadline = Date.now() + 5000;
+    while ((await processCall("process.status", { processId: task.processId })).state !== "stopped") {
+      assert.ok(Date.now() < stopDeadline); await new Promise(resolve => setTimeout(resolve, 10));
+    }
+    await processCall("process.logs", { processId: task.processId });
+    await processCall("process.run", { workspace: "default", script: "task.mjs", launchId: "stdio-cleanup" });
     assert.equal((await call(5, "session.close", {})).isError, undefined);
     assert.equal((await (await fetch(`${gatewayUrl}/session/status`)).json() as { status: string }).status, "none");
   } finally {

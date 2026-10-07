@@ -59,6 +59,7 @@ impl RequestIdSet {
 
 pub struct SessionContext<'a> {
     pub session_id: String,
+    pub processes: crate::process::ProcessManager,
     /// Absolute lease expiry in epoch milliseconds.
     pub lease_expires_at_ms: i64,
     /// True once draining has begun: new dispatch is rejected.
@@ -84,6 +85,7 @@ impl<'a> SessionContext<'a> {
         workspace.begin_session();
         SessionContext {
             session_id,
+            processes: crate::process::ProcessManager::default(),
             lease_expires_at_ms,
             cancelled: false,
             request_ids: RequestIdSet::new(),
@@ -98,6 +100,9 @@ impl<'a> SessionContext<'a> {
 /// workspace cursor scope on every exit path, including failure paths.
 impl Drop for SessionContext<'_> {
     fn drop(&mut self) {
+        if let Err(error) = self.processes.drain() {
+            eprintln!("Reach session cleanup failed: {}", error.code);
+        }
         self.workspace.close();
     }
 }

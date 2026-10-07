@@ -1,6 +1,6 @@
 # Node runtime 的安装与执行边界
 
-Rust Engine 本身不依赖、不启动 Node.js。它直接处理会话和文件 RPC；运行 Engine 不需要 `REACH_NODE_BIN` 或包含 Node 的 PATH。
+Rust Engine 直接处理会话和文件 RPC；启用 process 接口后，它使用本机私有 Node runtime 执行可信 workspace 脚本。文件操作不要求 Node。Engine 使用 `REACH_PROCESS_NODE_BIN` 选择脚本解释器，不读取 launcher 的 `REACH_NODE_BIN`，也不从系统 PATH 回退。详见 [脚本任务](processes.md)。
 
 Engine 安装包仍必须提供固定版本、校验过的私有 Node runtime。这是统一的安装交付策略：同一设备今后运行 Gateway 或 MCP 时，可以直接使用 `~/.reach/runtime/node/bin/node`，无需另装系统 Node。只运行 Engine 的设备上，这份 runtime 可以保持未使用状态；远端 Gateway/MCP 使用的是它们所在主机的 runtime。
 
@@ -24,6 +24,6 @@ sh /root/.reach/run-node.sh /absolute/path/to/mcp/dist/main.js
 
 ## OpenWrt 为何要求 bundle
 
-OpenWrt 安装器保留统一的 runtime 交付约定，因此需要预先准备的 Node bundle。它附带私有 musl/C++ 库和匹配目标路径的加载器，避免依赖设备系统库或现场下载。安装器校验摘要后安装 runtime 和 launcher，并用实际 Node 查询安装版本。bundle 缺失或损坏会中止安装，这是交付完整性检查，不表示 Rust Engine 有 Node 执行依赖。
+OpenWrt 安装器保留统一的 runtime 交付约定，因此需要预先准备的 Node bundle。它附带私有 musl/C++ 库和匹配目标路径的加载器，避免依赖设备系统库或现场下载。安装器校验摘要后安装 runtime 和 launcher，并用实际 Node 查询安装版本。bundle 缺失或损坏会中止安装，这是交付完整性检查，文件 RPC 仍不依赖 Node；启用 process 执行则需要该 runtime。
 
 安装器不会自动启动 Gateway 或 MCP。只有用户在该设备上部署这些 JS 组件时，才会持续使用这份 runtime。具体构建与安装步骤见 [OpenWrt](openwrt.md)、[Linux](linux.md)、[macOS](engine.md) 和 [MCP](mcp.md)。

@@ -88,7 +88,7 @@ export class McpServer {
           protocolVersion: MCP_PROTOCOL_VERSION,
           capabilities: { tools: { listChanged: true } },
           serverInfo: { name: "reach-mcp", version: MCP_VERSION },
-          instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. The Rust Engine does not execute or require Node.js; provisioning the runtime is an installation policy. Filesystem tools execute on the selected Engine through its Gateway.",
+          instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. Engine uses this private runtime for trusted workspace scripts when execution is locally enabled. Scripts run with the Engine account privileges and are stopped when their owner session ends. Supply a unique launchId and recover uncertain launches with process.status on the same session. Filesystem tools execute on the selected Engine through its Gateway.",
         };
       case "notifications/initialized":
         return {};
@@ -119,6 +119,11 @@ export class McpServer {
         return this.getVersions(call.arguments);
       case "pick_device":
         return this.pickDevice(call.arguments);
+      case "process.run":
+      case "process.status":
+      case "process.logs":
+      case "process.stop":
+      case "process.list":
       case "fs.read":
       case "fs.list":
       case "fs.glob":
@@ -126,7 +131,7 @@ export class McpServer {
       case "fs.grep":
       case "fs.write":
       case "fs.edit":
-        return this.callFilesystemForMode(call.name, call.arguments);
+        return this.callDeviceToolForMode(call.name, call.arguments);
       case "session.close":
         return this.closeSessionForMode(call.arguments);
       default:
@@ -162,9 +167,15 @@ export class McpServer {
     }
   }
 
-  private async callFilesystemForMode(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
+  private async callDeviceToolForMode(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
+    if (method.startsWith("process.") && method !== "process.run" && this.config.toolMode === "static") {
+      if (!argumentsValue || typeof argumentsValue !== "object" || Array.isArray(argumentsValue)) return toolError("INVALID_PARAMS: Tool arguments must be an object");
+      const { deviceId, ...params } = argumentsValue as Record<string, unknown>;
+      if (!this.selected || deviceId !== this.selected.device.id) return toolError("PROCESS_NOT_FOUND: No owned session for this task");
+      return this.callDeviceTool(method, params);
+    }
     const params = await this.argumentsForMode(argumentsValue);
-    return params instanceof Error ? toolError(params.message) : this.callFilesystem(method, params);
+    return params instanceof Error ? toolError(params.message) : this.callDeviceTool(method, params);
   }
 
   private async closeSessionForMode(argumentsValue: unknown): Promise<Record<string, unknown>> {
@@ -215,30 +226,51 @@ export class McpServer {
     }
   }
 
-  protected async callFilesystem(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
-    if (!this.selected) return toolError("Pick a ready device before using filesystem tools");
+  protected async callDeviceTool(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
+    if (!this.selected) return toolError("Pick a ready device before using device-scoped tools");
     if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) {
       return toolError(`${method} arguments must be an object`);
     }
-    const selected = await this.selectDevice(this.selected.device.id, this.config.toolMode === "dynamic");
-    if (selected instanceof Error) return toolError(selected.message);
     try {
+      const observing = method.startsWith("process.") && method !== "process.run";
+      if (observing) {
+        const status = await this.selected.gateway.status();
+        if (status.status !== "ready" || status.sessionId !== this.selected.session.sessionId) return toolError("PROCESS_NOT_FOUND: Owner session is no longer active");
+      }
+      const selected = observing ? this.selected : await this.selectDevice(this.selected.device.id, this.config.toolMode === "dynamic");
+      if (selected instanceof Error) return toolError(selected.message);
       await this.renewIfNeeded(selected);
       return await this.callOnGateway(selected.gateway, method, argumentsValue as Record<string, unknown>);
     } catch (cause) {
       if (!(cause instanceof GatewayHttpError && cause.isRequestRejection)) await this.releaseAfterFailure();
-      return toolError(cause instanceof Error ? cause.message : "Gateway filesystem call failed");
+      return toolError(cause instanceof Error ? cause.message : "Gateway tool call failed");
     }
   }
 
   /** Common grant acquisition and RPC dispatch for both MCP transports. */
   protected async callOnGateway(gateway: GatewayClient, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
+    if (method.startsWith("process.")) {
+      const status = await gateway.status();
+      if (!status.methods?.includes(method)) return toolError("PROCESS_UNSUPPORTED: Engine does not advertise this process method");
+    }
     const permission = await this.mutationPermission(gateway, method, params);
     if (permission instanceof Error) return toolError(permission.message);
-    const reply = await gateway.rpc(method, params, permission);
+    let reply: Record<string, unknown>;
+    try { reply = await gateway.rpc(method, params, permission); }
+    catch (cause) {
+      if (method === "process.run") {
+        try {
+          const status = await gateway.status();
+          if (status.status !== "ready" && this.selected?.gateway === gateway) await this.releaseAfterFailure();
+        } catch { if (this.selected?.gateway === gateway) await this.releaseAfterFailure(); }
+        return toolError(`${cause instanceof Error ? cause.message : "Launch outcome uncertain"}; launchId=${String(params.launchId)}. Query process.status with this launchId on the same session. If PROCESS_NOT_FOUND, retry only with the same launchId and identical parameters; never replay automatically.`);
+      }
+      throw cause;
+    }
     if (reply.type === "error") {
       const code = typeof reply.error === "object" && reply.error !== null ? (reply.error as Record<string, unknown>).code : undefined;
       if (code === "SESSION_CLOSED") await this.releaseAfterFailure();
+      if (method === "process.run" && code === "DEADLINE_EXCEEDED") return toolError(`DEADLINE_EXCEEDED; launchId=${String(params.launchId)}. Query process.status with this launchId on the same session. If PROCESS_NOT_FOUND, retry only with the same launchId and identical parameters; never replay automatically.`);
       return toolError(typeof code === "string" ? code : "Gateway RPC error");
     }
     return toolText(reply.result ?? reply);
@@ -248,7 +280,12 @@ export class McpServer {
     gateway: GatewayClient,
     method: string,
     params: Record<string, unknown>,
-  ): Promise<{ grantId: string } | undefined | Error> {
+  ): Promise<{ grantId: string; kind?: "execute" | "control" } | undefined | Error> {
+    if (method === "process.run" || method === "process.stop") {
+      if (!gateway.processGrant) return new Error("PROCESS_UNSUPPORTED");
+      try { return await gateway.processGrant(method === "process.run" ? { kind: "execute", workspace: params.workspace, script: params.script, launchId: params.launchId } : { kind: "control", processId: params.processId }); }
+      catch (cause) { return new Error(cause instanceof Error ? cause.message : "Unable to obtain process grant"); }
+    }
     if (method !== "fs.write" && method !== "fs.edit") return undefined;
     if (typeof params.workspace !== "string" || !params.workspace || typeof params.path !== "string" || !params.path) {
       return new Error(`${method} requires non-empty workspace and path for a Gateway grant`);

@@ -285,6 +285,7 @@ pub struct EngineConfig {
     pub gateway: GatewayConfig,
     pub timeouts: TimeoutPolicy,
     pub workspace_roots: HashMap<String, PathBuf>,
+    pub processes: crate::process::ProcessPolicy,
 }
 
 impl EngineConfig {
@@ -333,11 +334,20 @@ impl EngineConfig {
             }
         };
 
+        let processes = crate::process::ProcessPolicy::parse(lookup)?;
+        if processes
+            .workspaces
+            .iter()
+            .any(|name| !workspace_roots.contains_key(name))
+        {
+            return Err("REACH_PROCESS_WORKSPACES contains an unknown workspace".into());
+        }
         Ok(EngineConfig {
             engine_id,
             gateway,
             timeouts,
             workspace_roots,
+            processes,
         })
     }
 
@@ -450,6 +460,15 @@ mod tests {
             _ => None,
         });
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn rejects_unknown_process_workspace() {
+        let result = EngineConfig::parse(None, &|name| match name {
+            "REACH_PROCESS_WORKSPACES" => Some("missing".into()),
+            _ => None,
+        });
+        assert!(result.unwrap_err().contains("unknown workspace"));
     }
 
     #[test]

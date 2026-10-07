@@ -82,7 +82,7 @@ Node 版本和各平台 SHA-256 固定在 [node-runtime.json](../../scripts/node
 
 运行文件目录和配置目录均设为 700。MCP 安装的细节见 [mcp.md](mcp.md)。
 
-Rust Engine 独立运行，不设置 Node 相关的服务环境。安装器另提供 `run-node.sh`，同一主机上的 Gateway/MCP 可通过它使用私有 Node；`REACH_NODE_BIN` 只作为 launcher 的可执行程序路径覆盖项。设计说明见 [Node runtime](node-runtime.md)。
+Rust Engine 独立运行；可配置 `REACH_PROCESS_WORKSPACES` 显式启用可信脚本执行，使用 `REACH_PROCESS_NODE_BIN` 选择私有 runtime，详见 [脚本任务](processes.md)。安装器另提供 `run-node.sh`，同一主机上的 Gateway/MCP 可通过它使用私有 Node；`REACH_NODE_BIN` 只作为 launcher 的可执行程序路径覆盖项。设计说明见 [Node runtime](node-runtime.md)。
 
 ```bash
 "$HOME/.local/share/reach/run-node.sh" /absolute/path/to/gateway-main.js

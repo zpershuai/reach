@@ -61,7 +61,7 @@ const probe = `deployment-tests/${randomUUID()}.txt`;
 try {
   assert.equal((await fetchMcp("GET", undefined, client.sessionHeaders)).status, 405);
   const tools = (await client.request("tools/list", {})).tools;
-  assert.equal(tools.length, 12);
+  assert.equal(tools.length, 17);
   for (const tool of tools) {
     assert.match(tool.name, /^[a-zA-Z0-9_-]{1,64}$/);
     if (tool.name.startsWith("fs_") || tool.name === "session_close") assert.ok(tool.inputSchema.required.includes("deviceId"));
