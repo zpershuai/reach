@@ -1,6 +1,6 @@
 # 组件版本与更新
 
-MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前均为 `0.1.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.0`，Gateway 与 MCP 为 `0.3.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
 
 | 组件 | 版本的唯一维护位置 | 产物中的版本 |
 | --- | --- | --- |
@@ -34,10 +34,10 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 
 ```json
 {
-  "mcpVersion": "0.1.0",
+  "mcpVersion": "0.3.0",
   "deviceId": "engine-a",
-  "gatewayVersion": "0.1.0",
-  "engineVersion": "0.1.0"
+  "gatewayVersion": "0.3.0",
+  "engineVersion": "0.2.0"
 }
 ```
 
@@ -50,8 +50,8 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 更新 Gateway 或 MCP 的包版本，例如：
 
 ```bash
-npm --prefix packages/reach-rpc version 0.2.0 --no-git-tag-version
-npm --prefix packages/grok-bot-mcp-connector version 0.2.0 --no-git-tag-version
+npm --prefix packages/reach-rpc version 0.3.0 --no-git-tag-version
+npm --prefix packages/grok-bot-mcp-connector version 0.3.0 --no-git-tag-version
 ```
 
 仅对实际更新的组件执行相应命令。Gateway 的 npm lockfile 由 npm 同步更新。Engine 修改 Cargo manifest 后运行 `cargo check --workspace` 更新 `Cargo.lock` 中的包版本。

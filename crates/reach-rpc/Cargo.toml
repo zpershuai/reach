@@ -1,11 +1,11 @@
 [package]
 name = "reach-rpc"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 
 [dependencies]
 regex = "1"
-rustix = { version = "1", features = ["fs"] }
+rustix = { version = "1", features = ["fs", "process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"

@@ -13,6 +13,7 @@ pub mod fs_list;
 pub mod fs_read;
 pub mod fs_stat;
 pub mod fs_write;
+pub mod process;
 
 use std::sync::Arc;
 
@@ -76,6 +77,16 @@ pub fn default_registry() -> ToolRegistry {
     registry.register(Arc::new(FsEditTool::new()));
     registry.register(Arc::new(FsGlobTool::new()));
     registry.register(Arc::new(FsGrepTool::new()));
+    #[cfg(unix)]
+    for method in [
+        "process.run",
+        "process.status",
+        "process.logs",
+        "process.stop",
+        "process.list",
+    ] {
+        registry.register(Arc::new(process::ProcessTool::new(method)));
+    }
     registry
 }
 
@@ -96,11 +107,14 @@ mod tests {
     }
 
     fn context<'a>(
+        processes: &'a mut crate::process::ProcessManager,
         workspace: &'a mut WorkspaceFilesystem,
         params: &'a Value,
         write_claimed: bool,
     ) -> InvocationContext<'a> {
         InvocationContext {
+            processes,
+            access: crate::dispatch::AccessClass::Read,
             params,
             workspace,
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
@@ -120,7 +134,12 @@ mod tests {
             "mode": "overwrite"
         });
         let result = FsWriteTool::new()
-            .execute(&mut context(&mut workspace, &write_params, true))
+            .execute(&mut context(
+                &mut crate::process::ProcessManager::default(),
+                &mut workspace,
+                &write_params,
+                true,
+            ))
             .unwrap();
         assert_eq!(result["path"], "note.txt");
         let revision = result["revision"].as_str().unwrap();
@@ -128,6 +147,7 @@ mod tests {
 
         let read = FsReadTool::new()
             .execute(&mut context(
+                &mut crate::process::ProcessManager::default(),
                 &mut workspace,
                 &json!({
                     "workspace": "fixture", "path": "note.txt"
@@ -140,6 +160,7 @@ mod tests {
 
         // Stale revision is rejected (revision behavior).
         let stale = FsWriteTool::new().execute(&mut context(
+            &mut crate::process::ProcessManager::default(),
             &mut workspace,
             &json!({
                 "workspace": "fixture",
@@ -159,6 +180,7 @@ mod tests {
         let mut workspace = workspace(dir.path());
         // Unknown workspace is a containment error.
         let denied = FsReadTool::new().execute(&mut context(
+            &mut crate::process::ProcessManager::default(),
             &mut workspace,
             &json!({
                 "workspace": "missing", "path": "x"
@@ -168,6 +190,7 @@ mod tests {
         assert_eq!(denied.unwrap_err().code, WORKSPACE_ACCESS_DENIED);
         // Missing file maps to FILE_NOT_FOUND.
         let missing = FsReadTool::new().execute(&mut context(
+            &mut crate::process::ProcessManager::default(),
             &mut workspace,
             &json!({
                 "workspace": "fixture", "path": "nope.txt"
@@ -177,6 +200,7 @@ mod tests {
         assert_eq!(missing.unwrap_err().code, "FILE_NOT_FOUND");
         // Malformed params map to INVALID_PARAMS.
         let invalid = FsReadTool::new().execute(&mut context(
+            &mut crate::process::ProcessManager::default(),
             &mut workspace,
             &json!({
                 "workspace": "fixture", "path": "x", "startLine": 0
@@ -195,7 +219,12 @@ mod tests {
         let params = json!({
             "workspace": "fixture", "path": "note.txt", "content": "x", "mode": "create"
         });
-        let denied = FsWriteTool::new().execute(&mut context(&mut workspace, &params, false));
+        let denied = FsWriteTool::new().execute(&mut context(
+            &mut crate::process::ProcessManager::default(),
+            &mut workspace,
+            &params,
+            false,
+        ));
         assert_eq!(denied.unwrap_err().code, crate::PERMISSION_DENIED);
     }
 
@@ -210,6 +239,8 @@ mod tests {
             "workspace": "fixture", "path": "note.txt", "content": "x", "mode": "create"
         });
         let mut context = InvocationContext {
+            processes: &mut crate::process::ProcessManager::default(),
+            access: crate::dispatch::AccessClass::Read,
             params: &params,
             workspace: &mut workspace,
             deadline: std::time::Instant::now() - std::time::Duration::from_millis(1),
@@ -248,6 +279,8 @@ mod tests {
             let session = SessionContext::new("s1".into(), 0, 0, &mut workspace);
             let page = {
                 let mut ctx = InvocationContext {
+                    processes: &mut crate::process::ProcessManager::default(),
+                    access: crate::dispatch::AccessClass::Read,
                     params: &json!({ "workspace": "fixture", "path": ".", "maxEntries": 1 }),
                     workspace: &mut *session.workspace,
                     deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),
@@ -266,6 +299,8 @@ mod tests {
         let mut workspace = workspace(dir.path());
         let session = SessionContext::new("s2".into(), 0, 0, &mut workspace);
         let mut ctx = InvocationContext {
+            processes: &mut crate::process::ProcessManager::default(),
+            access: crate::dispatch::AccessClass::Read,
             params: &json!({ "workspace": "fixture", "path": ".", "maxEntries": 1, "cursor": old_cursor }),
             workspace: &mut *session.workspace,
             deadline: std::time::Instant::now() + std::time::Duration::from_secs(60),

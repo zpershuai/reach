@@ -5,6 +5,7 @@ import { deviceTools, staticDeviceScopedTools } from "./tools.js";
 import { MCP_VERSION } from "./version.js";
 
 const METHODS: Record<string, string> = {
+  process_run: "process.run", process_status: "process.status", process_logs: "process.logs", process_stop: "process.stop", process_list: "process.list",
   fs_read: "fs.read", fs_write: "fs.write", fs_edit: "fs.edit", fs_list: "fs.list",
   fs_glob: "fs.glob", fs_stat: "fs.stat", fs_grep: "fs.grep",
 };
@@ -15,7 +16,14 @@ const EXPLANATIONS: Record<string, string> = {
   SESSION_CLOSED: "The Engine session closed. Connect again before continuing.",
   DEADLINE_EXCEEDED: "The operation exceeded its time budget. Re-read the file before repeating a write.",
   PERMISSION_DENIED: "The workspace or path is not authorized for this operation.",
-  INVALID_PARAMS: "Check the tool arguments and workspace-relative path.",
+  INVALID_PARAMS: "Check the tool arguments and workspace-relative path. process_status requires exactly one of processId or launchId.",
+  PROCESS_EXECUTION_DISABLED: "The Engine operator must enable execution for this workspace.",
+  PROCESS_NOT_FOUND: "No task belongs to this session with that identity. After an uncertain launch, retry only with the same launchId and identical parameters.",
+  LAUNCH_ID_CONFLICT: "This launchId already belongs to different parameters. Use its original parameters or a new launchId for a new task.",
+  RUNTIME_UNAVAILABLE: "The fixed Engine Node runtime could not start. Inspect status by launchId; this failed identity remains reserved until the session ends.",
+  PROCESS_LIMIT_EXCEEDED: "The Engine task or retained-record limit was reached.",
+  PROCESS_UNSUPPORTED: "This Engine does not support managed Node processes.",
+  PROCESS_CLEANUP_FAILED: "Process cleanup is incomplete; session ownership is retained.",
 };
 
 export class RemoteMcpServer extends McpServer {
@@ -32,7 +40,7 @@ export class RemoteMcpServer extends McpServer {
     const result = await super.dispatch(request);
     if (request.method === "initialize") return {
       ...result, protocolVersion: this.protocolVersion, capabilities: { tools: { listChanged: false } },
-      instructions: "Use list_devices, then pick_device or a filesystem tool with deviceId. If connecting, poll device_status after retryAfterMs. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Close owned sessions when finished.",
+      instructions: "Use list_devices, then pick_device or a device tool with deviceId. If connecting, poll device_status after retryAfterMs. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Close owned sessions when finished. " + String(result.instructions ?? "").replaceAll("process.status", "process_status"),
     };
     return result;
   }
@@ -46,7 +54,7 @@ export class RemoteMcpServer extends McpServer {
     for (const tool of tools) {
       if (tool.name === "list_devices") tool.description = "List this Gateway's registered Reach Engine devices, last heartbeat times, and reported versions. A last reported version does not prove the device is online.";
       if (tool.name === "pick_device") tool.description = "Connect to a Reach Engine without waiting for it to wake up. When connecting, wait retryAfterMs and poll device_status. ENGINE_BUSY means another controller owns it.";
-      if (tool.name === "fs_write" || tool.name === "fs_edit") tool.description += " Read revision first and pass ifMatch for an existing file. Use mode=create for a new file. Writes are never automatically retried; re-read after any timeout before writing again.";
+
     }
     return [...tools, {
       name: "device_status", description: "Observe a device connection without opening or canceling its session. Poll after retryAfterMs when connecting.",
@@ -88,9 +96,12 @@ export class RemoteMcpServer extends McpServer {
         if (this.selectedId === deviceId) this.selectedId = undefined;
         return toolText({ closedDeviceId: deviceId });
       }
+      if (!client && method?.startsWith("process.") && method !== "process.run") return toolError("PROCESS_NOT_FOUND: No owned session for this task.");
       if (!client) { client = new InProcessGatewayClient(api); this.clients.set(deviceId, client); }
       client.deadlineAt = this.deadlineAt;
-      const status = await client.begin();
+      const observing = method?.startsWith("process.") && method !== "process.run";
+      if (observing && !client.owns(api.status().sessionId)) return toolError("PROCESS_NOT_FOUND: Owner session ended.");
+      const status = observing ? await client.status() : await client.begin();
       if (call.name === "pick_device") this.selectedId = deviceId;
       if (status.status !== "ready") return toolText({ deviceId, status: "connecting", retryAfterMs: 1000 });
       if (call.name === "pick_device") return toolText({ selectedDeviceId: deviceId, status: "ready" });

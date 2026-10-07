@@ -6,6 +6,7 @@ use std::fmt;
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 pub mod dispatch;
+pub mod process;
 pub mod runtime;
 pub mod session;
 pub mod tools;
@@ -79,6 +80,8 @@ impl std::error::Error for ContractError {}
 #[serde(rename_all = "camelCase")]
 pub struct Permission {
     pub grant_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

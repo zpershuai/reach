@@ -1,3 +1,4 @@
+import { processGrantSchema, type ProcessGrant } from "./process.js";
 import { randomUUID } from "node:crypto";
 
 export type MutationMethod = "fs.write" | "fs.edit";
@@ -25,6 +26,7 @@ export function normalizeWorkspacePath(path: string): string | undefined {
 
 /** Gateway-owned grant issuance and scope checks use one injected clock. */
 export class GrantStore {
+  private readonly processGrants = new Map<string, { scope: ProcessGrant; expiresAt: number }>();
   private readonly grants = new Map<string, WriteGrant>();
 
   public constructor(private readonly now: () => number) {}
@@ -40,6 +42,31 @@ export class GrantStore {
     const expiresAt = current + GRANT_TTL_MS;
     this.grants.set(grantId, { workspace, path: normalizedPath, methods: [...methods], expiresAt });
     return { grantId, expiresAt: new Date(expiresAt).toISOString() };
+  }
+
+  public issueProcess(value: unknown): { grantId: string; expiresAt: string } {
+    const scope = processGrantSchema.parse(value);
+    if (scope.kind === "execute") {
+      const path = normalizeWorkspacePath(scope.script);
+      if (!path) throw new Error("invalid process entry");
+      scope.script = path;
+    }
+    const now = this.now();
+    for (const [id, grant] of this.processGrants) if (grant.expiresAt <= now) this.processGrants.delete(id);
+    if (this.processGrants.size >= 4096) throw new Error("process grant limit exceeded");
+    const grantId = randomUUID();
+    const expiresAt = now + GRANT_TTL_MS;
+    this.processGrants.set(grantId, { scope, expiresAt });
+    return { grantId, expiresAt: new Date(expiresAt).toISOString() };
+  }
+
+  public matchesProcess(grantId: string, sessionId: string, method: string, params: Record<string, unknown>): "execute" | "control" | undefined {
+    const grant = this.processGrants.get(grantId);
+    if (!grant || grant.expiresAt <= this.now() || grant.scope.sessionId !== sessionId) return undefined;
+    const scope = grant.scope;
+    if (scope.kind === "control") return method === "process.stop" && scope.processId === params.processId ? "control" : undefined;
+    return method === "process.run" && scope.workspace === params.workspace && typeof params.script === "string"
+      && scope.script === normalizeWorkspacePath(params.script) && scope.launchId === params.launchId ? "execute" : undefined;
   }
 
   public matches(grantId: string, method: MutationMethod, workspace: string, path: string): boolean {

@@ -1,3 +1,4 @@
+import { processGrantSchema, processSchemas } from "./process.js";
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Duplex } from "node:stream";
@@ -104,6 +105,7 @@ interface LiveSession {
   socket: WebSocket;
   /** True once the Engine has sent a valid `session.ready`. */
   ready: boolean;
+  methods?: string[];
   /** True while draining after close/expiry: no new data-plane requests. */
   closed: boolean;
   leaseExpiresAt: number;
@@ -446,6 +448,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
       gatewayVersion: GATEWAY_VERSION,
       lastSeenAt,
       engineVersion: engineVersion ?? null,
+      methods: session?.methods,
       wanted: sessionWanted,
       status,
       sessionId: session?.sessionId ?? pendingSession?.sessionId ?? wantedSessionId,
@@ -501,6 +504,15 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     } catch {
       return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
     }
+    let processKind: "execute" | "control" | undefined;
+    if (invocation.method.startsWith("process.")) {
+      const schema = processSchemas[invocation.method];
+      if (!schema?.safeParse(invocation.params).success) return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
+      if (invocation.method === "process.run" || invocation.method === "process.stop") {
+        processKind = envelope.permission ? grants.matchesProcess(envelope.permission.grantId, session.sessionId, invocation.method, invocation.params) : undefined;
+        if (!processKind) return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };
+      }
+    }
     try {
       // Reject nested/pathological `tool.call` before any grant lookup so the
       // response code never depends on grant state (kills the
@@ -534,7 +546,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         requestId: envelope.requestId,
         method: envelope.method,
         params: envelope.params,
-        ...(envelope.permission ? { permission: envelope.permission } : {}),
+        ...(envelope.permission ? { permission: processKind ? { grantId: envelope.permission.grantId, kind: processKind } : { grantId: envelope.permission.grantId } } : {}),
       }, deadlineMs === receivedAt + sessionRpcTimeoutMs);
       return { statusCode: 200, payload: reply };
     } catch (error) {
@@ -646,9 +658,18 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     }
 
     if (request.url === "/grants") {
+      let body: unknown;
+      try { body = await readJsonBody(request); } catch (error) { sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid grant payload" }); return; }
+      if (typeof body === "object" && body !== null && "kind" in body) {
+        const parsed = processGrantSchema.safeParse(body);
+        if (!parsed.success || parsed.data.sessionId !== liveSession?.sessionId || !liveSession?.ready || liveSession.closed) { sendJson(response, 400, { error: "invalid process grant scope" }); return; }
+        try { sendJson(response, 200, grants.issueProcess(parsed.data)); }
+        catch { sendJson(response, 400, { error: "invalid process grant payload" }); }
+        return;
+      }
       let grantRequest: z.infer<typeof grantRequestSchema>;
       try {
-        grantRequest = grantRequestSchema.parse(await readJsonBody(request));
+        grantRequest = grantRequestSchema.parse(body);
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid grant payload" });
         return;
@@ -794,6 +815,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
             return;
           }
           session.ready = true;
+          session.methods = ready.methods;
           engineVersion = ready.engineVersion;
           logger("Reach session ready");
         } catch {
@@ -887,6 +909,11 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
       const normalized = normalizeWorkspacePath(path);
       if (!parsed.success || !normalized) return { statusCode: 400, payload: { error: "invalid grant payload" } };
       return { statusCode: 200, payload: grants.issue(workspace, normalized, [method]) };
+    },
+    processGrant: (sessionId, scope) => {
+      if (!binding(sessionId) || !liveSession?.ready || liveSession.closed) return mismatch();
+      try { return { statusCode: 200, payload: grants.issueProcess({ ...scope, sessionId }) }; }
+      catch { return { statusCode: 400, payload: { error: "invalid process grant payload" } }; }
     },
     rpc: (body) => executeRpc(body, now()),
   };

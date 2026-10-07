@@ -17,6 +17,8 @@ use crate::{WorkspaceFilesystem, INVALID_PARAMS};
 pub enum AccessClass {
     Read,
     Write,
+    Execute,
+    ProcessControl,
 }
 
 impl AccessClass {
@@ -91,6 +93,8 @@ impl ToolError {
 /// Tools trust this context rather than the raw request payload.
 pub struct InvocationContext<'a> {
     pub params: &'a Value,
+    pub processes: &'a mut crate::process::ProcessManager,
+    pub access: AccessClass,
     pub workspace: &'a mut WorkspaceFilesystem,
     /// Monotonic deadline by which the Tool must finish. A monotonic clock is
     /// deliberately used so wall-clock changes cannot extend a request.

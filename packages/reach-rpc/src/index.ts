@@ -15,6 +15,7 @@ const nonEmptyString = z.string().min(1);
 
 export const permissionSchema = z.object({
   grantId: nonEmptyString,
+  kind: z.enum(["execute", "control"]).optional(),
 });
 
 export const requestEnvelopeSchema = z.object({

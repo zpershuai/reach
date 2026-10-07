@@ -16,6 +16,7 @@ use crate::{
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct AuthorizationContext {
     pub write_claimed: bool,
+    pub access: crate::dispatch::AccessClass,
 }
 
 /// Authorize a Tool invocation. Returns `PERMISSION_DENIED` for write-class
@@ -26,10 +27,26 @@ pub fn authorize(
     permission: Option<&Permission>,
 ) -> Result<AuthorizationContext, ToolError> {
     let write_claimed = permission.is_some_and(|permission| !permission.grant_id.is_empty());
-    if descriptor.access.is_write() && !write_claimed {
+    if descriptor.access != crate::dispatch::AccessClass::Read && !write_claimed {
         return Err(ToolError::permission_denied());
     }
-    Ok(AuthorizationContext { write_claimed })
+    let kind = permission.and_then(|p| p.kind.as_deref());
+    match descriptor.access {
+        crate::dispatch::AccessClass::Execute if kind != Some("execute") => {
+            return Err(ToolError::permission_denied())
+        }
+        crate::dispatch::AccessClass::ProcessControl if kind != Some("control") => {
+            return Err(ToolError::permission_denied())
+        }
+        crate::dispatch::AccessClass::Write if kind.is_some() => {
+            return Err(ToolError::permission_denied())
+        }
+        _ => {}
+    }
+    Ok(AuthorizationContext {
+        write_claimed: descriptor.access.is_write() && write_claimed,
+        access: descriptor.access,
+    })
 }
 
 #[cfg(test)]
@@ -45,7 +62,8 @@ mod tests {
         assert!(authorize(
             &write,
             Some(&Permission {
-                grant_id: String::new()
+                grant_id: String::new(),
+                kind: None,
             })
         )
         .is_err());
@@ -53,6 +71,7 @@ mod tests {
             &write,
             Some(&Permission {
                 grant_id: "g1".into(),
+                kind: None,
             }),
         )
         .unwrap();

@@ -1,3 +1,4 @@
+import { processRunSchema, processStatusSchema } from "./process.js";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
@@ -418,4 +419,32 @@ test("text reads and supported mutations reject invalid UTF-8 without modifying 
   } finally {
     await fs.rm(root, { recursive: true, force: true });
   }
+});
+
+
+test("process grants bind exact entries, identities, sessions and per-Engine stores", () => {
+  let now = 1000;
+  const store = new GrantStore(() => now);
+  const params = { workspace: "repo", script: "scripts/job.cjs", launchId: "launch-1" };
+  const grant = store.issueProcess({ kind: "execute", sessionId: "session-1", ...params });
+  assert.equal(store.matchesProcess(grant.grantId, "session-1", "process.run", params), "execute");
+  for (const wrong of [{ ...params, launchId: "other" }, { ...params, script: "scripts/job.cjs/child" }, { ...params, workspace: "other" }]) assert.equal(store.matchesProcess(grant.grantId, "session-1", "process.run", wrong), undefined);
+  assert.equal(store.matchesProcess(grant.grantId, "session-2", "process.run", params), undefined);
+  assert.equal(new GrantStore(() => now).matchesProcess(grant.grantId, "session-1", "process.run", params), undefined);
+  assert.equal(store.matchesProcess("fabricated", "session-1", "process.run", params), undefined);
+  assert.equal(store.matches(grant.grantId, "fs.write", "repo", "scripts/job.cjs"), false);
+  const file = store.issue("repo", "scripts", ["fs.write"]);
+  assert.equal(store.matchesProcess(file.grantId, "session-1", "process.run", params), undefined);
+  const control = store.issueProcess({ kind: "control", sessionId: "session-1", processId: "task-1" });
+  assert.equal(store.matchesProcess(control.grantId, "session-1", "process.stop", { processId: "task-1" }), "control");
+  assert.equal(store.matchesProcess(control.grantId, "session-1", "process.stop", { processId: "task-2" }), undefined);
+  now += GRANT_TTL_MS;
+  assert.equal(store.matchesProcess(grant.grantId, "session-1", "process.run", params), undefined);
+});
+
+test("process schema requires launch identity and rejects runtime overrides", () => {
+  const params = { workspace: "repo", script: "main.mjs", launchId: "launch" };
+  assert.equal(processRunSchema.parse(params).timeoutMs, 60000);
+  for (const wrong of [{ ...params, executable: "sh" }, { ...params, env: {} }, { ...params, script: "../escape.js" }, { ...params, launchId: "" }, { ...params, args: ["\0"] }]) assert.equal(processRunSchema.safeParse(wrong).success, false);
+  assert.equal(processStatusSchema.safeParse({ processId: "a", launchId: "b" }).success, false);
 });

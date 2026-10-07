@@ -88,6 +88,40 @@ impl WorkspaceFilesystem {
         }
     }
 
+    #[cfg(unix)]
+    pub(crate) fn process_entry(
+        &self,
+        workspace: &str,
+        script: &str,
+        cwd: &str,
+    ) -> Result<(PathBuf, PathBuf, String, File), FilesystemError> {
+        let root = self.roots.get(workspace).ok_or_else(denied)?;
+        let root = fs::canonicalize(root).map_err(|_| denied())?;
+        let (parent, name) = open_verified_parent(&root, script, false)?.ok_or_else(denied)?;
+        let source = descriptor_read_file(&parent, &name, Some(&self.cancelled))?
+            .ok_or_else(|| FilesystemError::new("FILE_NOT_FOUND"))?;
+        // The synthetic final name is never opened or created. Its parent is
+        // the pinned cwd, walked with descriptor-relative NOFOLLOW opens.
+        let (directory, _) =
+            open_verified_parent(&root, &format!("{cwd}/.reach-cwd"), false)?.ok_or_else(denied)?;
+        Ok((
+            root.join(script),
+            root.join(cwd),
+            source,
+            File::from(directory),
+        ))
+    }
+
+    #[cfg(not(unix))]
+    pub(crate) fn process_entry(
+        &self,
+        _workspace: &str,
+        _script: &str,
+        _cwd: &str,
+    ) -> Result<(PathBuf, PathBuf, String, File), FilesystemError> {
+        Err(denied())
+    }
+
     pub fn with_default_root() -> Self {
         let mut roots = HashMap::new();
         roots.insert("default".to_owned(), default_workspace_root());
@@ -728,7 +762,7 @@ pub fn parse_workspace_roots(spec: &str) -> Result<HashMap<String, PathBuf>, Str
     Ok(roots)
 }
 
-fn revision_str(content: &str) -> String {
+pub(crate) fn revision_str(content: &str) -> String {
     revision_bytes(content.as_bytes())
 }
 

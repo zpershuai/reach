@@ -6,6 +6,7 @@ export interface ReadySession {
   leaseExpiresAt?: string;
   gatewayVersion?: string;
   engineVersion?: string;
+  methods?: string[];
 }
 
 export interface SessionStatus extends ReadySession {
@@ -16,8 +17,9 @@ export interface GatewayClient {
   status(): Promise<SessionStatus>;
   openAndWait(): Promise<ReadySession>;
   renew(): Promise<ReadySession>;
-  rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>>;
+  rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string; kind?: "execute" | "control" }): Promise<Record<string, unknown>>;
   grant(workspace: string, path: string, method: "fs.write" | "fs.edit"): Promise<{ grantId: string }>;
+  processGrant?(scope: Record<string, unknown>): Promise<{ grantId: string; kind?: "execute" | "control" }>;
   close(): Promise<void>;
 }
 
@@ -117,7 +119,7 @@ export class HttpGatewayClient implements GatewayClient {
     return { sessionId: this.sessionId, leaseExpiresAt: reply.leaseExpiresAt };
   }
 
-  public async rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>> {
+  public async rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string; kind?: "execute" | "control" }): Promise<Record<string, unknown>> {
     return this.post("/session/rpc", {
       requestId: randomUUID(),
       method,
@@ -131,6 +133,12 @@ export class HttpGatewayClient implements GatewayClient {
     const reply = await this.post("/grants", { workspace, path, methods: [method] });
     if (typeof reply.grantId !== "string" || !reply.grantId) throw new Error("Gateway /grants returned no grantId");
     return { grantId: reply.grantId };
+  }
+
+  public async processGrant(scope: Record<string, unknown>): Promise<{ grantId: string; kind?: "execute" | "control" }> {
+    const result = await this.post("/grants", { ...scope, ...this.sessionBinding() });
+    if (typeof result.grantId !== "string") throw new Error("Gateway returned no process grant");
+    return { grantId: result.grantId, kind: scope.kind as "execute" | "control" };
   }
 
   public async close(): Promise<void> {
@@ -172,6 +180,7 @@ export class HttpGatewayClient implements GatewayClient {
     if (typeof reply.status !== "string") throw new Error("Gateway returned no session status");
     return {
       status: reply.status,
+      methods: Array.isArray(reply.methods) ? reply.methods.filter((v): v is string => typeof v === "string") : undefined,
       sessionId: typeof reply.sessionId === "string" ? reply.sessionId : undefined,
       leaseExpiresAt: typeof reply.leaseExpiresAt === "string" ? reply.leaseExpiresAt : undefined,
       gatewayVersion: typeof reply.gatewayVersion === "string" ? reply.gatewayVersion : undefined,

@@ -4,7 +4,7 @@
 
 Cloud clients can instead connect to the Gateway's authenticated Streamable HTTP `/mcp`. It exposes static underscore tools, registered devices and nonblocking connection/status calls. See the [Grok Bot plugin](../../grok-bot-plugin/README.md). The source core is shared under `reach-rpc/src/mcp`; the connector build copies compiled modules into its existing flat `dist`, so installed stdio paths and runtime dependencies stay compatible.
 
-Every Engine installation automatically provisions a private Node.js runtime under `~/.reach/runtime/node` as an installation policy. The Rust Engine does not execute or require Node.js. The generated MCP configuration uses its stable `bin/node` path; Gateway and MCP processes on that host can share it without a system Node installation. This is also described in the MCP initialization instructions and the `list_devices` tool description. Standalone clients can install the same runtime with `python3 scripts/install-node-runtime.py`.
+Every Engine installation automatically provisions a private Node.js runtime under `~/.reach/runtime/node` as an installation policy. The Rust Engine uses the private runtime for trusted workspace scripts when process execution is explicitly enabled. The generated MCP configuration uses its stable `bin/node` path; Gateway and MCP processes on that host can share it without a system Node installation. This is also described in the MCP initialization instructions and the `list_devices` tool description. Standalone clients can install the same runtime with `python3 scripts/install-node-runtime.py`.
 
 By default it exposes the `local-engine` device at `http://127.0.0.1:8787`:
 

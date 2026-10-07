@@ -18,6 +18,7 @@ export interface EngineApi {
   renew(sessionId: string): EngineResult;
   close(sessionId: string): EngineResult;
   grant(sessionId: string, workspace: string, path: string, method: "fs.write" | "fs.edit"): EngineResult;
+  processGrant?(sessionId: string, scope: Record<string, unknown>): EngineResult;
   rpc(body: Record<string, unknown>): Promise<EngineResult>;
 }
 
@@ -65,7 +66,7 @@ export class InProcessGatewayClient implements GatewayClient {
     return unwrap("/session/renew", this.api.renew(this.boundId()));
   }
 
-  public async rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string }): Promise<Record<string, unknown>> {
+  public async rpc(method: string, params: Record<string, unknown>, permission?: { grantId: string; kind?: "execute" | "control" }): Promise<Record<string, unknown>> {
     return unwrap("/session/rpc", await this.api.rpc({
       sessionId: this.boundId(), requestId: randomUUID(), method, params,
       deadlineAt: new Date(this.deadlineAt).toISOString(),
@@ -76,6 +77,12 @@ export class InProcessGatewayClient implements GatewayClient {
   public async grant(workspace: string, path: string, method: "fs.write" | "fs.edit"): Promise<{ grantId: string }> {
     const result = unwrap("/grants", this.api.grant(this.boundId(), workspace, path, method));
     return { grantId: result.grantId as string };
+  }
+
+  public async processGrant(scope: Record<string, unknown>): Promise<{ grantId: string; kind?: "execute" | "control" }> {
+    if (!this.api.processGrant) throw new Error("PROCESS_UNSUPPORTED");
+    const result = unwrap("/grants", this.api.processGrant(this.boundId(), scope));
+    return { grantId: result.grantId as string, kind: scope.kind as "execute" | "control" };
   }
 
   public async close(): Promise<void> {

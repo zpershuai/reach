@@ -16,7 +16,7 @@
 
 ## 准备 x86_64 OpenWrt 安装包
 
-Node bundle 是统一安装交付的一部分，供同一设备上的 Gateway/MCP 使用；Rust Engine 本身不执行 Node。只运行 Engine 的路由器上，runtime 可以保持未使用。设计与启动方式见 [Node runtime 的安装与执行边界](node-runtime.md)。
+Node bundle 是统一安装交付的一部分，供同一设备上的 Gateway/MCP 使用；Rust Engine 可通过显式启用的 process 接口使用该 runtime 执行可信 workspace 脚本。只运行 Engine 的路由器上，runtime 可以保持未使用。设计与启动方式见 [Node runtime 的安装与执行边界](node-runtime.md)。
 
 在 Linux 构建机生成静态 Engine：
 

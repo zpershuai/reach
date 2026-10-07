@@ -33,6 +33,50 @@ function testServer() {
   return { server, messages };
 }
 
+test("process launch deadlines preserve identity and observation never replaces a session", async () => {
+  for (const toolMode of ["dynamic", "static"] as const) {
+    const messages: Record<string, unknown>[] = [];
+    let ready = true;
+    let opens = 0;
+    let runs = 0;
+    const status = async () => ({ status: ready ? "ready" : "none", sessionId: ready ? "owner" : undefined, methods: ["process.run", "process.status"] });
+    const server = new McpServer({ ...loadConfig({}), toolMode }, message => messages.push(message), () => ({
+      ...readyGateway(), status,
+      openAndWait: async () => { opens++; return { sessionId: "owner" }; },
+      processGrant: async () => ({ grantId: "execution", kind: "execute" as const }),
+      rpc: async method => {
+        if (method === "process.run") { runs++; return { type: "error", error: { code: "DEADLINE_EXCEEDED" } }; }
+        return { type: "response", result: { processId: "task", launchId: "launch" } };
+      },
+    }));
+    let sequence = 0;
+    const call = async (name: string, args: Record<string, unknown>) => {
+      const id = ++sequence;
+      await server.receive({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: toolMode === "static" ? { deviceId: "local-engine", ...args } : args } });
+      return messages.find(message => message.id === id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+    };
+    await server.receive({ jsonrpc: "2.0", id: "init", method: "initialize" });
+    await call("pick_device", { deviceId: "local-engine" });
+    const result = await call("process.run", { workspace: "default", script: "main.cjs", launchId: "launch" });
+    assert.equal(result.isError, true); assert.match(result.content[0].text, /launchId=launch/); assert.match(result.content[0].text, /PROCESS_NOT_FOUND.*same launchId and identical parameters/); assert.equal(runs, 1);
+    assert.equal((await call("process.status", { launchId: "launch" })).isError, undefined);
+    ready = false;
+    assert.equal((await call("process.status", { launchId: "launch" })).isError, true);
+    assert.equal(opens, 1);
+  }
+});
+
+test("older Engines reject process capability without forwarding or obtaining grants", async () => {
+  const messages: Record<string, unknown>[] = [];
+  let calls = 0;
+  const server = new McpServer(loadConfig({}), message => messages.push(message), () => readyGateway({ rpc: async () => { calls++; return {}; } }));
+  await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
+  await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "local-engine" } } });
+  await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "process.run", arguments: { workspace: "default", script: "main.js", launchId: "launch" } } });
+  const result = messages.find(message => message.id === 3)!.result as { isError: boolean; content: Array<{ text: string }> };
+  assert.equal(result.isError, true); assert.match(result.content[0].text, /PROCESS_UNSUPPORTED/); assert.equal(calls, 0);
+});
+
 test("MCP CLI reports its package version without loading private configuration or starting stdio", () => {
   const output = execFileSync(process.execPath, [fileURLToPath(new URL("./main.js", import.meta.url)), "--version"], {
     env: { ...process.env, REACH_MCP_DEVICES: "invalid" }, encoding: "utf8", timeout: 5000,
@@ -96,7 +140,7 @@ test("initialize declares tools.listChanged", async () => {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: true } },
       serverInfo: { name: "reach-mcp", version: MCP_VERSION },
-      instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. The Rust Engine does not execute or require Node.js; provisioning the runtime is an installation policy. Filesystem tools execute on the selected Engine through its Gateway.",
+      instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. Engine uses this private runtime for trusted workspace scripts when execution is locally enabled. Scripts run with the Engine account privileges and are stopped when their owner session ends. Supply a unique launchId and recover uncertain launches with process.status on the same session. Filesystem tools execute on the selected Engine through its Gateway.",
     },
   }]);
 });
@@ -138,7 +182,7 @@ test("only configured devices can be picked after their Gateway is ready", async
   assert.deepEqual(messages[4], { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
   const refreshed = (messages[5].result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
-  assert.deepEqual(refreshed.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
+  assert.deepEqual(refreshed.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device", "process.run", "process.status", "process.logs", "process.stop", "process.list", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
   assert.equal("deviceId" in refreshed.find((tool) => tool.name === "fs.read")!.inputSchema.properties, false);
 });
 
