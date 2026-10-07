@@ -1,15 +1,15 @@
 # 日常运维、升级与回滚
 
-当前部署服务依赖顺序为 Caddy/Docker → Gateway → Engine → MCP 客户端。升级会中断唯一交互会话，先让客户端关闭会话，确认没有结果不明的写入，再执行变更。
+服务依赖顺序为 Caddy/Docker → Gateway → Engine → MCP 客户端。Gateway 升级会中断所有 Engine 的活动会话，先让客户端关闭会话，确认没有结果不明的写入，再执行变更。
 
 ## 常用状态检查
 
 ```bash
-ssh root@zpershuai.top 'cd /srv/reach-current/deploy && docker compose ps'
-ssh root@zpershuai.top 'cd /srv/reach-current/deploy && docker compose logs --tail 60 gateway'
-ssh root@zpershuai.top 'systemctl is-active caddy docker'
-curl --fail --silent --show-error https://reach.zpershuai.top/healthz
-launchctl print "gui/$(id -u)/top.zpershuai.reach-engine"
+ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose ps'
+ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose logs --tail 60 gateway'
+ssh deploy@gateway.example.com 'systemctl is-active caddy docker'
+curl --fail --silent --show-error https://reach.example.com/healthz
+launchctl print "gui/$(id -u)/org.reach.engine"
 tail -n 40 "$HOME/.local/share/reach/engine-error.log"
 ```
 
@@ -31,7 +31,7 @@ tail -n 40 "$HOME/.local/share/reach/engine-error.log"
 
 ### 1. VPS 上保存上一版
 
-以下命令在 VPS 的同一个 shell 中执行，适用于当前目录结构：
+以下命令在 VPS 的同一个 shell 中执行，示例发布目录为 `/srv/reach`，按自己的配置调整：
 
 ```bash
 release_stamp=$(date -u +%Y%m%dT%H%M%SZ)
@@ -39,8 +39,8 @@ backup_dir="/srv/reach-backups/$release_stamp"
 umask 077
 mkdir -p "$backup_dir"
 docker image tag reach-gateway:current "reach-gateway:backup-$release_stamp"
-tar -czf "$backup_dir/gateway.tgz" -C /srv/reach-current \
-  deploy/compose.yaml deploy/Dockerfile.gateway deploy/gateway.env \
+tar -czf "$backup_dir/gateway.tgz" -C /srv/reach \
+  deploy/compose.yaml deploy/Dockerfile.gateway deploy/gateway.env deploy/engines.json \
   packages/reach-rpc/package.json packages/reach-rpc/package-lock.json \
   packages/reach-rpc/dist
 cp /etc/caddy/Caddyfile "$backup_dir/Caddyfile"
@@ -53,7 +53,7 @@ cp /etc/caddy/Caddyfile "$backup_dir/Caddyfile"
 按 [Gateway 部署](gateway.md) 重新编译并打包上传。没有轮换凭证时不需要覆盖远端 `gateway.env`。
 
 ```bash
-ssh root@zpershuai.top 'cd /srv/reach-current/deploy && docker compose up -d --build gateway'
+ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose up -d --build gateway'
 ```
 
 保持原发布路径、Compose 项目名与端口。容器替换后原会话结束，客户端重新选设备并打开会话。先检查健康响应，再运行 [公网 RPC 与 MCP 验证](verification.md)。
@@ -64,9 +64,9 @@ ssh root@zpershuai.top 'cd /srv/reach-current/deploy && docker compose up -d --b
 
 ```bash
 release_stamp=YYYYMMDDTHHMMSSZ
-tar -xzf "/srv/reach-backups/$release_stamp/gateway.tgz" -C /srv/reach-current
+tar -xzf "/srv/reach-backups/$release_stamp/gateway.tgz" -C /srv/reach
 docker image tag "reach-gateway:backup-$release_stamp" reach-gateway:current
-cd /srv/reach-current/deploy
+cd /srv/reach/deploy
 docker compose up -d --no-build --force-recreate gateway
 ```
 
@@ -105,37 +105,21 @@ bash scripts/install-engine-macos.sh .reach/engine-upgrade.env .reach/devices-up
 
 ## 修改配置与轮换凭证
 
-更改 Gateway env 后使用 `docker compose up -d gateway`，让 Compose 重新创建使用新环境的容器；`docker compose restart` 不会读取新的 env。更改 Engine env 后使用 `launchctl kickstart -k`。更改 MCP 设备文件或环境选项后重新启动 Connector。
+更改 Gateway env 后使用 `docker compose up -d gateway`，让 Compose 重新创建使用新环境的容器；`docker compose restart` 不会读取新的 env。更改 Engine env 后按平台重启 LaunchAgent、systemd 或 procd 服务。更改设备注册表后用 `docker compose up -d --force-recreate gateway` 重新挂载并加载配置。更改 MCP 设备文件或环境选项后重新启动 Connector。
 
 轮换流程：
 
 1. 保存现有私有配置，关闭 Controller 会话并停止 Engine；停止相关 MCP 子进程。
 2. 用安全随机数生成新的、不同的 Controller/Engine token，在私有文件中更新。
-3. 同步更新 VPS `gateway.env`、Mac `engine.env`、所有客户端设备 JSON，以及验证用的 `.reach/deployment.json`；保持各文件 600。
+3. 同步更新 VPS `gateway.env`、各设备 `engine.env`、额外设备注册表、所有客户端设备 JSON，以及验证用的 `.reach/deployment.json`；凭证文件保持 600。容器以 node 用户读取的注册表需具有读取权限，其父目录仅供部署管理员访问。
 4. 重建 Gateway 容器配置，拉起 Engine，重启客户端并进行认证与真实文件验证。
 
 当前没有多个长期 token 并行有效的轮换窗口，也没有按客户端独立撤销的凭证管理；共享 Controller token 的客户端需要一起更新。不要重新执行首次生成示例来覆盖正在使用的配置。
 
-## 切回保留的旧部署
-
-这是跨架构回退，区别于上面的当前版镜像回滚。当前 VPS 保留 `/srv/reach`、`reach-app-1` 与 `reach-plan07-test`，首次切换前 Caddy 备份为 `/etc/caddy/Caddyfile.before-reach-20261005T130413Z`。
-
-先检查旧容器及 `http://127.0.0.1:8787` 上的旧服务可用，并准备匹配的旧 Engine/客户端和签名凭证。然后将 **Reach 站点** 的 `reverse_proxy` 改回 `127.0.0.1:8787`，校验并 reload Caddy。旧版协议与认证不同，新版客户端配置不保证可以直接使用。
-
-如果确认备份之后其他站点没有变更，也可恢复整个备份；若其他站点已更新，只修改 Reach 站点，避免覆盖无关配置。`mcp.zpershuai.top` 和 `api.zpershuai.top` 的现有代理应保留。
-
-确认旧链路工作后，可停止新版 Gateway：
-
-```bash
-ssh root@zpershuai.top 'cd /srv/reach-current/deploy && docker compose stop gateway'
-```
-
-此操作不删除旧/新目录或 Mac 工作区。切回新版时重新启动 Gateway，检查回环健康，再将 Reach 站点代理恢复到 `28787`，并使用新版凭证。
-
 ## 停用组件
 
 - Gateway：`docker compose stop gateway`；恢复用 `docker compose up -d gateway`。Docker 停止策略不会自动恢复被手工停止的服务。
-- Engine：先 `launchctl bootout`，将指定 Reach plist 移出 `~/Library/LaunchAgents/` 以阻止下次登录加载；保留二进制、配置和工作区便于恢复。
+- Engine：macOS 卸载并移出对应 LaunchAgent plist；Linux 使用 `systemctl disable --now reach-engine.service`（用户服务加 `--user`）；OpenWrt 执行 `/etc/init.d/reach-engine stop` 和 `disable`。保留工作区与私有配置。
 - MCP：从客户端配置移除 `reach` 条目并关闭对应子进程；仅删除客户端条目不会停止 Engine。
 
 停用 Engine 不删除工作区。若后续彻底卸载，先备份业务文件，再分别处理明确的程序文件和私有配置，避免删除整个 `~/.reach`。

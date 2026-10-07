@@ -1,16 +1,16 @@
 # Engine 部署到 Mac
 
-Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 心跳等待会话请求，按需建立 WSS 连接；不会监听 Mac 的入站端口。以下流程使用 macOS LaunchAgent；x86_64 OpenWrt 的 procd 安装器见 [OpenWrt 与多设备](openwrt.md)。
+Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 心跳等待会话请求，按需建立 WSS 连接；不会监听 Mac 的入站端口。以下流程使用 macOS LaunchAgent；Linux 的 systemd 安装器见 [Linux Engine](linux.md)，x86_64 OpenWrt 的 procd 安装器见 [OpenWrt 与多设备](openwrt.md)。
 
 ## 1. 配置与工作区
 
 先准备 [配置与凭证](configuration.md) 中的 `.reach/engine.env`。文件包含：
 
 ```dotenv
-REACH_GATEWAY_URL=https://reach.zpershuai.top
+REACH_GATEWAY_URL=https://reach.example.com
 REACH_ENGINE_TOKEN=<独立生成的64字符Engine凭证>
-REACH_ENGINE_ID=perry-mac
-REACH_WORKSPACE_ROOTS=default:/Users/perry/.reach/workspace
+REACH_ENGINE_ID=engine-a
+REACH_WORKSPACE_ROOTS=default:/Users/example/.reach/workspace
 ```
 
 示例 token 是占位符，必须使用实际私有配置。Engine ID 需与 Gateway 一致。若配置其他用户或目录，使用该设备的实际绝对路径；在目标 Mac 创建选定工作区：
@@ -74,7 +74,7 @@ Node 版本和各平台 SHA-256 固定在 [node-runtime.json](../../scripts/node
 | `~/.reach/versions.json` | 已安装的 Engine、MCP、Node 发布号 |
 | `~/.local/share/reach/run-node.sh` | 使用独立 runtime 执行 JS，模式 755 |
 | `~/.config/reach/engine.env` | Engine 配置，模式 600 |
-| `~/Library/LaunchAgents/top.zpershuai.reach-engine.plist` | 用户后台任务 |
+| `~/Library/LaunchAgents/org.reach.engine.plist` | 用户后台任务 |
 | `~/.local/share/reach/engine.log` | 标准输出，包含生命周期事件 |
 | `~/.local/share/reach/engine-error.log` | 标准错误与启动错误 |
 | `~/.config/reach/mcp-devices.json` | 仅同时安装 MCP 时生成，模式 600 |
@@ -91,12 +91,12 @@ Engine 启动 wrapper 设置 `REACH_NODE_BIN` 为上述 Node 绝对路径，并�
 
 源码构建仍需要 Rust 与 Node/npm 工具链。安装器中的 Python 3 和归档解包工具也必须可用；runtime 的下载和安装本身不依赖系统 Node。
 
-LaunchAgent label 为 `top.zpershuai.reach-engine`，配置 `RunAtLoad=true`、`KeepAlive=true` 与 `ThrottleInterval=10`。进程异常退出后由 launchd 拉起；持续配置错误可能造成反复重启，应查看 stderr 并修正配置。
+新安装默认 LaunchAgent label 为 `org.reach.engine`；可通过 `REACH_LAUNCHD_LABEL` 指定。升级时自动保留指向同一启动脚本的已有服务 label，以下管理命令应使用实际 label。服务配置 `RunAtLoad=true`、`KeepAlive=true` 与 `ThrottleInterval=10`。进程异常退出后由 launchd 拉起；持续配置错误可能造成反复重启，应查看 stderr 并修正配置。
 
 ## 5. 检查与管理
 
 ```bash
-launchctl print "gui/$(id -u)/top.zpershuai.reach-engine"
+launchctl print "gui/$(id -u)/org.reach.engine"
 tail -n 40 "$HOME/.local/share/reach/engine.log"
 tail -n 40 "$HOME/.local/share/reach/engine-error.log"
 ```
@@ -106,20 +106,20 @@ tail -n 40 "$HOME/.local/share/reach/engine-error.log"
 重启已注册的服务：
 
 ```bash
-launchctl kickstart -k "gui/$(id -u)/top.zpershuai.reach-engine"
+launchctl kickstart -k "gui/$(id -u)/org.reach.engine"
 ```
 
 停止并卸载本次登录中的任务：
 
 ```bash
-launchctl bootout "gui/$(id -u)/top.zpershuai.reach-engine"
+launchctl bootout "gui/$(id -u)/org.reach.engine"
 ```
 
 重新注册：
 
 ```bash
 launchctl bootstrap "gui/$(id -u)" \
-  "$HOME/Library/LaunchAgents/top.zpershuai.reach-engine.plist"
+  "$HOME/Library/LaunchAgents/org.reach.engine.plist"
 ```
 
 `bootout` 不删除 plist，用户下次登录仍可能自动加载；永久停用见 [operations.md](operations.md)。KeepAlive 期间只杀进程会被重新拉起，不能作为停止服务的方法。
@@ -131,6 +131,6 @@ launchctl bootstrap "gui/$(id -u)" \
 - Mac 休眠、断网或用户退出登录期间不可用；LaunchAgent 不提供无人登录时的系统级常驻。
 - Engine 执行文件工具，不提供任意 shell 执行服务。运行用户对目标文件的操作系统权限仍会限制 RPC。
 - Engine 日志为追加文件，安装器未配置自动轮转，需要定期管理；不要把容器日志轮转误认为 Mac 日志也会轮转。
-- Linux 可构建 Rust Engine，但本仓库尚无对应后台安装脚本；本套验收的设备安装流程是 macOS LaunchAgent。
+- Linux 与 OpenWrt 分别使用 [systemd](linux.md) 和 [procd](openwrt.md) 安装器。
 
 完整参数表见 [configuration.md](configuration.md)，真实文件链路检查见 [verification.md](verification.md)。

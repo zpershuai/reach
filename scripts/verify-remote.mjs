@@ -10,13 +10,17 @@ async function check(name, action) {
   results.push({ name, passed: true });
   console.log(`PASS ${name}`);
 }
-const request = (path, token, body) => fetch(`${config.gatewayUrl}${path}`, {
-  method: body === undefined ? "GET" : "POST",
-  headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
-  ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-  signal: AbortSignal.timeout(35000), redirect: "error",
-});
-const client = new HttpGatewayClient({ id: config.engineId, gatewayUrl: config.gatewayUrl, controllerToken: config.controllerToken }, 60000, 250);
+function request(path, token, body) {
+  const url = new URL(path, config.gatewayUrl);
+  if (path.startsWith("/session")) url.searchParams.set("engineId", config.engineId);
+  return fetch(url, {
+    method: body === undefined ? "GET" : "POST",
+    headers: { ...(token ? { authorization: `Bearer ${token}` } : {}), ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+    signal: AbortSignal.timeout(35000), redirect: "error",
+  });
+}
+const client = new HttpGatewayClient({ id: config.engineId, engineId: config.engineId, gatewayUrl: config.gatewayUrl, controllerToken: config.controllerToken }, 150000, 250);
 async function expectStatus(path, token, body, expected) {
   const response = await request(path, token, body);
   await response.arrayBuffer();
@@ -39,14 +43,14 @@ await check("Engine identity bound to credential", async () => {
   await expectStatus("/heartbeat", config.engineToken, { device: { id: "unregistered-engine" } }, 403);
 });
 const probe = `deployment-tests/${randomUUID()}.txt`;
-const content = "Reach deployment verified\nGateway VPS to Mac Engine over WSS\n";
+const content = "Reach deployment verified\nGateway to Engine over WSS\n";
 const rpc = async (method, params, permission) => {
   const response = await client.rpc(method, { workspace: "default", ...params }, permission);
   assert.equal(response.type, "response", JSON.stringify(response));
   return response.result;
 };
 try {
-  await check("Mac Engine ready over WSS", async () => {
+  await check("configured Engine ready over WSS", async () => {
     const ready = await client.openAndWait();
     assert.ok(ready.sessionId);
   });

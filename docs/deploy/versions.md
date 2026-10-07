@@ -27,7 +27,7 @@ Gateway 的公开 `GET /healthz` 返回 `gatewayVersion`。需要 Controller 认
 MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所有工具模式均提供 `get_versions`：
 
 ```json
-{"deviceId":"perry-mac"}
+{"deviceId":"engine-a"}
 ```
 
 示例结果：
@@ -35,7 +35,7 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 ```json
 {
   "mcpVersion": "0.1.0",
-  "deviceId": "perry-mac",
+  "deviceId": "engine-a",
   "gatewayVersion": "0.1.0",
   "engineVersion": "0.1.0"
 }

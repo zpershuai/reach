@@ -4,15 +4,15 @@
 
 ## Gateway 注册设备
 
-保留已有 `REACH_ENGINE_ID`、`REACH_ENGINE_TOKEN` 和 `REACH_CONTROLLER_TOKEN`，它们定义默认 Engine。旧客户端不指定设备时仍访问默认 Engine。为其他设备生成独立 token，在 VPS 的 `/srv/reach-current/deploy/engines.json` 中填写额外设备，不重复默认设备：
+保留已有 `REACH_ENGINE_ID`、`REACH_ENGINE_TOKEN` 和 `REACH_CONTROLLER_TOKEN`，它们定义默认 Engine。旧客户端不指定设备时仍访问默认 Engine。为其他设备生成独立 token，在 VPS 的 `/srv/reach/deploy/engines.json` 中填写额外设备，不重复默认设备：
 
 ```json
-[{"engineId":"openwrt-router","engineToken":"替换为至少32字符的独立随机凭证"}]
+[{"engineId":"engine-b","engineToken":"替换为至少32字符的独立随机凭证"}]
 ```
 
 `gateway.env` 增加 `REACH_ENGINES_FILE=/run/reach/engines.json`。Compose 只读挂载该文件；容器以 node 用户运行，文件必须可被容器读取，父目录限制为管理员访问。未添加其他 Engine 时，复制 `deploy/engines.json.example` 为 `engines.json`，内容为 `[]`。
 
-重启 Gateway 后注册生效。Controller 请求通过 `?engineId=openwrt-router` 指定目标，覆盖所有会话控制、状态、grant 和 RPC 接口。Engine 心跳由各自凭证路由；Gateway 返回带设备参数的 WSS 地址，单次会话 token 仍独立校验。未知设备不会回退至默认设备。
+重启 Gateway 后注册生效。Controller 请求通过 `?engineId=engine-b` 指定目标，覆盖所有会话控制、状态、grant 和 RPC 接口。Engine 心跳由各自凭证路由；Gateway 返回带设备参数的 WSS 地址，单次会话 token 仍独立校验。未知设备不会回退至默认设备。
 
 ## 准备 x86_64 OpenWrt 安装包
 
@@ -34,8 +34,8 @@ sh scripts/build-node-openwrt.sh /path/to/node-v24.21.0-linux-x64-musl.tar.gz /p
 准备路由器 `engine.env`（权限 600）：
 
 ```sh
-REACH_GATEWAY_URL=https://reach.zpershuai.top
-REACH_ENGINE_ID=openwrt-router
+REACH_GATEWAY_URL=https://reach.example.com
+REACH_ENGINE_ID=engine-b
 REACH_ENGINE_TOKEN=替换为该设备的独立凭证
 REACH_WORKSPACE_ROOTS=default:/root/.reach/workspace
 ```
@@ -54,8 +54,8 @@ sh install-engine-openwrt.sh ./engine ./engine.env ./node-v24.21.0-openwrt-x64.t
 
 ```json
 [
-  {"id":"perry-mac","engineId":"perry-mac","gatewayUrl":"https://reach.zpershuai.top","controllerToken":"共同Controller凭证"},
-  {"id":"openwrt-router","engineId":"openwrt-router","gatewayUrl":"https://reach.zpershuai.top","controllerToken":"共同Controller凭证"}
+  {"id":"engine-a","engineId":"engine-a","gatewayUrl":"https://reach.example.com","controllerToken":"共同Controller凭证"},
+  {"id":"engine-b","engineId":"engine-b","gatewayUrl":"https://reach.example.com","controllerToken":"共同Controller凭证"}
 ]
 ```
 
