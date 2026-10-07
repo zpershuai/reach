@@ -90,15 +90,22 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 [
   {
     "id": "perry-mac",
+    "engineId": "perry-mac",
     "gatewayUrl": "https://reach.zpershuai.top",
     "controllerToken": "<当前Gateway的64字符Controller凭证>"
+  },
+  {
+    "id": "openwrt-router",
+    "engineId": "openwrt-router",
+    "gatewayUrl": "https://reach.zpershuai.top",
+    "controllerToken": "<同一个Gateway的Controller凭证>"
   }
 ]
 ```
 
 `id` 是客户端选择设备的别名，必须非空且唯一；它不是 Engine 心跳的身份认证字段。当前例子沿用 Engine ID，便于阅读且满足现有验证脚本。真正的 Engine 身份由 Gateway 与 Engine 两端配置绑定。
 
-每个条目可指向一个不同 Gateway。当前一个 Gateway 只对应一个 Engine，不能靠添加同一 Gateway 的多个别名获得多设备路由。
+多个条目可以指向同一个 Gateway，并通过可选的 `engineId` 选择注册设备；不填写时访问默认 Engine。详见 [多设备部署](openwrt.md)。
 
 推荐使用 `REACH_MCP_DEVICES_FILE` 和权限 600 的设备文件。也支持 `REACH_MCP_DEVICES` 直接传 JSON 字符串，但两项不能同时设置。两者都省略时默认为 `local-engine` 与 `http://127.0.0.1:8787`，仅适合本地回环开发。
 
@@ -153,6 +160,6 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 
 Connector 在使用工具前检查会话、按需重建或续租。切换设备会先关闭旧会话。客户端关闭 stdin 后，Connector 等待已收到的请求处理完毕，再关闭自己持有的会话。
 
-状态观察可在总预算内重试临时网络中断；文件 RPC、grant 和会话变更不会自动重放。写入丢失响应时先确认文件结果。不要同时让多个客户端抢占同一个 Gateway 的单会话。
+状态观察可在总预算内重试临时网络中断；文件 RPC、grant 和会话变更不会自动重放。写入丢失响应时先确认文件结果。不要同时让多个客户端抢占同一个 Engine 的会话；不同 Engine 的会话互相隔离。
 
 手工直接运行 `node .../dist/main.js` 后没有输出是正常的：stdio 服务在等待 MCP 输入。客户端诊断看 stderr；部署验收使用 [verification.md](verification.md) 中安装后 MCP 验证。文件工具读取的是 Engine 工作区，Connector 本身只读取自己的私有配置。

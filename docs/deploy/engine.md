@@ -1,6 +1,6 @@
 # Engine 部署到 Mac
 
-Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 心跳等待会话请求，按需建立 WSS 连接；不会监听 Mac 的入站端口。当前已有安装器面向 macOS，以下流程以当前用户的 LaunchAgent 为准。
+Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 心跳等待会话请求，按需建立 WSS 连接；不会监听 Mac 的入站端口。以下流程使用 macOS LaunchAgent；x86_64 OpenWrt 的 procd 安装器见 [OpenWrt 与多设备](openwrt.md)。
 
 ## 1. 配置与工作区
 

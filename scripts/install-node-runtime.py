@@ -29,7 +29,8 @@ def validate_node(directory, version, target):
     actual_target = subprocess.check_output(
         [str(node), '-p', 'process.platform + "-" + process.arch'], text=True, timeout=30,
     ).strip()
-    if (actual_version, actual_target) != (version, target):
+    node_target = target[:-5] if target.endswith('-musl') else target
+    if (actual_version, actual_target) != (version, node_target):
         raise ValueError(f'Unexpected Node runtime: {actual_version} {actual_target}')
     if not (directory / 'bin/npm').is_file() or not (directory / 'bin/npx').is_file():
         raise ValueError('Node distribution is missing npm or npx')
@@ -89,6 +90,8 @@ def main():
     systems = {'Darwin': 'darwin', 'Linux': 'linux'}
     architectures = {'arm64': 'arm64', 'aarch64': 'arm64', 'x86_64': 'x64', 'AMD64': 'x64'}
     target = f'{systems.get(platform.system(), platform.system())}-{architectures.get(platform.machine(), platform.machine())}'
+    if target == 'linux-x64' and Path('/lib/ld-musl-x86_64.so.1').exists():
+        target = 'linux-x64-musl'
     manifest = json.loads(Path(__file__).with_name('node-runtime.json').read_text())
     try:
         archive = args.archive.expanduser().resolve() if args.archive else None

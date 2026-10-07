@@ -266,3 +266,22 @@ test("a missing active id is uncertain and does not erase the owned binding", as
     assert.equal(closes, 1);
   });
 });
+
+test("MCP consistently routes control, grants and RPC to the configured Engine", async () => {
+  const paths: string[] = [];
+  const client = new HttpGatewayClient({ id: "router-alias", engineId: "router /1", gatewayUrl: "https://reach.example" }, 1000, 1, async (url) => {
+    paths.push(url);
+    const path = new URL(url).pathname;
+    if (path === "/session/status") return new Response(JSON.stringify({ status: paths.some(p => p.includes("/session/close")) ? "none" : "ready", sessionId: "bound" }));
+    if (path === "/session/renew") return new Response(JSON.stringify({ leaseExpiresAt: new Date(Date.now()+10000).toISOString() }));
+    if (path === "/grants") return new Response(JSON.stringify({ grantId: "grant" }));
+    return new Response(JSON.stringify({sessionId: "bound"}));
+  });
+  await client.openAndWait();
+  await client.renew();
+  await client.grant("default", "x", "fs.write");
+  await client.rpc("fs.read", {workspace: "default", path: "x"});
+  await client.close();
+  assert.ok(paths.length >= 7);
+  for (const path of paths) assert.equal(new URL(path).searchParams.get("engineId"), "router /1");
+});

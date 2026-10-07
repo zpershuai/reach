@@ -31,7 +31,8 @@ class RuntimeInstallationTests(unittest.TestCase):
         if broken:
             script += 'exit 1\n'
         else:
-            script += f'if [ "$1" = --version ]; then echo {version}; else echo {target}; fi\n'
+            node_target = target[:-5] if target.endswith('-musl') else target
+            script += f'if [ "$1" = --version ]; then echo {version}; else echo {node_target}; fi\n'
         with tarfile.open(archive, 'w:gz') as output:
             for name, content in [('node', script), ('npm', '#!/bin/sh\n'), ('npx', '#!/bin/sh\n')]:
                 entry = tarfile.TarInfo(f'node-{version}-{target}/bin/{name}')
@@ -55,7 +56,7 @@ class RuntimeInstallationTests(unittest.TestCase):
         self.assertEqual(metadata['archiveSha256'], manifest['sha256'][self.target])
 
     def test_all_supported_platforms(self):
-        for target in ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64']:
+        for target in ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'linux-x64-musl']:
             with self.subTest(target=target):
                 archive, manifest = self.archive(target=target)
                 node = runtime.install_runtime(self.reach, manifest, target, archive)

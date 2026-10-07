@@ -6,6 +6,8 @@ services:
     image: reach-gateway:current
     restart: unless-stopped
     env_file: gateway.env
+    volumes:
+      - ./engines.json:/run/reach/engines.json:ro
     ports:
       - "127.0.0.1:28787:8787"
     read_only: true

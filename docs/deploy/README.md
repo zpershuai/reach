@@ -9,6 +9,7 @@
 | [配置与凭证](configuration.md) | 部署参数、生成私有配置、域名、认证与签名的版本边界 |
 | [Gateway 部署](gateway.md) | 构建、上传、Compose、Caddy、HTTPS 检查 |
 | [Engine 部署](engine.md) | Mac 构建、工作区、后台安装、启动与停止 |
+| [OpenWrt 与多设备](openwrt.md) | 路由器安装、私有 Node 库、一个 Gateway 管理多个 Engine |
 | [MCP 安装](mcp.md) | 通用 stdio MCP 安装、客户端配置、动态与静态工具 |
 | [部署验证](verification.md) | 源码检查、公网 RPC、安装后的 MCP、故障恢复验证 |
 | [运维与回滚](operations.md) | 升级、备份、凭证轮换、日志、回滚与停用 |
@@ -48,7 +49,7 @@ MCP 是一个通用 stdio 服务，安装入口为 [mcp.md](mcp.md)。它不需�
 
 ## 部署边界
 
-- 当前一个 Gateway 配置一个 Engine，只支持一条交互会话。多个 MCP 设备条目可以指向不同 Gateway，不等于单个 Gateway 支持多设备路由。
+- 一个 Gateway 可注册多个 Engine，按设备隔离会话、授权和 RPC；每个 Engine 同时保留一条交互会话，配置方式见 [多设备部署](openwrt.md)。
 - Engine 只发起出站连接，无需给 Mac 开放公网入站端口或配置端口转发。
 - LaunchAgent 在用户登录后运行；设备休眠、退出登录或断网期间不可用。
 - Gateway 重启会丢失内存会话与 grant。文件保留在 Engine 工作区，客户端需要重新打开会话。

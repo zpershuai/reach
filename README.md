@@ -87,7 +87,7 @@ Control API summary:
 
 | Endpoint | Method | Meaning |
 | --- | --- | --- |
-| `POST /session/open` | — | Request the one Engine session |
+| `POST /session/open` | — | Request the selected Engine session |
 | `GET /session/status` | — | Session state (`none`, `wanted`, `pending`, `connecting`, `ready`, `closing`) plus lease expiry and last closure reason |
 | `POST /session/renew` | — | Extend the live session lease (bounded by Gateway/Engine policy) |
 | `POST /session/close` | — | Request fast close; stops new RPC once draining begins |
@@ -151,7 +151,7 @@ HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. Eve
 
 ## Out of scope (for now)
 
-Multi-device session targeting and multiple simultaneous Engine sessions remain out of scope. Remote deployment supports one configured Engine, separate Controller/Engine credentials, and an external TLS terminator. See the deployment guide for configuration and the retained local development mode.
+One Gateway can manage multiple registered Engines, each with its own credential, session, lease, grants and RPC state. Controller requests select an Engine with `?engineId=...`; requests without it target the default Engine. MCP device entries use `engineId` to route through a shared Gateway. See [OpenWrt and multi-device deployment](docs/deploy/openwrt.md).
 
 
 ## RPC deadlines and retry behavior

@@ -1,4 +1,6 @@
 import { createGateway } from "./gateway.js";
+import { readFileSync } from "node:fs";
+import { z } from "zod";
 import { GATEWAY_VERSION } from "./version.js";
 
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
@@ -23,6 +25,10 @@ if (!["127.0.0.1", "::1", "localhost"].includes(host) && !authenticated) {
   throw new Error("Non-loopback Gateway requires authentication");
 }
 const gateway = createGateway({
+  engines: process.env.REACH_ENGINES_FILE ? z.array(z.object({
+    engineId: z.string().trim().min(1),
+    engineToken: z.string().min(32),
+  })).parse(JSON.parse(readFileSync(process.env.REACH_ENGINES_FILE, "utf8"))) : undefined,
   authentication: authenticated ? { controllerToken: controllerToken!, engineToken: engineToken!, engineId: engineId! } : undefined,
   heartbeatIntervalSeconds: Number(process.env.REACH_HEARTBEAT_INTERVAL_SECS ?? 120),
 });

@@ -4,6 +4,8 @@ export interface DeviceConfig {
   id: string;
   gatewayUrl: string;
   controllerToken?: string;
+  /** Explicit Gateway Engine identity; omit for a legacy default Engine. */
+  engineId?: string;
 }
 
 export type ToolMode = "dynamic" | "static";
@@ -45,6 +47,9 @@ function normalizeDevice(value: unknown): DeviceConfig {
   }
   gatewayUrl.pathname = gatewayUrl.pathname.replace(/\/$/, "");
   const controllerToken = candidate.controllerToken;
+  if (candidate.engineId !== undefined && (typeof candidate.engineId !== "string" || !candidate.engineId.trim())) {
+    throw new Error("device engineId must be a non-empty string");
+  }
   if (controllerToken !== undefined && (typeof controllerToken !== "string" || controllerToken.length < 32)) {
     throw new Error("device controllerToken must contain at least 32 characters");
   }
@@ -52,6 +57,7 @@ function normalizeDevice(value: unknown): DeviceConfig {
     id: candidate.id.trim(),
     gatewayUrl: gatewayUrl.toString().replace(/\/$/, ""),
     ...(controllerToken === undefined ? {} : { controllerToken }),
+    ...(candidate.engineId === undefined ? {} : { engineId: (candidate.engineId as string).trim() }),
   };
 }
 

@@ -1601,3 +1601,102 @@ async function waitForEvent(events: string[], target: string, timeoutMs: number)
     await new Promise((resolve) => setTimeout(resolve, 50));
   }
 }
+
+test("one Gateway isolates Engine credentials, session tokens, grants and RPC state", async () => {
+  const controllerToken = "c".repeat(48);
+  const tokens = { mac: "m".repeat(48), router: "r".repeat(48) };
+  await withGateway(async (url) => {
+    const post = (path: string, body: unknown, token = controllerToken) => fetch(`${url}${path}`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" }, body: JSON.stringify(body),
+    });
+    const status = (engineId?: string) => post(`/session/status${engineId ? `?engineId=${engineId}` : ""}`, {}).then(r => r.json()) as Promise<{status: string; engineVersion: string}>;
+    assert.equal((await post("/session/open?engineId=missing", {})).status, 404);
+    assert.equal((await post("/session/open?engineId=router", {}, tokens.router)).status, 401);
+    assert.equal((await post("/heartbeat", { device: { id: "router" } }, tokens.mac)).status, 403);
+    assert.equal((await post("/heartbeat?engineId=router", { device: { id: "mac" } }, tokens.mac)).status, 401);
+    const sockets: WebSocket[] = [];
+    try {
+      for (const [engineId, token] of Object.entries(tokens)) {
+        assert.equal((await post(`/session/open?engineId=${engineId}`, { sessionId: "same-session-id" })).status, 200);
+        const lease = await (await post("/heartbeat", { device: { id: engineId, engineVersion: engineId === "mac" ? "1.0.0" : "2.0.0" } }, token)).json() as {endpoint: string; token: string; sessionId: string};
+        assert.equal(lease.endpoint, `/session?engineId=${engineId}`);
+        const other = engineId === "mac" ? "router" : "mac";
+        const wrong = new WebSocket(`${wsBaseUrl(url)}/session?engineId=${other}&token=${lease.token}`);
+        await assert.rejects(once(wrong, "open"), /401/);
+        const socket = new WebSocket(`${wsBaseUrl(url)}${lease.endpoint}&token=${lease.token}`);
+        sockets.push(socket);
+        await once(socket, "open");
+        attachMockEngine(socket, (request) => ({ type: "response", requestId: request.requestId, result: { content: engineId } }));
+        socket.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: lease.sessionId, engineId, engineVersion: engineId === "mac" ? "1.0.0" : "2.0.0", workspaces: ["fixture"], methods: ["fs.read", "fs.write"] }));
+        for (let i = 0; i < 20 && (await status(engineId)).status !== "ready"; i++) await new Promise(r => setTimeout(r, 10));
+        assert.equal((await status(engineId)).status, "ready");
+      }
+      assert.equal((await status()).engineVersion, "1.0.0");
+      assert.equal((await status("router")).engineVersion, "2.0.0");
+      for (const engineId of Object.keys(tokens)) {
+        const rpc = await post(`/session/rpc?engineId=${engineId}`, rpcBody("same-request-id", "fs.read", { workspace: "fixture", path: "same.txt" }));
+        const reply = await rpc.json() as {result: {content: string}};
+        assert.equal(reply.result.content, engineId);
+      }
+      const grant = await (await post("/grants?engineId=mac", { workspace: "fixture", path: "same.txt", methods: ["fs.write"] })).json() as {grantId: string};
+      const cross = await (await post("/session/rpc?engineId=router", rpcBody("cross-grant", "fs.write", { workspace: "fixture", path: "same.txt", content: "x", mode: "create" }, grant))).json() as {type: string};
+      assert.equal(cross.type, "error");
+      await post("/session/close?engineId=router", {});
+      assert.equal((await status("mac")).status, "ready");
+    } finally {
+      for (const socket of sockets) {
+        if (socket.readyState === WebSocket.CLOSED) continue;
+        const closed = once(socket, "close");
+        socket.close();
+        await closed;
+      }
+    }
+  }, { authentication: { controllerToken, engineId: "mac", engineToken: tokens.mac }, engines: [{ engineId: "router", engineToken: tokens.router }] });
+});
+
+test("multiple Engines require distinct credentials and identities", () => {
+  const authentication = {controllerToken: "c".repeat(48), engineId: "mac", engineToken: "m".repeat(48)};
+  assert.throws(() => createGateway({ engines: [{engineId: "router", engineToken: "r".repeat(48)}] }), /authentication/);
+  assert.throws(() => createGateway({ authentication, engines: [{engineId: "mac", engineToken: "r".repeat(48)}] }), /unique/);
+  assert.throws(() => createGateway({ authentication, engines: [{engineId: "router", engineToken: authentication.engineToken}] }), /unique/);
+  assert.throws(() => createGateway({ authentication, engines: [{engineId: "router", engineToken: authentication.controllerToken}] }), /distinct/);
+});
+
+test("two real Rust Engines share one Gateway and keep their workspaces separate", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-two-engines-"));
+  const controllerToken = "c".repeat(48);
+  const engines = [{ engineId: "mac", engineToken: "m".repeat(48) }, { engineId: "router", engineToken: "r".repeat(48) }];
+  try {
+    for (const { engineId } of engines) {
+      await fs.mkdir(join(root, engineId));
+      await fs.writeFile(join(root, engineId, "identity.txt"), engineId);
+    }
+    await withGateway(async (url) => {
+      const children: ChildProcess[] = [];
+      const post = (path: string, engineId: string, body: unknown = {}) => fetch(`${url}${path}?engineId=${engineId}`, {
+        method: "POST", headers: { authorization: `Bearer ${controllerToken}`, "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      try {
+        for (const { engineId, engineToken } of engines) {
+          assert.equal((await post("/session/open", engineId)).status, 200);
+          children.push(await startEngine(url, { fixture: join(root, engineId) }, { REACH_ENGINE_ID: engineId, REACH_ENGINE_TOKEN: engineToken }));
+        }
+        for (const { engineId } of engines) {
+          const deadline = Date.now() + 10000;
+          while ((await (await post("/session/status", engineId)).json() as {status: string}).status !== "ready") {
+            if (Date.now() > deadline) throw new Error(`${engineId} never became ready`);
+            await new Promise(r => setTimeout(r, 20));
+          }
+          const reply = await (await post("/session/rpc", engineId, rpcBody("shared-request", "fs.read", {workspace: "fixture", path: "identity.txt"}))).json() as {result: {content: string}};
+          assert.equal(reply.result.content, engineId);
+        }
+        await post("/session/close", "router");
+        assert.equal((await (await post("/session/status", "mac")).json() as {status: string}).status, "ready");
+      } finally {
+        for (const child of children) await stopEngine(child);
+      }
+    }, { authentication: {controllerToken, ...engines[0]!}, engines: [engines[1]!] });
+  } finally {
+    await fs.rm(root, {recursive: true, force: true});
+  }
+});

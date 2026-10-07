@@ -1,6 +1,24 @@
 # 当前部署与历史验收记录
 
-本页记录 2026-10-05 首次部署和 2026-10-06 更新验收时的配置与结果，是历史快照。服务当前状态按 [运维检查](operations.md) 查询，不能仅凭本页认定实时在线。
+本页记录首次部署及后续更新验收时的配置与结果，是历史快照。服务当前状态按 [运维检查](operations.md) 查询，不能仅凭本页认定实时在线。
+
+## 2026-10-07 一个 Gateway 接入 Mac 与 OpenWrt
+
+公网统一入口为 `https://reach.zpershuai.top`，沿用 VPS 的 `deploy-gateway-1`。新增的独立路由器 Gateway 和 Caddy 8443 路由已撤销。历史测试容器及旧服务保留，此次设备接入不使用它们。
+
+| 组件 | 安装版本与位置 |
+| --- | --- |
+| Gateway | `0.2.0`，`/srv/reach-current`，额外 Engine 注册在 `deploy/engines.json` |
+| Mac Engine | `0.1.0`，ID `perry-mac`，沿用 LaunchAgent 与原凭证 |
+| OpenWrt Engine | `0.1.0`，ID `openwrt-router`，`/root/.reach/engine`，procd 服务 `reach-engine` 已运行并启用开机启动 |
+| Mac MCP | `0.2.0`，`~/.local/share/reach/mcp`，设备文件 `~/.config/reach/mcp-devices.json` 包含两台设备 |
+| Node runtime | 两台设备均为 `v24.21.0`，稳定入口 `~/.reach/runtime/node/bin/node`；路由器附带私有 musl 与 C++ 库 |
+
+路由器为 x86_64 iStoreOS/OpenWrt，工作区是 `/root/.reach/workspace`，私有配置为 `/etc/reach/engine.env`。Rust Engine 使用静态 musl 构建，SHA256 为 `357be91085ac9ba5c4c1115d28c0ae2803927c023cdfe62607339b21f39c4800`。
+
+验收通过 63 项 Gateway/RPC 测试、34 项 MCP 测试和 7 项 runtime 测试。公网验证确认两台 Engine 同时 ready、同一路径分别读写不同内容、跨设备 grant 被拒绝、独立续租，以及关闭路由器会话后 Mac 继续工作。已安装 MCP 也通过 stdio 实际选择两台设备、读取各自文件和查询版本，验证结束后两端会话均已关闭。私有验收记录在 `.reach/multi-engine-verification.json`。
+
+VPS 升级前备份为 `/srv/reach-backups/20261007T004550Z-multi-engine/gateway.tgz`，旧镜像标签为 `reach-gateway:before-multi-engine`。Mac MCP 备份为 `~/.reach/backups/20261007T004623Z-multi-engine`。安装和后续添加设备步骤见 [OpenWrt 与多设备](openwrt.md)。
 
 ## 2026-10-06 Engine 与 Gateway 更新
 
