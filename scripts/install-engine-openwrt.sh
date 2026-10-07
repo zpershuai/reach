@@ -12,7 +12,8 @@ fi
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 engine_source=${1:?Usage: install-engine-openwrt.sh ENGINE_BINARY ENGINE_ENV NODE_BUNDLE}
 config_source=${2:?Engine configuration file required}
-archive=${3:?A prepared OpenWrt Node runtime bundle is required}
+archive=${3:?A prepared Node bundle is required for the bundled Gateway/MCP runtime}
+[ -f "$script_dir/run-node.sh" ]
 engine_version=$("$engine_source" --version)
 node_version=$(jsonfilter -i "$script_dir/node-runtime.json" -e '@.version')
 node_checksum=$(jsonfilter -i "$script_dir/node-runtime.json" -e '@.sha256["openwrt-x64"]')
@@ -37,7 +38,7 @@ release_stamp=$(date -u +%Y%m%dT%H%M%SZ)
 backup=$reach_dir/backups/$release_stamp
 mkdir -p "$backup"
 chmod 700 "$backup"
-for installed in "$reach_dir/engine" "$reach_dir/start-engine.sh" "$reach_dir/versions.json" /etc/reach/engine.env /etc/init.d/reach-engine; do
+for installed in "$reach_dir/engine" "$reach_dir/start-engine.sh" "$reach_dir/run-node.sh" "$reach_dir/versions.json" /etc/reach/engine.env /etc/init.d/reach-engine; do
   if [ -f "$installed" ]; then
     cp -p "$installed" "$backup/$(basename "$installed")"
   fi
@@ -57,6 +58,9 @@ fi
 cp "$engine_source" "$reach_dir/engine.new"
 chmod 755 "$reach_dir/engine.new"
 mv -f "$reach_dir/engine.new" "$reach_dir/engine"
+cp "$script_dir/run-node.sh" "$reach_dir/run-node.sh.new"
+chmod 755 "$reach_dir/run-node.sh.new"
+mv -f "$reach_dir/run-node.sh.new" "$reach_dir/run-node.sh"
 cp "$config_source" /etc/reach/engine.env.new
 chmod 600 /etc/reach/engine.env.new
 mv -f /etc/reach/engine.env.new /etc/reach/engine.env
@@ -67,8 +71,6 @@ set -eu
 set -a
 . /etc/reach/engine.env
 set +a
-export REACH_NODE_BIN=/root/.reach/runtime/node/bin/node
-export PATH="/root/.reach/runtime/node/bin:$PATH"
 exec /root/.reach/engine
 START_ENGINE
 chmod 700 "$reach_dir/start-engine.sh"
@@ -97,4 +99,4 @@ chmod 755 /etc/init.d/reach-engine
 ' "$engine_version"
 /etc/init.d/reach-engine enable
 /etc/init.d/reach-engine start
-echo "Installed Reach Engine $engine_version with Node $node_version (procd)."
+echo "Installed Reach Engine $engine_version (procd) and Node $node_version for local Gateway/MCP processes."

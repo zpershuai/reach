@@ -16,8 +16,7 @@ Reach MCP Connector 是通用 stdio MCP 服务。支持本地 MCP 子进程的�
       "args": ["/absolute/path/to/home/.local/share/reach/mcp/dist/main.js"],
       "env": {
         "REACH_MCP_DEVICES_FILE": "/absolute/path/to/home/.config/reach/mcp-devices.json",
-        "REACH_MCP_READY_POLL_MS": "1000",
-        "REACH_NODE_BIN": "/absolute/path/to/home/.reach/runtime/node/bin/node"
+        "REACH_MCP_READY_POLL_MS": "1000"
       }
     }
   }
@@ -27,6 +26,8 @@ Reach MCP Connector 是通用 stdio MCP 服务。支持本地 MCP 子进程的�
 每次 Engine 安装都会自动把独立 Node.js runtime 安装到 `~/.reach/runtime/node`，MCP 使用其中 `bin/node` 的固定绝对路径，不依赖 Homebrew 或系统 Node。换用户或设备时替换绝对路径。配置文件已生成，但并未自动注册到某个 MCP 客户端。客户端配置格式和重新加载方式由所用客户端决定。
 
 MCP 初始化的 `instructions` 和 `list_devices` 工具的 description 也说明这个 runtime 的安装位置与用途。同一主机上的 Gateway、MCP 可以共用该 runtime；连接其他设备不会把远端 Node 当成本地可执行程序。
+
+MCP 的解释器由 `command` 字段选择，不读取 `REACH_NODE_BIN` 来切换 runtime。该变量只用于 [run-node.sh launcher](node-runtime.md)，Rust Engine 不依赖它。
 
 Controller token 存放在独立设备 JSON 中，不需要嵌入上述共享启动配置。确认目标客户端进程能够读取该文件，并能执行指定 Node。纯云端客户端如果不能运行本地 stdio 子进程，无法直接使用此安装方式。
 

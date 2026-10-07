@@ -13,7 +13,7 @@ function tool(name: string, description: string, inputSchema: Schema): Record<st
 
 export function deviceTools(): readonly Record<string, unknown>[] {
   return [
-    tool("list_devices", "List configured Reach Engine devices. Each Engine installation provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on that host.", object({})),
+    tool("list_devices", "List configured Reach Engine devices. Each Engine installation provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on that host. The Rust Engine itself does not execute Node.js.", object({})),
     tool("get_versions", "Inspect MCP, Gateway and the last reported Engine release versions without opening a session. Omit deviceId to inspect the selected device, or only MCP when none is selected. Unknown versions are null.", object({ deviceId: string("Optional configured Reach device identifier.") })),
     tool("pick_device", "Open and select a ready Reach Engine device. Multiple Engines can share one Gateway; the selected device determines where filesystem tools execute.", object({ deviceId: string("Configured Reach device identifier.") }, ["deviceId"])),
   ];

@@ -14,6 +14,7 @@
 | [MCP 安装](mcp.md) | 通用 stdio MCP 安装、客户端配置、动态与静态工具 |
 | [部署验证](verification.md) | 源码检查、公网 RPC、安装后的 MCP、故障恢复验证 |
 | [运维与回滚](operations.md) | 升级、备份、凭证轮换、日志、回滚与停用 |
+| [Node runtime](node-runtime.md) | 安装交付策略、JS 启动入口与 Rust Engine 的执行边界 |
 | [组件版本](versions.md) | 独立发布号、版本查询、安装记录与更新方式 |
 | [故障排查](troubleshooting.md) | 网络、认证、会话、文件权限和工具列表问题 |
 | [部署检查清单](deployment-checklist.md) | 安装、验收、升级与私有记录保管 |

@@ -21,7 +21,7 @@ REACH_WORKSPACE_ROOTS=default:/absolute/path/to/workspace
 bash install-engine-linux.sh ./engine ./engine.env
 ```
 
-每次安装会自动准备并校验 `~/.reach/runtime/node/bin/node`。可传入与固定版本、平台和 SHA256 匹配的官方 Node 压缩包，避免目标机器联网下载：
+每次安装会自动准备并校验 `~/.reach/runtime/node/bin/node`。这是供同机 Gateway/MCP 使用的交付策略；Rust Engine 不执行 Node，服务不会设置 Node 专用环境变量。通过 `~/.local/share/reach/run-node.sh` 启动 JS 组件，详见 [Node runtime](node-runtime.md)。可传入与固定版本、平台和 SHA256 匹配的官方 Node 压缩包，避免目标机器联网下载：
 
 ```sh
 bash install-engine-linux.sh ./engine ./engine.env ./node-v24.21.0-linux-x64.tar.gz

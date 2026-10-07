@@ -96,7 +96,7 @@ test("initialize declares tools.listChanged", async () => {
       protocolVersion: MCP_PROTOCOL_VERSION,
       capabilities: { tools: { listChanged: true } },
       serverInfo: { name: "reach-mcp", version: MCP_VERSION },
-      instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node. Gateway and MCP processes on the same host can use this runtime without a system Node.js installation. Filesystem tools execute on the selected Engine through its Gateway.",
+      instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. The Rust Engine does not execute or require Node.js; provisioning the runtime is an installation policy. Filesystem tools execute on the selected Engine through its Gateway.",
     },
   }]);
 });

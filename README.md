@@ -6,7 +6,7 @@ Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clien
 
 MCP, Engine and Gateway have independent release versions, exposed through `--version`, Gateway health/session status and the MCP `get_versions` tool. See [component versions and upgrades](docs/deploy/versions.md).
 
-Each Engine installation automatically installs a pinned, checksum-verified Node.js runtime under `~/.reach/runtime/node` for Gateway and MCP processes on that host. The generated MCP configuration uses its stable `bin/node` path. After building, `bash scripts/start-gateway.sh` starts a local Gateway with this runtime. It can also be installed independently with `python3 scripts/install-node-runtime.py`.
+Each Engine installation automatically installs a pinned, checksum-verified Node.js runtime under `~/.reach/runtime/node` for Gateway and MCP processes on that host. This is an installation policy; the Rust Engine does not execute or require Node.js. The generated MCP configuration uses its stable `bin/node` path. After building, `sh scripts/start-gateway.sh` starts a local Gateway with this runtime. It can also be installed independently with `python3 scripts/install-node-runtime.py`. See [runtime installation and execution boundaries](docs/deploy/node-runtime.md).
 
 **Model B topology:** the Gateway is the single Agent-facing control plane; a long-running Engine Runtime on the device owns the workspace and executes `fs.*` RPC. Local development uses loopback (`127.0.0.1`) with two processes.
 

@@ -16,6 +16,8 @@
 
 ## 准备 x86_64 OpenWrt 安装包
 
+Node bundle 是统一安装交付的一部分，供同一设备上的 Gateway/MCP 使用；Rust Engine 本身不执行 Node。只运行 Engine 的路由器上，runtime 可以保持未使用。设计与启动方式见 [Node runtime 的安装与执行边界](node-runtime.md)。
+
 在 Linux 构建机生成静态 Engine：
 
 ```sh
@@ -40,13 +42,13 @@ REACH_ENGINE_TOKEN=替换为该设备的独立凭证
 REACH_WORKSPACE_ROOTS=default:/root/.reach/workspace
 ```
 
-上传静态 Engine、配置、`scripts/install-engine-openwrt.sh`、生成的 bundle 和 manifest 到路由器的同一临时目录，以 root 执行：
+上传静态 Engine、配置、`scripts/install-engine-openwrt.sh`、`scripts/run-node.sh`、生成的 bundle 和 manifest 到路由器的同一临时目录，以 root 执行：
 
 ```sh
 sh install-engine-openwrt.sh ./engine ./engine.env ./node-v24.21.0-openwrt-x64.tar.gz
 ```
 
-每次安装都会校验并安装 Node，稳定入口为 `/root/.reach/runtime/node/bin/node`，Engine 为 `/root/.reach/engine`。安装器备份旧文件，使用 procd 托管并设置开机启动，服务日志通过 `logread -e reach` 查询。工作区为 `/root/.reach/workspace`，配置在 `/etc/reach/engine.env`，版本记录在 `/root/.reach/versions.json`。当前安装器支持 x86_64、musl 和 root 主目录，不适用于其他架构。
+每次安装都会校验并安装 Node 和 POSIX sh launcher `/root/.reach/run-node.sh`，runtime 的稳定入口为 `/root/.reach/runtime/node/bin/node`，Engine 为 `/root/.reach/engine`。安装器备份旧文件，使用 procd 托管并设置开机启动，服务日志通过 `logread -e reach` 查询。工作区为 `/root/.reach/workspace`，配置在 `/etc/reach/engine.env`，版本记录在 `/root/.reach/versions.json`。当前安装器支持 x86_64、musl 和 root 主目录，不适用于其他架构。
 
 ## MCP 选择设备
 
