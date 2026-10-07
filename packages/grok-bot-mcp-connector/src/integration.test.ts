@@ -14,6 +14,79 @@ import { McpServer } from "./server.js";
 import { MCP_VERSION } from "./version.js";
 import { GATEWAY_VERSION } from "../../reach-rpc/dist/version.js";
 
+test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and cleanup", async () => {
+  const repository = fileURLToPath(new URL("../../..", import.meta.url));
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-http-mcp-"));
+  const controllerToken = "c".repeat(48);
+  const engineToken = "e".repeat(48);
+  const gateway = createGateway({ logger: () => {}, heartbeatIntervalSeconds: 1, authentication: { controllerToken, engineToken, engineId: "engine-a" } });
+  const sockets = new Set<Socket>();
+  gateway.on("connection", (socket) => { sockets.add(socket); socket.on("close", () => sockets.delete(socket)); });
+  gateway.listen(0, "127.0.0.1");
+  await once(gateway, "listening");
+  const address = gateway.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  const headers: Record<string, string> = { authorization: `Bearer ${controllerToken}`, "content-type": "application/json", accept: "application/json, text/event-stream" };
+  let engine: ReturnType<typeof spawn> | undefined;
+  let sequence = 0;
+  const request = async (method: string, params?: unknown, notification = false) => {
+    const response = await fetch(`${url}/mcp`, { method: "POST", headers, body: JSON.stringify({ jsonrpc: "2.0", ...(notification ? {} : { id: ++sequence }), method, params }) });
+    if (response.headers.has("mcp-session-id")) headers["mcp-session-id"] = response.headers.get("mcp-session-id")!;
+    if (notification) { assert.equal(response.status, 202); return {}; }
+    assert.equal(response.status, 200, await response.clone().text());
+    return (await response.json() as { result: Record<string, any> }).result;
+  };
+  const tool = (name: string, args: Record<string, unknown> = {}) => request("tools/call", { name, arguments: { deviceId: "engine-a", ...args } });
+  const value = (result: Record<string, any>) => { assert.ok(!result.isError, JSON.stringify(result)); return JSON.parse(result.content[0].text); };
+  try {
+    const build = spawn("cargo", ["build", "--quiet", "--locked", "--offline", "-p", "reach-rpc", "--bin", "engine"], { cwd: repository, stdio: "ignore" });
+    assert.equal((await once(build, "exit"))[0], 0);
+    const initialized = await request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "http-integration", version: "1" } });
+    assert.equal(initialized.serverInfo.name, "reach-mcp");
+    headers["mcp-protocol-version"] = initialized.protocolVersion;
+    await request("notifications/initialized", undefined, true);
+    assert.equal(value(await tool("pick_device")).status, "connecting");
+    engine = spawn(join(repository, "target/debug/engine"), [url], {
+      cwd: repository, env: { ...process.env, REACH_ENGINE_ID: "engine-a", REACH_ENGINE_TOKEN: engineToken, REACH_WORKSPACE_ROOTS: `default:${root}` }, stdio: "ignore",
+    });
+    const deadline = Date.now() + 5_000;
+    while (value(await tool("device_status")).status !== "ready") {
+      if (Date.now() >= deadline) throw new Error("Engine did not become ready");
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    const args = { workspace: "default", path: "note.txt" };
+    value(await tool("fs_write", { ...args, content: "hello", mode: "create" }));
+    const read = value(await tool("fs_read", args));
+    assert.equal(read.content, "hello"); assert.match(read.revision, /^[a-f0-9]{64}$/);
+    value(await tool("fs_edit", { ...args, oldString: "hello", newString: "updated", ifMatch: read.revision }));
+    const stale = await tool("fs_edit", { ...args, oldString: "updated", newString: "wrong", ifMatch: read.revision });
+    assert.equal(stale.isError, true); assert.match(stale.content[0].text, /^REVISION_CONFLICT:/);
+    assert.equal(value(await tool("fs_read", args)).content, "updated");
+    assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "updated");
+    value(await tool("session_close"));
+    const status = await fetch(`${url}/session/status`, { headers });
+    assert.equal((await status.json() as { status: string }).status, "none");
+    // Closing an already closed device must not open another session.
+    value(await tool("session_close"));
+    assert.equal((await fetch(`${url}/mcp`, { method: "DELETE", headers })).status, 200);
+    const deployment = join(root, "deployment.json");
+    await fs.writeFile(deployment, JSON.stringify({ gatewayUrl: url, engineId: "engine-a", controllerToken }), { mode: 0o600 });
+    const verifier = spawn(process.execPath, [join(repository, "scripts/verify-mcp-http.mjs"), deployment], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    let diagnostics = "";
+    verifier.stdout.on("data", (chunk) => { diagnostics += chunk; });
+    verifier.stderr.on("data", (chunk) => { diagnostics += chunk; });
+    assert.equal((await once(verifier, "exit"))[0], 0, diagnostics);
+    const report = JSON.parse(await fs.readFile(join(root, ".reach/mcp-http-verification.json"), "utf8"));
+    assert.equal(report.results.length, 4);
+  } finally {
+    if (engine && engine.exitCode === null) { engine.kill(); await once(engine, "exit"); }
+    for (const socket of sockets) socket.destroy();
+    await new Promise<void>((resolve) => gateway.close(() => resolve()));
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("MCP drives a real Gateway and Rust Engine through mutation, renewal and close", async () => {
   const repository = fileURLToPath(new URL("../../..", import.meta.url));
   const root = await fs.mkdtemp(join(tmpdir(), "reach-mcp-integration-"));

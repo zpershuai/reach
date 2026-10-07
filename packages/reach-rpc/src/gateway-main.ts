@@ -25,6 +25,13 @@ if (!["127.0.0.1", "::1", "localhost"].includes(host) && !authenticated) {
   throw new Error("Non-loopback Gateway requires authentication");
 }
 const gateway = createGateway({
+  mcp: {
+    allowedOrigins: (process.env.REACH_MCP_ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
+    sessionIdleMs: Number(process.env.REACH_MCP_SESSION_IDLE_MS ?? 300_000),
+    responseTimeoutMs: Number(process.env.REACH_MCP_RESPONSE_TIMEOUT_MS ?? 25_000),
+    maxSessions: Number(process.env.REACH_MCP_MAX_SESSIONS ?? 128),
+    maxQueue: Number(process.env.REACH_MCP_MAX_QUEUE ?? 16),
+  },
   engines: process.env.REACH_ENGINES_FILE ? z.array(z.object({
     engineId: z.string().trim().min(1),
     engineToken: z.string().min(32),

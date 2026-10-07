@@ -7,6 +7,8 @@ import { GrantStore, normalizeWorkspacePath } from "./grants.js";
 import { GATEWAY_VERSION } from "./version.js";
 export { normalizeWorkspacePath } from "./grants.js";
 import { WebSocket, WebSocketServer } from "ws";
+import { createMcpHttpHandler, type McpHttpOptions } from "./mcp/http.js";
+import type { EngineApi, EngineResult } from "./mcp/in-process.js";
 import {
   CLOSURE_AGENT_REQUESTED,
   CLOSURE_DISCONNECTED,
@@ -77,6 +79,7 @@ const sessionControlSchema = z.object({ sessionId: z.string().min(1).optional() 
 
 export interface GatewayOptions {
   logger?: (message: string) => void;
+  mcp?: McpHttpOptions;
   now?: () => number;
   sessionDurationMs?: number;
   sessionIdleMs?: number;
@@ -159,37 +162,45 @@ function leafMutation(
 }
 
 export function createGateway(options: GatewayOptions = {}): Server {
-  if (options.engines === undefined) return createEngineGateway(options);
   const authentication = options.authentication;
-  if (!authentication) throw new Error("Multiple Engines require Gateway authentication");
-  const engines = [authentication, ...options.engines];
+  if (options.engines !== undefined && !authentication) throw new Error("Multiple Engines require Gateway authentication");
+  const engines = authentication ? [authentication, ...(options.engines ?? [])] : [];
   if (new Set(engines.map((engine) => engine.engineId)).size !== engines.length
     || new Set(engines.map((engine) => engine.engineToken)).size !== engines.length) {
     throw new Error("Engine ids and Engine tokens must be unique");
   }
-  const gateways = new Map<string, Server>();
+  const gateways = new Map<string, ReturnType<typeof createEngineGateway>>();
+  const defaultId = authentication?.engineId ?? "local-engine";
+  if (!authentication) gateways.set(defaultId, createEngineGateway(options));
   for (const engine of engines) {
     gateways.set(engine.engineId, createEngineGateway({
       ...options,
-      authentication: { ...engine, controllerToken: authentication.controllerToken },
-    }, `${SESSION_ENDPOINT_PATH}?engineId=${encodeURIComponent(engine.engineId)}`));
+      authentication: { ...engine, controllerToken: authentication!.controllerToken },
+    }, options.engines === undefined ? SESSION_ENDPOINT_PATH : `${SESSION_ENDPOINT_PATH}?engineId=${encodeURIComponent(engine.engineId)}`));
   }
+  const mcp = createMcpHttpHandler(new Map([...gateways].map(([id, engine]) => [id, engine.api])), authentication?.controllerToken, options.mcp, () => {
+    const address = gateway.address();
+    return typeof address === "object" && address !== null && ["127.0.0.1", "::1"].includes(address.address);
+  });
   const selectGateway = (request: IncomingMessage): Server | undefined => {
     const url = new URL(request.url ?? "/", "http://localhost");
     const selected = url.searchParams.get("engineId");
-    if (url.pathname === "/heartbeat") {
-      // Authenticate before parsing the body. Each Engine handler also checks device.id.
+    if (url.pathname === "/heartbeat" && authentication) {
       const provided = Buffer.from(request.headers.authorization ?? "");
       const engine = engines.find(({ engineToken }) => {
         const required = Buffer.from(`Bearer ${engineToken}`);
         return provided.length === required.length && timingSafeEqual(provided, required);
       });
       if (!engine || (selected !== null && selected !== engine.engineId)) return undefined;
-      return gateways.get(engine.engineId);
+      return gateways.get(engine.engineId)?.server;
     }
-    return gateways.get(selected ?? authentication.engineId);
+    return gateways.get(selected ?? defaultId)?.server;
   };
   const gateway = createServer((request, response) => {
+    if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
+      void mcp.handle(request, response);
+      return;
+    }
     const target = selectGateway(request);
     if (!target) {
       const heartbeat = new URL(request.url ?? "/", "http://localhost").pathname === "/heartbeat";
@@ -205,13 +216,14 @@ export function createGateway(options: GatewayOptions = {}): Server {
     target.emit("upgrade", request, socket, head);
   });
   gateway.on("close", () => {
-    for (const target of gateways.values()) target.emit("close");
+    mcp.shutdown();
+    for (const target of gateways.values()) target.server.emit("close");
   });
   return gateway;
 }
 
 /** One isolated state machine per Engine, owned by the listening Gateway. */
-function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_ENDPOINT_PATH): Server {
+function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_ENDPOINT_PATH): { server: Server; api: EngineApi } {
   const authentication = options.authentication;
   if (authentication && (authentication.controllerToken.length < 32 || authentication.engineToken.length < 32
     || authentication.controllerToken === authentication.engineToken || !authentication.engineId.trim())) {
@@ -227,6 +239,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   let liveSession: LiveSession | undefined;
   // Last version advertised by the configured Engine; not an online-status indicator.
   let engineVersion: string | undefined;
+  let lastSeenAt: string | undefined;
   /** Last Engine-reported or observed closure reason, kept for session status. */
   let lastClosureReason: string | undefined;
   let leaseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -431,6 +444,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         : "none";
     return {
       gatewayVersion: GATEWAY_VERSION,
+      lastSeenAt,
       engineVersion: engineVersion ?? null,
       wanted: sessionWanted,
       status,
@@ -453,6 +467,80 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     } catch (error) {
       sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session control payload" });
       return false;
+    }
+  };
+
+  const executeRpc = async (body: unknown, receivedAt: number): Promise<EngineResult> => {
+    // HTTP ingress limits received bytes; expanded internal envelopes use the
+    // WebSocket bound in forwardToEngine so metadata does not shrink that limit.
+    const session = liveSession;
+    if (!session) {
+      return { statusCode: 409, payload: { error: "no live session" } };
+    }
+    if (!session.ready) {
+      return { statusCode: 409, payload: { error: "no ready session" } };
+    }
+    if (session.closed) {
+      return { statusCode: 409, payload: { error: "session closed" } };
+    }
+
+    let envelope: ReturnType<typeof parseRequestEnvelope>;
+    try {
+      const candidate = typeof body === "object" && body !== null
+        ? { type: "request", protocol: "reach-rpc", version: "1.0", sessionId: session.sessionId, ...(body as Record<string, unknown>) }
+        : body;
+      envelope = parseRequestEnvelope(candidate);
+      if (envelope.sessionId !== session.sessionId) throw new ContractError();
+    } catch {
+      return { statusCode: 400, payload: { type: "error", error: { code: "INVALID_PARAMS" } } };
+    }
+
+    let invocation: ReturnType<typeof canonicalizeInvocation>;
+    try {
+      invocation = canonicalizeInvocation(envelope.method, envelope.params);
+    } catch {
+      return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
+    }
+    try {
+      // Reject nested/pathological `tool.call` before any grant lookup so the
+      // response code never depends on grant state (kills the
+      // PERMISSION_DENIED-vs-INVALID_PARAMS oracle). Single-level `tool.call`
+      // remains visible to `leafMutation` for grant validation.
+      const mutation = leafMutation(invocation);
+      if (mutation) {
+        const permission = permissionSchema.safeParse(envelope.permission);
+        if (
+          !permission.success
+          || !grants.matches(permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path)
+        ) {
+          return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };
+        }
+      }
+    } catch {
+      return { statusCode: 400, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
+    }
+
+    const deadlineMs = Math.min(receivedAt + sessionRpcTimeoutMs, envelope.deadlineAt ? Date.parse(envelope.deadlineAt) : Infinity);
+    if (deadlineMs <= now()) {
+      return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "DEADLINE_EXCEEDED" } } };
+    }
+    try {
+      const reply = await forwardToEngine({
+        deadlineAt: isoDate(deadlineMs),
+        type: "request",
+        protocol: envelope.protocol,
+        version: envelope.version,
+        sessionId: envelope.sessionId,
+        requestId: envelope.requestId,
+        method: envelope.method,
+        params: envelope.params,
+        ...(envelope.permission ? { permission: envelope.permission } : {}),
+      }, deadlineMs === receivedAt + sessionRpcTimeoutMs);
+      return { statusCode: 200, payload: reply };
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "session rpc failed";
+      const status = message === "no ready session" || message === "duplicate requestId" ? 409 : 503;
+      return { statusCode: status, payload: { error: message } };
     }
   };
 
@@ -484,6 +572,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
           return;
         }
         engineVersion = heartbeat.device.engineVersion;
+        lastSeenAt = isoDate(now());
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
         return;
@@ -576,90 +665,11 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     }
 
     if (request.url === "/session/rpc") {
-      const session = liveSession;
-      if (!session) {
-        sendJson(response, 409, { error: "no live session" });
-        return;
-      }
-      if (!session.ready) {
-        sendJson(response, 409, { error: "no ready session" });
-        return;
-      }
-      if (session.closed) {
-        sendJson(response, 409, { error: "session closed" });
-        return;
-      }
-
-      let body: unknown;
       try {
-        body = await readJsonBody(request);
+        const result = await executeRpc(await readJsonBody(request), receivedAt);
+        sendJson(response, result.statusCode, result.payload);
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid rpc payload" });
-        return;
-      }
-
-      let envelope: ReturnType<typeof parseRequestEnvelope>;
-      try {
-        const candidate = typeof body === "object" && body !== null
-          ? { type: "request", protocol: "reach-rpc", version: "1.0", sessionId: session.sessionId, ...(body as Record<string, unknown>) }
-          : body;
-        envelope = parseRequestEnvelope(candidate);
-        if (envelope.sessionId !== session.sessionId) throw new ContractError();
-      } catch {
-        sendJson(response, 400, { type: "error", error: { code: "INVALID_PARAMS" } });
-        return;
-      }
-
-      let invocation: ReturnType<typeof canonicalizeInvocation>;
-      try {
-        invocation = canonicalizeInvocation(envelope.method, envelope.params);
-      } catch {
-        sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } });
-        return;
-      }
-      try {
-        // Reject nested/pathological `tool.call` before any grant lookup so the
-        // response code never depends on grant state (kills the
-        // PERMISSION_DENIED-vs-INVALID_PARAMS oracle). Single-level `tool.call`
-        // remains visible to `leafMutation` for grant validation.
-        const mutation = leafMutation(invocation);
-        if (mutation) {
-          const permission = permissionSchema.safeParse(envelope.permission);
-          if (
-            !permission.success
-            || !grants.matches(permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path)
-          ) {
-            sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } });
-            return;
-          }
-        }
-      } catch {
-        sendJson(response, 400, { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } });
-        return;
-      }
-
-      const deadlineMs = Math.min(receivedAt + sessionRpcTimeoutMs, envelope.deadlineAt ? Date.parse(envelope.deadlineAt) : Infinity);
-      if (deadlineMs <= now()) {
-        sendJson(response, 200, { type: "error", requestId: envelope.requestId, error: { code: "DEADLINE_EXCEEDED" } });
-        return;
-      }
-      try {
-        const reply = await forwardToEngine({
-          deadlineAt: isoDate(deadlineMs),
-          type: "request",
-          protocol: envelope.protocol,
-          version: envelope.version,
-          sessionId: envelope.sessionId,
-          requestId: envelope.requestId,
-          method: envelope.method,
-          params: envelope.params,
-          ...(envelope.permission ? { permission: envelope.permission } : {}),
-        }, deadlineMs === receivedAt + sessionRpcTimeoutMs);
-        sendJson(response, 200, reply);
-      } catch (error) {
-        const message = error instanceof Error ? error.message : "session rpc failed";
-        const status = message === "no ready session" || message === "duplicate requestId" ? 409 : 503;
-        sendJson(response, status, { error: message });
       }
       return;
     }
@@ -861,7 +871,26 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     clearPendingRpcs("gateway closed");
     liveSession?.socket.terminate();
   });
-  return gateway;
+  const binding = (sessionId: string): boolean => sessionId === (liveSession?.sessionId ?? pendingSession?.sessionId ?? wantedSessionId);
+  const mismatch = (): EngineResult => ({ statusCode: 409, payload: { error: "session binding mismatch" } });
+  const api: EngineApi = {
+    status: sessionStatus,
+    open: (sessionId) => {
+      const result = openSession(sessionId);
+      return { ...result, payload: { ...result.payload, ...(result.statusCode === 200 ? { sessionId: wantedSessionId } : {}) } };
+    },
+    renew: (sessionId) => binding(sessionId) ? renewSession() : mismatch(),
+    close: (sessionId) => binding(sessionId) ? requestClose() : mismatch(),
+    grant: (sessionId, workspace, path, method) => {
+      if (!binding(sessionId)) return mismatch();
+      const parsed = grantRequestSchema.safeParse({ workspace, path, methods: [method] });
+      const normalized = normalizeWorkspacePath(path);
+      if (!parsed.success || !normalized) return { statusCode: 400, payload: { error: "invalid grant payload" } };
+      return { statusCode: 200, payload: grants.issue(workspace, normalized, [method]) };
+    },
+    rpc: (body) => executeRpc(body, now()),
+  };
+  return { server: gateway, api };
 }
 
 async function readOptionalJsonBody(request: IncomingMessage): Promise<unknown> {

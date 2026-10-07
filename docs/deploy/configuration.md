@@ -94,8 +94,15 @@ PY
 | `REACH_ENGINES_FILE` | 无 | 额外 Engine 的私有注册表；Compose 示例挂载到 `/run/reach/engines.json` |
 | `REACH_HEARTBEAT_INTERVAL_SECS` | `120` | 单位秒，正整数；可按需设置为 `15` |
 | `REACH_HTTP_LOG` | 关闭 | `1` 启用请求路径、状态与耗时日志 |
+| `REACH_MCP_ALLOWED_ORIGINS` | 空 | HTTP MCP 允许的完整 Origin，逗号分隔；默认拒绝带 Origin 的请求，无该头的云端客户端正常使用 |
+| `REACH_MCP_SESSION_IDLE_MS` | `300000` | HTTP MCP 空闲过期时间；过期关闭所持有的 Engine 会话 |
+| `REACH_MCP_RESPONSE_TIMEOUT_MS` | `25000` | HTTP MCP 响应预算，覆盖请求体读取、排队和执行 |
+| `REACH_MCP_MAX_SESSIONS` | `128` | HTTP MCP 会话总上限，含待清理会话 |
+| `REACH_MCP_MAX_QUEUE` | `16` | 每个 HTTP MCP 会话正在读取请求体、排队和运行的请求总上限，满时返回 429 |
 
 三项认证配置只设置其中一项会启动失败；非回环监听必须启用认证。Docker 内监听所有容器接口不等于公开 VPS 端口，公开范围由 Compose 的 `127.0.0.1:28787:8787` 决定。
+
+HTTP MCP 与 REST Controller 共用 `REACH_CONTROLLER_TOKEN`，不使用独立 MCP token。上述 HTTP 时间与数量必须为正的安全整数；它们与 stdio Connector 的 readiness/request 参数分别生效。
 
 ## Engine 环境变量
 

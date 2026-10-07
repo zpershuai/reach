@@ -28,7 +28,7 @@ tar -czf /tmp/reach-gateway-release.tgz \
   packages/reach-rpc/dist
 ```
 
-镜像运行时安装 `ws`、`zod` 等生产依赖，因此 VPS 的 Docker 构建需要能够拉取 Node 基础镜像并访问 npm。MCP Connector 和 Rust Engine 不在这个镜像中。
+镜像运行时安装 `ws`、`zod` 等生产依赖，因此 VPS 的 Docker 构建需要能够拉取 Node 基础镜像并访问 npm。共享 MCP 核心和 HTTP `/mcp` 随 `reach-rpc/dist` 一起进入镜像；独立 stdio Connector 入口和 Rust Engine 不在这个镜像中。
 
 ## 2. 上传到 VPS
 

@@ -1,6 +1,6 @@
 # Reach 三组件部署文档
 
-本套文档对应当前仓库的 Model B 实现：Gateway 部署在 VPS，Engine 运行在文件所在设备，MCP Connector 由 MCP 客户端启动。下文提供 Docker Compose/Caddy、macOS LaunchAgent、Linux systemd 与 OpenWrt procd 的通用安装流程。示例域名使用 `example.com`，账号与绝对路径均须替换为自己的配置。
+本套文档对应当前仓库的 Model B 实现：Gateway 部署在 VPS，Engine 运行在文件所在设备，桌面 MCP Connector 由客户端启动，远程 MCP 客户端连接 Gateway `/mcp`。下文提供 Docker Compose/Caddy、macOS LaunchAgent、Linux systemd 与 OpenWrt procd 的通用安装流程。示例域名使用 `example.com`，账号与绝对路径均须替换为自己的配置。
 
 ## 阅读顺序
 
@@ -11,7 +11,7 @@
 | [Engine 部署](engine.md) | Mac 构建、工作区、后台安装、启动与停止 |
 | [Linux Engine](linux.md) | VPS 和家庭 server 安装、systemd 系统与用户服务 |
 | [OpenWrt 与多设备](openwrt.md) | 路由器安装、私有 Node 库、一个 Gateway 管理多个 Engine |
-| [MCP 安装](mcp.md) | 通用 stdio MCP 安装、客户端配置、动态与静态工具 |
+| [MCP 安装](mcp.md) | Grok Bot 远程 HTTP 插件、通用 stdio 安装、客户端配置 |
 | [部署验证](verification.md) | 源码检查、公网 RPC、安装后的 MCP、故障恢复验证 |
 | [运维与回滚](operations.md) | 升级、备份、凭证轮换、日志、回滚与停用 |
 | [Node runtime](node-runtime.md) | 安装交付策略、JS 启动入口与 Rust Engine 的执行边界 |
@@ -25,6 +25,7 @@
 flowchart LR
     Host[支持本地 MCP 的客户端] -->|stdio| MCP[Reach MCP Connector]
     MCP -->|HTTPS / Controller token| Caddy[VPS Caddy :443]
+    Cloud[Grok Bot / 远程 MCP 客户端] -->|HTTPS /mcp / Controller token| Caddy
     Caddy -->|HTTP / 回环 :28787| Gateway[Gateway 容器 :8787]
     Engine[设备上的 Rust Engine] -->|HTTPS 心跳 / Engine token| Caddy
     Engine -->|按需 WSS / 单次 session token| Caddy
@@ -37,14 +38,14 @@ flowchart LR
 | Engine | 执行工作区内的 `fs.*` 请求 | LaunchAgent / systemd / procd | 文件保存在设备工作区 |
 | MCP Connector | 将 MCP 工具调用转换为 Gateway 请求 | MCP 客户端启动本地 Node 进程 | 私有设备配置；不存放远程工作区文件 |
 
-MCP 是一个通用 stdio 服务，安装入口为 [mcp.md](mcp.md)。它不需要独立公网域名、HTTP 监听端口或 VPS 容器。客户端可以和 Engine 位于同一台 Mac，也可以位于另一台可访问 Gateway 的电脑。
+MCP 安装入口为 [mcp.md](mcp.md)。桌面 stdio Connector 由客户端启动；远程 HTTP MCP 在 Gateway 内运行，复用现有域名、监听端口与 VPS 容器。设备文件由 stdio 客户端配置；HTTP 直接展示 Gateway 注册的 Engine。
 
 ## 首次部署顺序
 
 1. 确定域名、Engine 标识和工作区，按 [configuration.md](configuration.md) 生成两份独立凭证与配置。
 2. 构建 Gateway 的 TypeScript 产物，上传 VPS，启动 Compose，再接入 Caddy。
 3. 为目标设备构建 Rust Engine，按操作系统安装后台服务并检查心跳。
-4. 安装 MCP Connector，把生成的启动配置加入 MCP 客户端。
+4. 桌面客户端安装 stdio Connector；远程客户端配置 HTTPS `/mcp` 或安装 Grok Bot 插件。
 5. 在没有其他活动会话时执行公网与 MCP 验证；需要验收恢复能力时再执行故障注入。
 
 已有部署沿用自己的私有配置；升级步骤见 [运维与回滚](operations.md)。所有命令默认从仓库根目录执行，标注“VPS”的命令在服务器执行。真实主机、账号、地址、部署记录与备份位置只保存在 Git 忽略的 `.reach/` 或仓库外，不写入公开文档。
