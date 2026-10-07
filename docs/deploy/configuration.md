@@ -4,13 +4,13 @@
 
 | 项目 | 本套示例 | 要求 |
 | --- | --- | --- |
-| Gateway URL | `https://gateway.example.com` | 使用独立域名根路径，不附加 `/reach` 等路径 |
-| VPS SSH | `root@vps.example.com` | 有发布目录写权限及 Docker、Caddy 管理权限 |
-| 发布目录 | `/srv/reach-current` | Compose 项目目录固定，避免重复启动同名服务 |
-| Engine ID | `mac-engine-a` | Gateway 和 Engine 配置必须一致 |
+| Gateway URL | `https://reach.example.com` | 使用独立域名根路径，不附加 `/reach` 等路径 |
+| VPS SSH | `deploy@gateway.example.com` | 有发布目录写权限及 Docker、Caddy 管理权限 |
+| 发布目录 | `/srv/reach` | Compose 项目目录固定，避免重复启动同名服务 |
+| Engine ID | `engine-a` | Gateway 和 Engine 配置必须一致 |
 | 工作区 | `default:$HOME/.reach/workspace` | 在配置文件中写实际绝对路径，不保留字面量 `$HOME` |
 | 开发工具 | Node.js 24、npm、稳定版 Rust、Python 3 | 本仓库已在 Node 24、macOS/Linux 的 CI 路径验证；Mac 后台安装需要登录的 GUI 用户 |
-| VPS 工具 | Docker Engine、Compose 插件、Caddy | 现有 VPS 已安装；新主机需先准备这些工具 |
+| VPS 工具 | Docker Engine、Compose 插件、Caddy | 在目标服务器预先安装这些工具 |
 
 在本机检查 `node --version`、`npm --version`、`cargo --version`、`python3 --version`；VPS 检查 `docker version`、`docker compose version`、`caddy version`。Engine 二进制需在目标平台构建，不可把 Mac 二进制复制给 Linux。
 
@@ -40,8 +40,8 @@ import secrets
 import shlex
 from pathlib import Path
 
-gateway_url = 'https://gateway.example.com'
-engine_id = 'mac-engine-a'
+gateway_url = 'https://reach.example.com'
+engine_id = 'engine-a'
 workspace = str(Path.home() / '.reach/workspace')
 directory = Path('.reach')
 names = ['deployment.json', 'gateway.env', 'engine.env', 'devices.json', 'engines.json']
@@ -66,7 +66,7 @@ contents = {
     'deployment.json': json.dumps(deployment, indent=2) + '\n',
     'gateway.env': ''.join(f'{key}={value}\n' for key, value in gateway_env.items()),
     'engine.env': ''.join(f'{key}={shlex.quote(value)}\n' for key, value in engine_env.items()),
-    'devices.json': json.dumps([dict(id=engine_id, gatewayUrl=gateway_url,
+    'devices.json': json.dumps([dict(id=engine_id, engineId=engine_id, gatewayUrl=gateway_url,
                                     controllerToken=controller)], indent=2) + '\n',
 }
 for name, content in contents.items():
@@ -74,13 +74,13 @@ for name, content in contents.items():
     with target.open('x') as output:
         target.chmod(0o600)
         output.write(content)
-print('已生成 .reach/ 下四份配置，凭证未打印。')
+print('已生成 .reach/ 下五份私有配置，凭证未打印。')
 PY
 ```
 
 `.reach/deployment.json` 是验证脚本使用的私有配置，包含 URL、Engine ID、两份 token 和实际工作区绝对路径。它应留在验证机器上，不放入 Docker 镜像、文档或客户端共享配置。
 
-`.reach/` 与 `deploy/*.env` 已加入 Git 忽略；Docker 构建上下文也排除这些私有配置。另行保存配置时仍需自行检查权限和提交范围。备份应包含私有配置和工作区，并存放在仅自己可访问的位置。
+`.reach/`、`deploy/*.env` 与实际设备注册表 `deploy/engines.json` 已加入 Git 忽略；Docker 构建上下文也排除这些私有配置。另行保存配置时仍需自行检查权限和提交范围。备份应包含私有配置和工作区，并存放在仅自己可访问的位置。
 
 ## Gateway 环境变量
 
@@ -90,8 +90,9 @@ PY
 | `GATEWAY_PORT` | `8787` | 1–65535 的整数；改动后同步端口映射与健康检查 |
 | `REACH_CONTROLLER_TOKEN` | 无 | 与以下两项一起设置 |
 | `REACH_ENGINE_TOKEN` | 无 | 必须不同于 Controller token |
-| `REACH_ENGINE_ID` | 无 | 当前 `mac-engine-a` |
-| `REACH_HEARTBEAT_INTERVAL_SECS` | `120` | 当前远程部署设置 `15`，单位秒，正整数 |
+| `REACH_ENGINE_ID` | 无 | 默认 Engine 的唯一标识，例如 `engine-a` |
+| `REACH_ENGINES_FILE` | 无 | 额外 Engine 的私有注册表；Compose 示例挂载到 `/run/reach/engines.json` |
+| `REACH_HEARTBEAT_INTERVAL_SECS` | `120` | 单位秒，正整数；可按需设置为 `15` |
 | `REACH_HTTP_LOG` | 关闭 | `1` 启用请求路径、状态与耗时日志 |
 
 三项认证配置只设置其中一项会启动失败；非回环监听必须启用认证。Docker 内监听所有容器接口不等于公开 VPS 端口，公开范围由 Compose 的 `127.0.0.1:28787:8787` 决定。
@@ -114,8 +115,8 @@ PY
 
 MCP 的全部环境变量见 [mcp.md](mcp.md)。
 
-## 域名与签名的版本边界
+## 域名与认证边界
 
-当前部署的域名服务是 Caddy 的 HTTPS 入口，Engine 通过同一域名获得 HTTPS/WSS 服务；不需要 Engine 专属域名。
+Gateway 通过 HTTPS 域名提供控制接口，Engine 通过同一 origin 建立 HTTPS/WSS 连接；不需要每台 Engine 单独配置域名。
 
-当前源码使用独立 bearer token 与 Gateway 内存 grant，没有 Ed25519 签名授权或 Agent assertion 验证流程。旧 VPS 部署中保留了这些功能，见 [当前部署记录](current-deployment.md)。新旧 token、签名密钥和 assertion 不能混用。将域名代理切回旧服务，只改变流量路由，不会迁移认证配置或会话。
+源码使用独立 bearer token 与 Gateway 内存 grant，没有 Ed25519 签名授权或 Agent assertion 验证流程。与其他协议实现迁移时，应分别确认认证、客户端和配置格式的兼容性；更换代理目标不会自动迁移凭证或会话。

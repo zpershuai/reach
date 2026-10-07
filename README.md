@@ -2,7 +2,7 @@
 
 Gateway, device Engine, and a generic MCP connector. Protocol: reach-rpc/1.0.
 
-Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clients: [installation instructions](docs/deploy/mcp.md). Deployment history: [verification record](docs/deploy/current-deployment.md).
+Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clients: [installation instructions](docs/deploy/mcp.md). Validation: [deployment checklist](docs/deploy/deployment-checklist.md).
 
 MCP, Engine and Gateway have independent release versions, exposed through `--version`, Gateway health/session status and the MCP `get_versions` tool. See [component versions and upgrades](docs/deploy/versions.md).
 
@@ -96,7 +96,7 @@ Control API summary:
 
 ## Engine Runtime behavior
 
-- While no session is wanted the Engine posts a heartbeat every **120s** by default; the current remote deployment sets `REACH_HEARTBEAT_INTERVAL_SECS=15`. Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
+- While no session is wanted the Engine posts a heartbeat every **120s** by default; configure `REACH_HEARTBEAT_INTERVAL_SECS` to adjust it. Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
 - The lease `endpoint` is a Gateway-relative path (`/session`); the Engine resolves it against its **configured** Gateway origin and refuses a lease that points anywhere else.
 - After opening the WebSocket the Engine sends `session.ready` (protocol/version, Engine id, workspace names, supported methods). The Gateway forwards no data-plane request until it has seen a valid `ready`.
 - Tools execute serially on one worker while the Runtime continues receiving close/renew control messages. Close, lease expiry, rotation, or the hard RPC execution timeout sets a cooperative cancellation flag, drops queued work, drains the worker, and then releases the session. An atomic mutation already past its commit boundary may finish.

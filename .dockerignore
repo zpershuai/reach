@@ -3,4 +3,5 @@
 target
 **/node_modules
 deploy/*.env
+deploy/engines.json
 **/*.log

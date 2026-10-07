@@ -29,31 +29,31 @@ HTTP 409/503 是状态码分类，实际错误应以响应体为准；不会所�
 在本地检查公网，在 VPS 检查回环：
 
 ```bash
-curl --fail --silent --show-error https://gateway.example.com/healthz
-ssh root@vps.example.com 'curl --fail --silent --show-error http://127.0.0.1:28787/healthz'
-ssh root@vps.example.com 'journalctl -u caddy -n 80 --no-pager'
-ssh root@vps.example.com 'caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
+curl --fail --silent --show-error https://reach.example.com/healthz
+ssh deploy@gateway.example.com 'curl --fail --silent --show-error http://127.0.0.1:28787/healthz'
+ssh deploy@gateway.example.com 'journalctl -u caddy -n 80 --no-pager'
+ssh deploy@gateway.example.com 'caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile'
 ```
 
-当前 `mcp.example.com` 仍路由到旧 MCP 服务，不是新版 stdio Connector 的入口。新版客户端设备 URL 使用 `https://gateway.example.com`。
+MCP Connector 是本地 stdio 进程，设备 URL 应指向 Gateway 的 HTTPS 根入口，例如 `https://reach.example.com`。
 
 不能将 Engine base URL 配成 `/session`、带业务前缀或重定向入口。Engine 和 Connector 不跟随认证请求的重定向；WSS endpoint 必须属于配置 origin。若使用额外 CDN/代理，需确认它支持 WSS 升级、保持路径与连接时限，不能仅靠首页可访问判断。
 
 ## Gateway 与认证
 
 ```bash
-ssh root@vps.example.com 'cd /srv/reach-current/deploy && docker compose ps'
-ssh root@vps.example.com 'cd /srv/reach-current/deploy && docker compose logs --tail 100 gateway'
+ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose ps'
+ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose logs --tail 100 gateway'
 ```
 
-容器内运行 `0.0.0.0:8787`，宿主检查端口为 `127.0.0.1:28787`。旧部署仍可能占用宿主回环 8787；检查错端口会得到另一套协议和认证结果。
+容器内运行 `0.0.0.0:8787`，宿主检查端口为 `127.0.0.1:28787`。部署其他服务时应检查端口冲突；状态检查需使用 Compose 映射的实际端口。
 
 修改 env 后只 `restart` 容器不能生效，使用 `up -d gateway` 重建环境。不要运行会输出完整环境变量的诊断命令并把输出贴到聊天。认证完整验收用 [verify-remote.mjs](verification.md)，它只报告检查结果。
 
 ## Engine 后台启动
 
 ```bash
-launchctl print "gui/$(id -u)/com.example.reach-engine"
+launchctl print "gui/$(id -u)/org.reach.engine"
 tail -n 80 "$HOME/.local/share/reach/engine.log"
 tail -n 80 "$HOME/.local/share/reach/engine-error.log"
 ```
@@ -64,7 +64,7 @@ tail -n 80 "$HOME/.local/share/reach/engine-error.log"
 
 ## 会话与心跳
 
-Engine 空闲阶段只有心跳，Controller 发起 open 后，下次心跳才触发 WSS。当前心跳间隔 15 秒，默认源码值 120 秒；因此不能要求选择设备后立即 ready。
+Engine 空闲阶段只有心跳，Controller 发起 open 后，下次心跳才触发 WSS。空闲心跳默认 120 秒，可通过配置调小；因此不能要求选择设备后立即 ready。
 
 session token 单次有效且 30 秒过期。不要复制 token 手动重复连接或把旧 WebSocket 当作可恢复会话。Gateway/Engine 重启、租约到期或旋转后应打开新会话；旧 grant 可能已失效。
 
@@ -78,7 +78,7 @@ session token 单次有效且 30 秒过期。不要复制 token 手动重复连�
 
 动态模式只有成功 `pick_device` 后才出现文件工具；静态模式每次文件工具调用都需 `deviceId`。更改模式、设备 JSON 或客户端环境后重启 Connector。
 
-安装后的 MCP 验证器固定要求动态模式、`mcpServers.reach`、匹配 Engine ID 的设备别名和本机工作区路径；不满足这些前置条件时，先修正验证配置，见 [verification.md](verification.md)。
+安装后的 MCP 验证器固定要求动态模式、`mcpServers.reach`、配置的设备别名；本机文件核对需另提供可读的工作区路径；不满足这些前置条件时，先修正验证配置，见 [verification.md](verification.md)。
 
 ## 文件结果
 

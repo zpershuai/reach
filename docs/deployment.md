@@ -9,4 +9,4 @@
 - [部署验证](deploy/verification.md)
 - [运维与回滚](deploy/operations.md)
 - [故障排查](deploy/troubleshooting.md)
-- [当前部署与历史验收](deploy/current-deployment.md)
+- [部署检查清单](deploy/deployment-checklist.md)

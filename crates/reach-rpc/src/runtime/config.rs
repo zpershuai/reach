@@ -404,7 +404,7 @@ mod tests {
     fn rejects_non_loopback_gateways_and_accepts_loopback_variants() {
         for url in [
             "http://reach.example:8787",
-            "http://192.0.2.1:8787",
+            "http://192.0.2.10:8787",
             "http://[::2]:8787",
         ] {
             assert!(GatewayConfig::new(url).is_err(), "{url}");
