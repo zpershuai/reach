@@ -64,7 +64,8 @@ document = json.loads(target.read_text()) if target.exists() else {}
 server = document.setdefault('mcpServers', {}).setdefault('reach', {})
 server.update(command=node, args=[directory + '/mcp/dist/main.js'])
 environment = server.setdefault('env', {})
-environment.update(REACH_MCP_DEVICES_FILE=config + '/mcp-devices.json', REACH_NODE_BIN=node)
+environment.update(REACH_MCP_DEVICES_FILE=config + '/mcp-devices.json')
+environment.pop('REACH_NODE_BIN', None)
 environment.setdefault('REACH_MCP_READY_POLL_MS', '1000')
 target.write_text(json.dumps(document, indent=2) + '\n')
 target.chmod(0o600)
@@ -76,8 +77,6 @@ set -euo pipefail
 set -a
 source "$HOME/.config/reach/engine.env"
 set +a
-export REACH_NODE_BIN="$HOME/.reach/runtime/node/bin/node"
-export PATH="$(dirname "$REACH_NODE_BIN"):$PATH"
 exec "$HOME/.local/share/reach/engine"
 ENGINE_START
 chmod 700 "$engine_dir/start-engine.sh"

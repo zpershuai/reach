@@ -5,6 +5,7 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 python3 scripts/test-node-runtime.py
+python3 scripts/test-node-launcher.py
 cargo fmt --all -- --check
 cargo test --workspace --locked
 npm --prefix packages/reach-rpc test

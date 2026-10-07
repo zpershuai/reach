@@ -82,7 +82,7 @@ Node 版本和各平台 SHA-256 固定在 [node-runtime.json](../../scripts/node
 
 运行文件目录和配置目录均设为 700。MCP 安装的细节见 [mcp.md](mcp.md)。
 
-Engine 启动 wrapper 设置 `REACH_NODE_BIN` 为上述 Node 绝对路径，并把 runtime 的 `bin` 加到 PATH。Gateway 和 MCP 在同一台设备上可共用它：
+Rust Engine 独立运行，不设置 Node 相关的服务环境。安装器另提供 `run-node.sh`，同一主机上的 Gateway/MCP 可通过它使用私有 Node；`REACH_NODE_BIN` 只作为 launcher 的可执行程序路径覆盖项。设计说明见 [Node runtime](node-runtime.md)。
 
 ```bash
 "$HOME/.local/share/reach/run-node.sh" /absolute/path/to/gateway-main.js

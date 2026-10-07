@@ -52,8 +52,6 @@ set -euo pipefail
 set -a
 source "$HOME/.config/reach/engine.env"
 set +a
-export REACH_NODE_BIN="$HOME/.reach/runtime/node/bin/node"
-export PATH="$(dirname "$REACH_NODE_BIN"):$PATH"
 exec "$HOME/.local/share/reach/engine"
 START_ENGINE
 chmod 700 "$engine_dir/start-engine.sh"
