@@ -1,8 +1,42 @@
 # Reach MCP 安装与客户端配置
 
-Reach MCP Connector 是通用 stdio MCP 服务。支持本地 MCP 子进程的客户端启动它，通过 HTTPS 调用 Gateway，再由 Engine 执行文件工具。此组件按客户端进程生命周期运行，无需配置独立域名或常驻系统服务。
+Reach 提供两种 MCP 接入：桌面客户端启动本地 stdio Connector；Grok Bot 等远程客户端连接 Gateway 的 HTTPS `/mcp`。两种方式都由 Engine 执行文件工具。HTTP 方式复用 Gateway 的端口、域名和容器，无需额外服务。
 
 仓库路径 `packages/grok-bot-mcp-connector` 和 npm package 名保留历史命名，实际 MCP server 名为 `reach-mcp`。下面的配置可用于支持该传输方式的 MCP 客户端。
+
+## Grok Bot（remote HTTP）
+
+先构建并更新 Gateway，再安装仓库的 [grok-bot-plugin](../../grok-bot-plugin/README.md) 目录。设置 Gateway HTTPS 根 URL 与 **Controller token**，不用 Engine token，也不需要 `REACH_MCP_DEVICES` 或本地 Node 进程。通用客户端配置：
+
+```json
+{
+  "mcpServers": {
+    "reach": {
+      "type": "http",
+      "url": "https://reach.example.com/mcp",
+      "headers": { "Authorization": "Bearer <controller-token>" }
+    }
+  }
+}
+```
+
+真实凭证只存客户端私有设置。Controller token 可读写全部注册 Engine 工作区。插件用 `${REACH_GATEWAY_URL}` 构造 URL；Grok Bot 的 URL 插值仍需在实际客户端确认，若不支持，在私有插件副本中填入完整 URL。不要把真实 URL 或 token 提交到仓库。
+
+HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`session_close`。文件工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
+
+首次 `pick_device` 或文件调用立即创建连接意图；未 ready 时返回 `{"status":"connecting","retryAfterMs":1000}`，文件操作尚未执行。按返回间隔调用 `device_status`，直到 `ready` 且 `owned: true`，再执行文件工具。状态查询不会重新打开或取消意图。默认空闲心跳仍是 120 秒；可将 Gateway 的 `REACH_HEARTBEAT_INTERVAL_SECS` 设置为 `15`，代价是更多网络流量和设备耗电。
+
+一个 HTTP MCP 会话可以分别持有多个 Engine。竞争同一个 Engine 返回 `ENGINE_BUSY`，不会自动抢占。完成后逐个调用 `session_close`；客户端 `DELETE /mcp`、MCP 空闲过期也会关闭其持有的 Engine 会话。清理只针对绑定的会话身份，失败会保留待清理记录并重试。
+
+`session_close` 不会关闭其他调用者持有的 Engine；当前 MCP 会话没有持有该设备而设备仍被占用时，返回 `ENGINE_BUSY`。会话退役后立即安排清理，读取请求体期间的 POST 和仍在排队的请求不得再启动工具，返回 404；已经执行的操作结束后再清理，超时不表示写入已取消。
+
+初始化返回 `Mcp-Session-Id`，后续请求需携带它；丢失返回 400，未知或过期返回 404，客户端需重新初始化。支持 MCP `2025-03-26` 与 `2025-06-18`，后续 `MCP-Protocol-Version` 必须匹配协商版本。通知返回空 202；GET 返回 405，当前不提供 SSE。静态 HTTP 列表不发送工具变化通知；stdio 的动态模式不受影响。
+
+默认响应预算 25 秒，包含排队和执行；MCP 空闲 TTL 为 5 分钟。HTTP JSON **总请求体**最多 64 KiB，包含转义和元数据，Caddy 的现有 `max_size 64KB` 无需修改。WebSocket 上限仍是 1 MiB。写入前读取 `revision`，覆盖/编辑时传 `ifMatch`，新文件用 `mode: create`。超时后先重新读取，不能假设写入未提交或直接重试。
+
+64 KiB 按收到的 HTTP 请求体计算，Gateway 添加的内部会话、权限和截止时间字段不会减少这份额度。读取请求体、排队和正在执行的请求共同计入每会话请求上限；读取请求体期间不会触发空闲过期，但仍受响应预算约束。
+
+所有方法都检查 Controller token；无认证只允许回环监听。默认拒绝带有 `Origin` 的请求，无该头的客户端可正常连接。接入时必须在实际宿主核对该请求头；若发送，在 Gateway 配置 `REACH_MCP_ALLOWED_ORIGINS` 为观察到并批准的完整 Origin，多个值用逗号分隔；若不发送，保留空配置。不要使用通配符或关闭检查，核对时不要记录 Authorization。HTTP 参数见 [configuration.md](configuration.md)，完整验证见 [verification.md](verification.md)。以下方式 A–C 专用于 stdio。
 
 ## 方式 A：使用已安装的产物
 

@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "reach": {
+      "type": "http",
+      "url": "${REACH_GATEWAY_URL}/mcp",
+      "headers": {
+        "Authorization": "Bearer ${REACH_CONTROLLER_TOKEN}"
+      }
+    }
+  }
+}

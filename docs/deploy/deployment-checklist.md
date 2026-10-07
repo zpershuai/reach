@@ -10,6 +10,7 @@
 - 使用与设备架构匹配的二进制，安装私有 Node runtime。
 - 选择 LaunchAgent、systemd 或 procd 托管 Engine，并检查启动策略。
 - 配置 MCP 的设备别名、`engineId`、Gateway URL 和私有设备文件。
+- HTTP MCP 插件配置 HTTPS `/mcp` URL 和私有 Controller token。接入时核对实际客户端是否发送 `Origin`；若发送，将观察到的完整 Origin 配入 `REACH_MCP_ALLOWED_ORIGINS`，若不发送，保留空配置。不要使用通配符或关闭 Origin 检查；核对请求头时不要保存或公开 Authorization。
 
 ## 验证
 
@@ -19,6 +20,7 @@
 - 多台 Engine 的会话、grant 和 RPC 相互隔离。
 - 工作区越界访问被拒绝，关闭一台设备会话不影响其他设备。
 - 实际安装的 MCP 可以列出、选择设备并查询组件版本。
+- HTTP MCP 运行验证脚本，并在实际 Grok Bot 宿主中确认 URL 插值、token 私有存储、Origin 配置、列设备和读取已知文件。
 - 验证后关闭自己创建的会话。
 
 运行方式见 [部署验证](verification.md)。测试文件和报告保留在私有目录，公开发布记录只描述通用功能与测试结果。

@@ -149,9 +149,11 @@ New Agents must use explicit session control (`/session/open`, `/session/renew`,
 
 HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. Every RPC request must be a complete `reach-rpc/1.0` envelope; controllers may omit `sessionId` on `POST /session/rpc` and the Gateway binds the live session id. Write grants are validated before forward (issuance, path scope, method scope, expiry) and cannot be bypassed by nesting `tool.call`.
 
-## Out of scope (for now)
+## Multiple Engines and remote MCP
 
 One Gateway can manage multiple registered Engines, each with its own credential, session, lease, grants and RPC state. Controller requests select an Engine with `?engineId=...`; requests without it target the default Engine. MCP device entries use `engineId` to route through a shared Gateway. See [OpenWrt and multi-device deployment](docs/deploy/openwrt.md).
+
+Remote MCP clients connect to the same Gateway's HTTPS `/mcp` using the Controller token. The endpoint exposes static underscore filesystem tools, discovers registered Engines and returns promptly while idle devices connect. HTTP MCP sessions have identity-bound ownership, bounded requests, and DELETE/idle cleanup. Desktop stdio clients remain supported. See [MCP installation](docs/deploy/mcp.md) and the [Grok Bot plugin](grok-bot-plugin/README.md).
 
 
 ## RPC deadlines and retry behavior
