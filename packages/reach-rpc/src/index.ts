@@ -300,3 +300,5 @@ export function parseSessionMessage(input: unknown): SessionMessage {
 export function serializeSessionMessage(message: SessionMessage): string {
   return JSON.stringify(parseSessionMessage(message));
 }
+
+export * from "./process-contract.js";

@@ -5,8 +5,15 @@ use std::fmt;
 /// Engine release version, compiled from its package manifest.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod cancel;
 pub mod dispatch;
 pub mod process;
+pub mod process_contract;
+pub use process_contract::{
+    ListParams as ProcessListParams, LogsParams as ProcessLogsParams, ProcessListResult,
+    ProcessLogsResult, RunParams as ProcessRunParams, StatusParams as ProcessStatusParams,
+    StopParams as ProcessStopParams, TaskStatus as ProcessTask,
+};
 pub mod runtime;
 pub mod session;
 pub mod tools;
@@ -104,7 +111,11 @@ pub struct RequestEnvelope {
 
 pub fn parse_request_envelope(input: &str) -> Result<RequestEnvelope, ContractError> {
     let value: Value = serde_json::from_str(input).map_err(|_| ContractError)?;
-    if value.get("permission").is_some_and(Value::is_null)
+    if (value.get("permission").is_some_and(Value::is_null)
+        || value
+            .get("permission")
+            .and_then(|p| p.get("kind"))
+            .is_some_and(Value::is_null))
         || value.get("deadlineAt").is_some_and(Value::is_null)
     {
         return Err(ContractError);
@@ -121,10 +132,13 @@ pub fn parse_request_envelope(input: &str) -> Result<RequestEnvelope, ContractEr
             .deadline_at
             .as_ref()
             .is_some_and(|value| !is_valid_lease_expiry(value))
-        || request
-            .permission
-            .as_ref()
-            .is_some_and(|permission| !is_non_empty(&permission.grant_id))
+        || request.permission.as_ref().is_some_and(|permission| {
+            !is_non_empty(&permission.grant_id)
+                || permission
+                    .kind
+                    .as_deref()
+                    .is_some_and(|kind| !matches!(kind, "execute" | "control"))
+        })
     {
         return Err(ContractError);
     }
@@ -331,7 +345,11 @@ pub struct FsGrepResult {
 
 pub fn parse_fs_read_request(input: &str) -> Result<FsReadRequest, ContractError> {
     let value: Value = serde_json::from_str(input).map_err(|_| ContractError)?;
-    if value.get("permission").is_some_and(Value::is_null)
+    if (value.get("permission").is_some_and(Value::is_null)
+        || value
+            .get("permission")
+            .and_then(|p| p.get("kind"))
+            .is_some_and(Value::is_null))
         || value.get("deadlineAt").is_some_and(Value::is_null)
     {
         return Err(ContractError);
@@ -348,8 +366,10 @@ pub fn parse_fs_read_result(input: &str) -> Result<FsReadResult, ContractError> 
 }
 
 pub fn parse_fs_read_params(input: &str) -> Result<FsReadParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsReadParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_read_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_read_params_value(value: &Value) -> Result<FsReadParams, ContractError> {
+    let params: FsReadParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     if params.start_line < 1 || !(1..=MAX_MAX_LINES).contains(&params.max_lines) {
         return Err(ContractError);
@@ -358,15 +378,19 @@ pub fn parse_fs_read_params(input: &str) -> Result<FsReadParams, ContractError> 
 }
 
 pub fn parse_fs_write_params(input: &str) -> Result<FsWriteParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsWriteParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_write_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_write_params_value(value: &Value) -> Result<FsWriteParams, ContractError> {
+    let params: FsWriteParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     validate_revision(params.if_match.as_deref())?;
     Ok(params)
 }
 pub fn parse_fs_edit_params(input: &str) -> Result<FsEditParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsEditParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_edit_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_edit_params_value(value: &Value) -> Result<FsEditParams, ContractError> {
+    let params: FsEditParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     if !is_non_empty(&params.old_string) {
         return Err(ContractError);
@@ -375,16 +399,20 @@ pub fn parse_fs_edit_params(input: &str) -> Result<FsEditParams, ContractError> 
     Ok(params)
 }
 pub fn parse_fs_list_params(input: &str) -> Result<FsListParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsListParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_list_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_list_params_value(value: &Value) -> Result<FsListParams, ContractError> {
+    let params: FsListParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     validate_page_size(params.max_entries)?;
     validate_cursor(params.cursor.as_deref())?;
     Ok(params)
 }
 pub fn parse_fs_glob_params(input: &str) -> Result<FsGlobParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsGlobParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_glob_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_glob_params_value(value: &Value) -> Result<FsGlobParams, ContractError> {
+    let params: FsGlobParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     if !is_non_empty(&params.pattern) {
         return Err(ContractError);
@@ -394,14 +422,18 @@ pub fn parse_fs_glob_params(input: &str) -> Result<FsGlobParams, ContractError> 
     Ok(params)
 }
 pub fn parse_fs_stat_params(input: &str) -> Result<FsStatParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsStatParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_stat_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_stat_params_value(value: &Value) -> Result<FsStatParams, ContractError> {
+    let params: FsStatParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     Ok(params)
 }
 pub fn parse_fs_grep_params(input: &str) -> Result<FsGrepParams, ContractError> {
-    let value = parse_json(input)?;
-    let params: FsGrepParams = serde_json::from_value(value).map_err(|_| ContractError)?;
+    parse_fs_grep_params_value(&parse_json(input)?)
+}
+pub fn parse_fs_grep_params_value(value: &Value) -> Result<FsGrepParams, ContractError> {
+    let params: FsGrepParams = serde_json::from_value(value.clone()).map_err(|_| ContractError)?;
     validate_workspace_path(&params.workspace, &params.path)?;
     if !is_non_empty(&params.pattern) || params.include.iter().any(|item| !is_non_empty(item)) {
         return Err(ContractError);
@@ -436,10 +468,13 @@ fn validate_request(request: &FsReadRequest) -> Result<(), ContractError> {
             .deadline_at
             .as_ref()
             .is_some_and(|value| !is_valid_lease_expiry(value))
-        || request
-            .permission
-            .as_ref()
-            .is_some_and(|permission| !is_non_empty(&permission.grant_id))
+        || request.permission.as_ref().is_some_and(|permission| {
+            !is_non_empty(&permission.grant_id)
+                || permission
+                    .kind
+                    .as_deref()
+                    .is_some_and(|kind| !matches!(kind, "execute" | "control"))
+        })
     {
         return Err(ContractError);
     }

@@ -55,6 +55,41 @@ mod tests {
     use crate::dispatch::tool::ToolDescriptor;
 
     #[test]
+    fn access_classes_require_their_own_permission_kind() {
+        use crate::dispatch::AccessClass;
+        for access in [
+            AccessClass::Read,
+            AccessClass::Write,
+            AccessClass::Execute,
+            AccessClass::ProcessControl,
+        ] {
+            let mut descriptor = ToolDescriptor::read("fixture");
+            descriptor.access = access;
+            for grant in [None, Some(""), Some("g1")] {
+                for kind in [None, Some("execute"), Some("control"), Some("unknown")] {
+                    let permission = grant.map(|id| Permission {
+                        grant_id: id.into(),
+                        kind: kind.map(str::to_owned),
+                    });
+                    let expected = access == AccessClass::Read
+                        || (grant == Some("g1")
+                            && match access {
+                                AccessClass::Write => kind.is_none(),
+                                AccessClass::Execute => kind == Some("execute"),
+                                AccessClass::ProcessControl => kind == Some("control"),
+                                AccessClass::Read => true,
+                            });
+                    let result = authorize(&descriptor, permission.as_ref());
+                    assert_eq!(result.is_ok(), expected, "{access:?} {grant:?} {kind:?}");
+                    if let Ok(context) = result {
+                        assert_eq!(context.write_claimed, access == AccessClass::Write);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
     fn write_tools_require_a_claim() {
         let write = ToolDescriptor::write("fs.write");
         let read = ToolDescriptor::read("fs.read");

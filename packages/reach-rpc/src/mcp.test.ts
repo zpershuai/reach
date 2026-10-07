@@ -1,10 +1,11 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { request as httpRequest, type ClientRequest } from "node:http";
+import { createServer, request as httpRequest, type ClientRequest } from "node:http";
 import type { Socket } from "node:net";
 import test from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import WebSocket from "ws";
+import { createMcpHttpHandler } from "./mcp/http.js";
 import { createGateway, MAX_HTTP_BODY_BYTES, MAX_WEBSOCKET_TEXT_BYTES, type GatewayOptions } from "./gateway.js";
 
 const controllerToken = "c".repeat(48);
@@ -369,8 +370,17 @@ test("MCP cannot report another owner's session as closed and preserves local va
       assert.equal(invalid.result.isError, true);
       assert.equal(invalid.value, "fs.write requires non-empty workspace and path for a Gateway grant");
       assert.equal((await owner.remove()).status, 200);
-      assert.deepEqual((await other.tool("session_close", { deviceId: "engine-a" })).value, { closedDeviceId: "engine-a" });
+      assert.deepEqual((await other.tool("session_close", { deviceId: "engine-a" })).value, { closedDeviceId: "engine-a", closed: false, owned: false });
     } finally { engine.terminate(); }
+  });
+});
+
+test("MCP close reports owned work and repeated no-op explicitly", async () => {
+  await withGateway(async url => {
+    const c = await client(url); await c.notify();
+    await c.tool("pick_device", { deviceId: "engine-a" });
+    assert.deepEqual((await c.tool("session_close", { deviceId: "engine-a" })).value, { closedDeviceId: "engine-a", closed: true, owned: true });
+    assert.deepEqual((await c.tool("session_close", { deviceId: "engine-a" })).value, { closedDeviceId: "engine-a", closed: false, owned: false });
   });
 });
 
@@ -453,4 +463,40 @@ test("MCP releases a body-read admission slot after a timeout", async () => {
     assert.equal((await c.post({ jsonrpc: "2.0", id: 20, method: "ping" })).status, 200);
     assert.equal((await c.remove()).status, 200);
   }, { mcp: { maxQueue: 1, responseTimeoutMs: 100 } });
+});
+
+test("MCP shutdown rejects a body still being read without starting an Engine", async () => {
+  const handler = createMcpHttpHandler(new Map(), controllerToken);
+  const server = createServer((request, response) => { void handler.handle(request, response); });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address !== "string");
+  const url = `http://127.0.0.1:${address.port}`;
+  let writing: ClientRequest | undefined;
+  try {
+    const c = await client(url); await c.notify();
+    const body = JSON.stringify({ jsonrpc: "2.0", id: 10, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "engine-a" } } });
+    const pending = rawPost(url, c.sessionHeaders, request => { writing = request; request.write(body.slice(0, 10)); });
+    await delay(30);
+    handler.shutdown();
+    writing!.end(body.slice(10));
+    assert.equal((await pending).status, 503);
+  } finally {
+    writing?.destroy(); handler.shutdown(); server.closeAllConnections();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("MCP explicit close of stale ownership never closes its successor", async () => {
+  await withGateway(async url => {
+    const c = await client(url); await c.notify();
+    await c.tool("pick_device", { deviceId: "engine-a" });
+    const prior = await status(url);
+    const post = (path: string, body: unknown) => fetch(`${url}${path}`, { method: "POST", headers, body: JSON.stringify(body) });
+    assert.equal((await post("/session/close", { sessionId: prior.sessionId })).status, 200);
+    assert.equal((await post("/session/open", { sessionId: "successor" })).status, 200);
+    assert.match((await c.tool("session_close", { deviceId: "engine-a" })).value, /^ENGINE_BUSY:/);
+    assert.equal((await status(url)).sessionId, "successor");
+  });
 });

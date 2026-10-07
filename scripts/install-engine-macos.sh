@@ -47,7 +47,7 @@ if [[ -n "${2:-}" ]]; then
   install -m 600 "$2" "$config_dir/mcp-devices.json"
   mkdir -p "$engine_dir/mcp/dist"
   install -m 644 "$repo_root/packages/grok-bot-mcp-connector/package.json" "$engine_dir/mcp/package.json"
-  for module in main config gateway server tools version; do
+  for module in main config gateway server tools protocol invoker result version; do
     install -m 644 "$repo_root/packages/grok-bot-mcp-connector/dist/$module.js" "$engine_dir/mcp/dist/$module.js"
   done
   install -m 644 "$repo_root/packages/grok-bot-mcp-connector/dist/version.json" "$engine_dir/mcp/dist/version.json"

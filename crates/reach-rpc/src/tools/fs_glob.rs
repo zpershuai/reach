@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError},
-    parse_fs_glob_params, FsGlobParams,
+    parse_fs_glob_params_value, FsGlobParams,
 };
 
 use super::{check_deadline, deadline, parse_params, to_value, workspace_error};
@@ -29,7 +29,7 @@ impl Tool for FsGlobTool {
 
     fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
         check_deadline(context)?;
-        let params: FsGlobParams = parse_params(context.params, parse_fs_glob_params)?;
+        let params: FsGlobParams = parse_params(context.params, parse_fs_glob_params_value)?;
         let result = context
             .workspace
             .glob_until(&params, deadline(context))

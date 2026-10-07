@@ -14,3 +14,5 @@ On `REVISION_CONFLICT`, re-read and reconcile the user's requested edit with the
 The total HTTP JSON request is limited to 64 KiB, including escaping and metadata. Keep writes within that limit. A `connecting` response means no filesystem operation ran; wait and poll `device_status`, then issue the operation when ready.
 
 Close owned sessions with `session_close` after work finishes.
+
+For trusted script tasks, follow [reach-processes](../reach-processes/SKILL.md), including same-session launchId recovery and session-owned lifetime.

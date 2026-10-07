@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError},
-    parse_fs_list_params, FsListParams,
+    parse_fs_list_params_value, FsListParams,
 };
 
 use super::{check_deadline, deadline, parse_params, to_value, workspace_error};
@@ -28,7 +28,7 @@ impl Tool for FsListTool {
 
     fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
         check_deadline(context)?;
-        let params: FsListParams = parse_params(context.params, parse_fs_list_params)?;
+        let params: FsListParams = parse_params(context.params, parse_fs_list_params_value)?;
         let result = context
             .workspace
             .list_until(&params, deadline(context))

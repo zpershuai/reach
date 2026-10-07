@@ -10,3 +10,5 @@ HTTP 401 means a missing or incorrect Controller token; the Engine token cannot 
 An unknown or expired MCP session returns HTTP 404; reconnect and initialize through the MCP host. `ENGINE_BUSY` means another controller is using this Engine. A sleeping device can take up to its idle heartbeat interval to notice an open intent; poll with the returned retry delay.
 
 `DEADLINE_EXCEEDED` does not prove a mutation failed. Re-read before another write. Report persistent failures with the device id, operation and error code, excluding tokens and private deployment details.
+
+For trusted script tasks, follow [reach-processes](../reach-processes/SKILL.md), including same-session launchId recovery and session-owned lifetime.

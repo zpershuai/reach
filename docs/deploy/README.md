@@ -35,8 +35,8 @@ flowchart LR
 
 | 组件 | 职责 | 常驻方式 | 保存的数据 |
 | --- | --- | --- | --- |
-| Gateway | 认证、会话租约、写入 grant、转发 RPC | VPS Docker Compose | 会话和 grant 在内存，无文件业务数据库 |
-| Engine | 执行工作区内的 `fs.*` 请求 | LaunchAgent / systemd / procd | 文件保存在设备工作区 |
+| Gateway | 认证、会话租约、文件写入与进程 grant、转发 RPC | VPS Docker Compose | 会话和 grant 在内存，无文件业务数据库 |
+| Engine | 执行工作区内的 `fs.*` 请求及显式启用的 `process.*` 任务 | LaunchAgent / systemd / procd | 文件保存在设备工作区 |
 | MCP Connector | 将 MCP 工具调用转换为 Gateway 请求 | MCP 客户端启动本地 Node 进程 | 私有设备配置；不存放远程工作区文件 |
 
 MCP 安装入口为 [mcp.md](mcp.md)。桌面 stdio Connector 由客户端启动；远程 HTTP MCP 在 Gateway 内运行，复用现有域名、监听端口与 VPS 容器。设备文件由 stdio 客户端配置；HTTP 直接展示 Gateway 注册的 Engine。

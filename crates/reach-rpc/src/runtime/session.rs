@@ -62,8 +62,6 @@ pub struct SessionContext<'a> {
     pub processes: crate::process::ProcessManager,
     /// Absolute lease expiry in epoch milliseconds.
     pub lease_expires_at_ms: i64,
-    /// True once draining has begun: new dispatch is rejected.
-    pub cancelled: bool,
     /// Request IDs already executed or rejected this session (dedup).
     pub request_ids: RequestIdSet,
     /// The workspace cursor scope bound to this session. Closed on drop, which
@@ -76,6 +74,20 @@ pub struct SessionContext<'a> {
 }
 
 impl<'a> SessionContext<'a> {
+    pub fn is_cancelled(&self) -> bool {
+        self.workspace.is_cancelled()
+    }
+    pub fn cancel(&self) {
+        self.workspace.cancellation().cancel();
+    }
+
+    /// Transfer process ownership to Runtime before dropping cursor/session state.
+    /// A failed drain remains owned by Runtime and blocks a replacement session;
+    /// Drop sees an empty manager and cannot accidentally discard that owner.
+    pub(crate) fn take_processes(&mut self) -> crate::process::ProcessManager {
+        std::mem::take(&mut self.processes)
+    }
+
     pub fn new(
         session_id: String,
         lease_expires_at_ms: i64,
@@ -87,7 +99,6 @@ impl<'a> SessionContext<'a> {
             session_id,
             processes: crate::process::ProcessManager::default(),
             lease_expires_at_ms,
-            cancelled: false,
             request_ids: RequestIdSet::new(),
             workspace,
             write_claimed: false,
@@ -100,6 +111,7 @@ impl<'a> SessionContext<'a> {
 /// workspace cursor scope on every exit path, including failure paths.
 impl Drop for SessionContext<'_> {
     fn drop(&mut self) {
+        self.cancel();
         if let Err(error) = self.processes.drain() {
             eprintln!("Reach session cleanup failed: {}", error.code);
         }

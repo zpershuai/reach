@@ -146,7 +146,7 @@ The system SHALL bind pagination cursors to the active session, method, and comp
 - **THEN** the system returns `INVALID_PARAMS` and does not dispatch a nested filesystem operation
 
 #### Scenario: Clear cursors after abnormal session end
-- **WHEN** a session ends because the WebSocket read or response send fails before a clean `job.done` close
+- **WHEN** a session ends because the WebSocket read or response send fails before a clean `session.close` close
 - **THEN** all cursors created during that session are invalidated and a later session cannot resume them
 
 ### Requirement: Descriptor-relative inspection and bounded snapshots

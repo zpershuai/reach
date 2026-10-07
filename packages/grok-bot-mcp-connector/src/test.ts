@@ -91,7 +91,7 @@ test("standalone MCP keeps its built version when the package manifest changes w
   try {
     mkdirSync(join(directory, "dist"));
     writeFileSync(join(directory, "package.json"), JSON.stringify({ type: "module", version: "9.9.9" }));
-    for (const file of ["main.js", "config.js", "gateway.js", "server.js", "tools.js", "version.js", "version.json"]) {
+    for (const file of ["main.js", "config.js", "gateway.js", "server.js", "tools.js", "protocol.js", "invoker.js", "result.js", "version.js", "version.json"]) {
       copyFileSync(new URL(file, import.meta.url), join(directory, "dist", file));
     }
     const output = execFileSync(process.execPath, [join(directory, "dist/main.js"), "--version"], { encoding: "utf8", timeout: 5000 });

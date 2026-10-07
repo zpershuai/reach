@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError},
-    parse_fs_read_params, FsReadParams,
+    parse_fs_read_params_value, FsReadParams,
 };
 
 use super::{check_deadline, parse_params, to_value, workspace_error};
@@ -28,7 +28,7 @@ impl Tool for FsReadTool {
 
     fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
         check_deadline(context)?;
-        let params: FsReadParams = parse_params(context.params, parse_fs_read_params)?;
+        let params: FsReadParams = parse_params(context.params, parse_fs_read_params_value)?;
         let result = context
             .workspace
             .read(&params)

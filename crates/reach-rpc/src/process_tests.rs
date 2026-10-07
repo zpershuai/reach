@@ -391,3 +391,34 @@ fn concurrency_limit_and_dispatch_authorization_are_independent() {
     )
     .is_err());
 }
+
+#[test]
+fn poisoned_task_fails_closed_but_supervisor_still_terminates_child() {
+    let (_temp, workspace, mut manager, params) = setup("setInterval(()=>{},1000)");
+    let launched = manager.run(&params, &workspace).unwrap();
+    let id = launched["processId"].as_str().unwrap();
+    let task = manager.tasks[id].task.clone();
+    assert!(thread::spawn(move || {
+        let _guard = task.lock().unwrap();
+        panic!("injected task state failure");
+    })
+    .join()
+    .is_err());
+    assert_eq!(
+        manager.status(&json!({"processId":id})).unwrap_err().code,
+        "PROCESS_CLEANUP_FAILED"
+    );
+    assert_eq!(
+        manager.stop(&json!({"processId":id})).unwrap_err().code,
+        "PROCESS_CLEANUP_FAILED"
+    );
+    assert_eq!(manager.drain().unwrap_err().code, "PROCESS_CLEANUP_FAILED");
+    assert!(
+        manager.tasks[id].worker.is_none(),
+        "supervisor was joined after killing/reaping the child"
+    );
+    assert!(
+        manager.active(),
+        "corrupted state cannot release ownership as healthy"
+    );
+}

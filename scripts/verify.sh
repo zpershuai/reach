@@ -13,3 +13,6 @@ npm --prefix packages/reach-rpc test
 npm --prefix packages/grok-bot-mcp-connector test
 bash scripts/validate-round1.sh
 bash scripts/validate-round1.sh fs.read.deadline.request.json
+
+node scripts/validate-process-contract.mjs
+node scripts/test-mcp-distribution.mjs

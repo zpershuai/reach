@@ -481,7 +481,7 @@ impl EngineRuntime {
                     }
                 }
                 Ok(SessionIncoming::Close { .. }) => {
-                    if context.cancelled {
+                    if context.is_cancelled() {
                         break 'drive SessionClosureReason::AgentRequested;
                     }
                     break 'drive SessionClosureReason::Disconnected;
@@ -515,7 +515,7 @@ impl EngineRuntime {
         };
         // `context` is dropped here (closes the cursor scope) before the
         // transport is finalized.
-        let mut processes = std::mem::take(&mut context.processes);
+        let mut processes = context.take_processes();
         if let Err(error) = processes.drain() {
             events.borrow_mut().push(RuntimeEvent::Message {
                 line: format!(
@@ -566,10 +566,10 @@ fn handle_session_message(
                     method: envelope.method.clone(),
                     ok: true,
                 });
-                context.cancelled = true;
+                context.cancel();
                 return Ok(Flow::Close(SessionClosureReason::SessionComplete));
             }
-            if context.cancelled {
+            if context.is_cancelled() {
                 send_error(
                     transport,
                     &envelope.request_id,
@@ -651,7 +651,7 @@ fn handle_session_message(
                 Ok(close) if close.session_id == context.session_id => {
                     // Drain: stop new dispatch; `finalize_session` emits
                     // `session.closed` after the loop returns.
-                    context.cancelled = true;
+                    context.cancel();
                     Ok(Flow::Close(SessionClosureReason::AgentRequested))
                 }
                 _ => {
@@ -848,7 +848,7 @@ mod tests {
         let sent = sent.lock().unwrap();
         assert_eq!(sent[1]["error"]["code"], crate::dispatch::DEADLINE_EXCEEDED);
         assert_eq!(sent[2]["type"], "response");
-        assert!(!context.cancelled);
+        assert!(!context.is_cancelled());
         assert!(!dir.path().join("expired.txt").exists());
         assert_eq!(
             std::fs::read_to_string(dir.path().join("next.txt")).unwrap(),
@@ -909,7 +909,7 @@ mod tests {
             ));
             let reply: Value = serde_json::from_str(&sent.lock().unwrap()[0]).unwrap();
             assert_eq!(reply["error"]["code"], crate::dispatch::DEADLINE_EXCEEDED);
-            assert!(!context.cancelled);
+            assert!(!context.is_cancelled());
         }
     }
 

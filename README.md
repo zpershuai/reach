@@ -8,7 +8,7 @@ MCP, Engine and Gateway have independent release versions, exposed through `--ve
 
 Each Engine installation automatically installs a pinned, checksum-verified Node.js runtime under `~/.reach/runtime/node` for Gateway and MCP processes on that host. The Rust Engine uses this runtime for trusted workspace scripts when process execution is explicitly enabled; filesystem-only operation remains independent of Node. The generated MCP configuration uses its stable `bin/node` path. After building, `sh scripts/start-gateway.sh` starts a local Gateway with this runtime. It can also be installed independently with `python3 scripts/install-node-runtime.py`. See [runtime installation and execution boundaries](docs/deploy/node-runtime.md).
 
-**Model B topology:** the Gateway is the single Agent-facing control plane; a long-running Engine Runtime on the device owns the workspace and executes `fs.*` RPC. Local development uses loopback (`127.0.0.1`) with two processes.
+**Model B topology:** the Gateway is the single Agent-facing control plane; a long-running Engine Runtime on the device owns the workspace and executes `fs.*` RPC and opt-in trusted `process.*` tasks. Local development uses loopback (`127.0.0.1`) with two processes.
 
 ## Two-process loopback deployment
 
@@ -93,10 +93,13 @@ Control API summary:
 | `POST /session/close` | — | Request fast close; stops new RPC once draining begins |
 | `POST /session/rpc` | — | Forward one data-plane request to the ready Engine |
 | `POST /heartbeat` | — | Engine lease acquisition / idle polling |
+| `POST /grants` | — | Issue scoped filesystem or process grants |
+| `GET /healthz` | — | Gateway health and release version |
+| `POST /mcp`, `DELETE /mcp` | — | Streamable HTTP MCP requests and session cleanup |
 
 ## Engine Runtime behavior
 
-- While no session is wanted the Engine posts a heartbeat every **120s** by default; configure `REACH_HEARTBEAT_INTERVAL_SECS` to adjust it. Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
+- While no session is wanted the Engine posts a heartbeat every **120s** by default; configure `REACH_HEARTBEAT_INTERVAL_SECS` on the **Gateway** to adjust its returned interval (the Engine follows `intervalSeconds`). Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
 - The lease `endpoint` is a Gateway-relative path (`/session`); the Engine resolves it against its **configured** Gateway origin and refuses a lease that points anywhere else.
 - After opening the WebSocket the Engine sends `session.ready` (protocol/version, Engine id, workspace names, supported methods). The Gateway forwards no data-plane request until it has seen a valid `ready`.
 - Tools execute serially on one worker while the Runtime continues receiving close/renew control messages. Close, lease expiry, rotation, or the hard RPC execution timeout sets a cooperative cancellation flag, drops queued work, drains the worker, and then releases the session. An atomic mutation already past its commit boundary may finish.
@@ -125,6 +128,7 @@ These are Engine **hard maxima**: both the initial lease and every renewal are c
 | `idle_timeout` | No activity within the idle bound |
 | `rotation` | Continuous connection reached the max age |
 | `disconnected` | Transport closed unexpectedly |
+| `shutdown` | Engine is shutting down and drains session-owned work |
 | `connection_failed` / `policy_error` / `rpc_timeout` | Setup or policy failures |
 
 ## Session control protocol
@@ -153,7 +157,7 @@ HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. Eve
 
 One Gateway can manage multiple registered Engines, each with its own credential, session, lease, grants and RPC state. Controller requests select an Engine with `?engineId=...`; requests without it target the default Engine. MCP device entries use `engineId` to route through a shared Gateway. See [OpenWrt and multi-device deployment](docs/deploy/openwrt.md).
 
-Remote MCP clients connect to the same Gateway's HTTPS `/mcp` using the Controller token. The endpoint exposes static underscore filesystem tools, discovers registered Engines and returns promptly while idle devices connect. HTTP MCP sessions have identity-bound ownership, bounded requests, and DELETE/idle cleanup. Desktop stdio clients remain supported. See [MCP installation](docs/deploy/mcp.md) and the [Grok Bot plugin](grok-bot-plugin/README.md).
+Remote MCP clients connect to the same Gateway's HTTPS `/mcp` using the Controller token. The endpoint exposes static underscore filesystem and process tools, discovers registered Engines and returns promptly while idle devices connect. HTTP MCP sessions have identity-bound ownership, bounded requests, and DELETE/idle cleanup. Desktop stdio clients remain supported. See [MCP installation](docs/deploy/mcp.md) and the [Grok Bot plugin](grok-bot-plugin/README.md).
 
 
 ## RPC deadlines and retry behavior
@@ -175,3 +179,5 @@ Runtime events use a 1,024-entry FIFO buffer. `drain_events()` consumes it. The 
 ## Validation
 
 Install Node dependencies with `npm --prefix packages/reach-rpc ci --ignore-scripts`, then run `bash scripts/verify.sh`. The script checks Rust formatting, Rust tests, TypeScript Gateway tests, MCP tests including a real Rust Engine integration, and shared fixtures in both languages. CI runs this workflow on Linux and macOS with Node 24 and stable Rust. The TypeScript workspace filesystem is a test reference; production session execution uses the Rust Engine.
+
+Trusted script tools are `process.run`, `process.status`, `process.logs`, `process.stop`, and `process.list`. Dynamic stdio exposes them after device selection; HTTP uses underscore names with `deviceId`. See [process execution and recovery](docs/deploy/processes.md).
