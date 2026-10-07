@@ -4,7 +4,7 @@ use serde_json::Value;
 
 use crate::{
     dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError},
-    parse_fs_stat_params, FsStatParams,
+    parse_fs_stat_params_value, FsStatParams,
 };
 
 use super::{check_deadline, parse_params, to_value, workspace_error};
@@ -28,7 +28,7 @@ impl Tool for FsStatTool {
 
     fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
         check_deadline(context)?;
-        let params: FsStatParams = parse_params(context.params, parse_fs_stat_params)?;
+        let params: FsStatParams = parse_params(context.params, parse_fs_stat_params_value)?;
         let result = context
             .workspace
             .stat(&params)

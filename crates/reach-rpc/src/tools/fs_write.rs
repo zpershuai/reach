@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError},
-    parse_fs_write_params, FsWriteParams,
+    parse_fs_write_params_value, FsWriteParams,
 };
 
 use super::{check_deadline, deadline, parse_params, to_value, workspace_error};
@@ -35,7 +35,7 @@ impl Tool for FsWriteTool {
         if !context.write_claimed {
             return Err(ToolError::permission_denied());
         }
-        let params: FsWriteParams = parse_params(context.params, parse_fs_write_params)?;
+        let params: FsWriteParams = parse_params(context.params, parse_fs_write_params_value)?;
         let result = context
             .workspace
             .write_until(&params, deadline(context))

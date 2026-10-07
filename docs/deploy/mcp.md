@@ -104,7 +104,7 @@ mkdir -p "$HOME/.local/share/reach/mcp/dist" "$HOME/.config/reach"
 chmod 700 "$HOME/.local/share/reach" "$HOME/.config/reach"
 install -m 644 packages/grok-bot-mcp-connector/package.json \
   "$HOME/.local/share/reach/mcp/package.json"
-for module in main config gateway server tools version; do
+for module in main config gateway server tools protocol invoker result version; do
   install -m 644 "packages/grok-bot-mcp-connector/dist/$module.js" \
     "$HOME/.local/share/reach/mcp/dist/$module.js"
 done
@@ -113,7 +113,7 @@ install -m 644 packages/grok-bot-mcp-connector/dist/version.json \
 install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 ```
 
-保留 `package.json` 的 `type: module`、六个 JS 模块及构建时生成的 `dist/version.json`，不要只复制入口文件。运行依赖均为 Node 标准库，不需复制 `node_modules`。可先执行 `python3 scripts/install-node-runtime.py` 单独安装相同的独立 runtime（支持 Mac/Linux 的 x64、arm64），再按方式 A 的结构填写本机 Node、入口和配置文件绝对路径。升级复制前先关闭客户端启动的 Connector。
+保留 `package.json` 的 `type: module`、全部 JS 模块及构建时生成的 `dist/version.json`，不要只复制入口文件。运行依赖均为 Node 标准库，不需复制 `node_modules`。可先执行 `python3 scripts/install-node-runtime.py` 单独安装相同的独立 runtime（支持 Mac/Linux 的 x64、arm64），再按方式 A 的结构填写本机 Node、入口和配置文件绝对路径。升级复制前先关闭客户端启动的 Connector。
 
 若 Engine 与客户端都在同一台 Mac，也可使用 [Engine 安装器](engine.md) 一并安装以上文件。
 
@@ -165,7 +165,7 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 1. 调用 `list_devices` 查看配置条目。
 2. 调用 `pick_device`，参数为 `{"deviceId":"engine-a"}`。
 3. Connector 打开会话并等待 Engine ready，发出工具列表变化通知。
-4. 客户端刷新列表后获得 `fs.read`、`fs.write`、`fs.edit`、`fs.list`、`fs.glob`、`fs.stat`、`fs.grep` 与 `session.close`。
+4. 客户端刷新列表后获得 `fs.read`、`fs.write`、`fs.edit`、`fs.list`、`fs.glob`、`fs.stat`、`fs.grep`、`process.run`、`process.status`、`process.logs`、`process.stop`、`process.list` 与 `session.close`。
 5. 完成操作后调用 `session.close`，回到设备选择状态。
 
 文件工具示例参数：
@@ -181,7 +181,7 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 
 这是 `fs.write` 的参数，`mode: create` 要求目标文件尚不存在。`fs.edit` 使用 `oldString`、`newString` 字段。写入与编辑会先自动申请所需路径和方法的 grant，不需要用户手动调用授权 API。
 
-若客户端不刷新动态列表，在 `env` 中加入 `"REACH_MCP_TOOL_MODE": "static"` 并重新启动 Connector。静态模式从初始化起展示文件工具，每次文件操作及关闭会话都需要 `deviceId`，例如：
+若客户端不刷新动态列表，在 `env` 中加入 `"REACH_MCP_TOOL_MODE": "static"` 并重新启动 Connector。静态模式从初始化起展示文件和进程工具，每次文件、进程操作及关闭会话都需要 `deviceId`，例如：
 
 ```json
 {
@@ -203,3 +203,5 @@ Connector 在使用工具前检查会话、按需重建或续租。切换设备�
 ## 脚本任务
 
 新增 `process_run/status/logs/stop/list` HTTP 工具，均要求 `deviceId`。stdio 使用 `process.run/status/logs/stop/list`；dynamic 模式操作已选设备，static 模式要求 `deviceId`。它们通过 Gateway 在目标 Engine 上执行，使用该设备的私有 Node runtime。执行默认关闭，配置和调用示例见 [脚本任务](processes.md)。
+
+HTTP `session_close` 保留 `closedDeviceId`，并返回 `closed` / `owned`：成功关闭自己的会话为 `true` / `true`；无会话的幂等调用为 `false` / `false`。他人或替代会话返回 `ENGINE_BUSY`，不会被关闭。

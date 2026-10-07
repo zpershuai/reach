@@ -34,6 +34,7 @@ test("Grok plugin uses a literal HTTPS endpoint and keeps credentials in the hos
     assert.ok(!(mcpText + manifestText + result.stdout + result.stderr).includes(token));
     assert.ok((await stat(join(output, "assets/logo.svg"))).isFile());
     assert.ok((await stat(join(output, "skills/reach-files/SKILL.md"))).isFile());
+    assert.ok((await stat(join(output, "skills/reach-processes/SKILL.md"))).isFile());
     assert.equal((await stat(output)).mode & 0o777, 0o700);
     assert.equal((await stat(join(output, "mcp.json"))).mode & 0o777, 0o600);
   });

@@ -1,6 +1,8 @@
 import { GatewayHttpError, SessionReplacedError } from "./gateway.js";
 import { InProcessGatewayClient, type EngineApi } from "./in-process.js";
-import { McpServer, toolError, toolText, type JsonRpcRequest } from "./server.js";
+import { McpProtocol } from "./protocol.js";
+import { GrantAwareInvoker } from "./invoker.js";
+import { toolError, toolText } from "./result.js";
 import { deviceTools, staticDeviceScopedTools } from "./tools.js";
 import { MCP_VERSION } from "./version.js";
 
@@ -26,30 +28,23 @@ const EXPLANATIONS: Record<string, string> = {
   PROCESS_CLEANUP_FAILED: "Process cleanup is incomplete; session ownership is retained.",
 };
 
-export class RemoteMcpServer extends McpServer {
+export class RemoteMcpServer {
   private readonly clients = new Map<string, InProcessGatewayClient>();
   private selectedId: string | undefined;
   public deadlineAt = 0;
+  private readonly protocol: McpProtocol;
+  private readonly invoker = new GrantAwareInvoker(async () => {}, () => false);
+  public get initialized(): boolean { return this.protocol.acknowledged; }
+  public receive(value: unknown): Promise<void> { return this.protocol.receive(value); }
 
-  public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, private readonly protocolVersion: string) {
-    super({ devices: [], toolMode: "static", readyTimeoutMs: 25_000, readyPollMs: 200, renewSkewMs: 60_000, requestTimeoutMs: 25_000 }, send);
+  public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, protocolVersion: string) {
+    this.protocol = new McpProtocol(send, () => this.listTools(), params => this.callTool(params), undefined, {
+      protocolVersion, listChanged: false, http: true,
+      instructionsPrefix: "Use list_devices, then pick_device or a device tool with deviceId. If connecting, poll device_status after retryAfterMs. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Use process_status with the same launchId and owned session after an uncertain launch. Close owned sessions when finished. ",
+    });
   }
 
-  protected override async dispatch(request: JsonRpcRequest): Promise<Record<string, unknown>> {
-    if (request.method === "ping") return {};
-    const result = await super.dispatch(request);
-    if (request.method === "initialize") return {
-      ...result, protocolVersion: this.protocolVersion, capabilities: { tools: { listChanged: false } },
-      instructions: "Use list_devices, then pick_device or a device tool with deviceId. If connecting, poll device_status after retryAfterMs. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Close owned sessions when finished. " + String(result.instructions ?? "").replaceAll("process.status", "process_status"),
-    };
-    return result;
-  }
-
-  protected override errorCode(cause: unknown): number {
-    return cause instanceof Error && cause.message.startsWith("Method not found:") ? -32601 : -32603;
-  }
-
-  protected override listTools(): readonly Record<string, unknown>[] {
+  private listTools(): readonly Record<string, unknown>[] {
     const tools: Record<string, unknown>[] = [...deviceTools(), ...staticDeviceScopedTools()].map((tool) => ({ ...tool, name: (tool.name as string).replaceAll(".", "_") }));
     for (const tool of tools) {
       if (tool.name === "list_devices") tool.description = "List this Gateway's registered Reach Engine devices, last heartbeat times, and reported versions. A last reported version does not prove the device is online.";
@@ -62,7 +57,7 @@ export class RemoteMcpServer extends McpServer {
     }];
   }
 
-  protected override async callTool(params: unknown): Promise<Record<string, unknown>> {
+  private async callTool(params: unknown): Promise<Record<string, unknown>> {
     if (!params || typeof params !== "object" || Array.isArray(params)) return toolError("INVALID_PARAMS: tools/call params must be an object.");
     const call = params as Record<string, unknown>;
     if (typeof call.name !== "string") return toolError("INVALID_PARAMS: tools/call requires a tool name.");
@@ -92,9 +87,10 @@ export class RemoteMcpServer extends McpServer {
       let client = this.clients.get(deviceId);
       if (call.name === "session_close") {
         if (!client && api.status().status !== "none") return toolError("ENGINE_BUSY: This MCP session does not own the Engine session; it was not closed.");
+        const owned = client?.owns(api.status().sessionId) ?? false;
         if (client) { client.deadlineAt = this.deadlineAt; await client.close(); this.clients.delete(deviceId); }
         if (this.selectedId === deviceId) this.selectedId = undefined;
-        return toolText({ closedDeviceId: deviceId });
+        return toolText({ closedDeviceId: deviceId, closed: owned, owned });
       }
       if (!client && method?.startsWith("process.") && method !== "process.run") return toolError("PROCESS_NOT_FOUND: No owned session for this task.");
       if (!client) { client = new InProcessGatewayClient(api); this.clients.set(deviceId, client); }
@@ -105,8 +101,8 @@ export class RemoteMcpServer extends McpServer {
       if (call.name === "pick_device") this.selectedId = deviceId;
       if (status.status !== "ready") return toolText({ deviceId, status: "connecting", retryAfterMs: 1000 });
       if (call.name === "pick_device") return toolText({ selectedDeviceId: deviceId, status: "ready" });
-      if (status.leaseExpiresAt && Date.parse(status.leaseExpiresAt) <= Date.now() + this.config.renewSkewMs) await client.renew();
-      const result = await this.callOnGateway(client, method!, parameters);
+      if (status.leaseExpiresAt && Date.parse(status.leaseExpiresAt) <= Date.now() + 60_000) await client.renew();
+      const result = await this.invoker.call(client, method!, parameters);
       if (result.isError) {
         const content = result.content as Array<{ text: string }>;
         const code = content[0].text;
@@ -126,7 +122,7 @@ export class RemoteMcpServer extends McpServer {
     }
   }
 
-  public override async shutdown(): Promise<void> {
+  public async shutdown(): Promise<void> {
     const failures: unknown[] = [];
     for (const [id, client] of this.clients) {
       client.deadlineAt = this.deadlineAt;

@@ -20,10 +20,10 @@
 
 | 凭证 | 保存位置 | 用途 |
 | --- | --- | --- |
-| Controller token | Gateway env、MCP 私有设备 JSON | 会话控制、RPC、申请写入 grant |
+| Controller token | Gateway env、MCP 私有设备 JSON | 会话控制、RPC、申请文件写入和进程 grant |
 | Engine token | Gateway env、Mac Engine env | Engine 心跳认证，绑定配置的 Engine ID |
 | session token | Gateway 心跳响应，Engine 短期持有 | 建立一次 WSS 会话；30 秒有效且只可消费一次 |
-| grant ID | Gateway 内存，客户端短期持有 | 按工作区、路径、方法和有效期授权写入；当前有效期 5 分钟 |
+| grant ID | Gateway 内存，客户端短期持有 | 文件 grant 按工作区、路径、方法授权写入；进程 grant 按 sessionId 与 execute（workspace/script/launchId）或 control（processId）授权；均检查有效期，当前为 5 分钟 |
 
 两份长期 token 必须不同，至少 32 字符。推荐各生成 32 随机字节的十六进制字符串，即 64 字符。Engine token 只接受 ASCII 字母、数字和 `-_.`，十六进制值符合要求。生产环境采用 TLS 校验证书，不关闭证书检查。
 

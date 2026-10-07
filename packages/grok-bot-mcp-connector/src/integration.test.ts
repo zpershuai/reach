@@ -105,6 +105,7 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
     assert.equal((await once(build, "exit"))[0], 0);
     const initialized = await request("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "http-integration", version: "1" } });
     assert.equal(initialized.serverInfo.name, "reach-mcp");
+    assert.equal(initialized.serverInfo.version, MCP_VERSION);
     headers["mcp-protocol-version"] = initialized.protocolVersion;
     await request("notifications/initialized", undefined, true);
     assert.equal(value(await tool("pick_device")).status, "connecting");
@@ -116,6 +117,8 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
       if (Date.now() >= deadline) throw new Error("Engine did not become ready");
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
+    const engineVersion = execFileSync(join(repository, "target/debug/engine"), ["--version"], { encoding: "utf8" }).trim();
+    assert.deepEqual(value(await tool("get_versions")), { deviceId: "engine-a", mcpVersion: MCP_VERSION, gatewayVersion: GATEWAY_VERSION, engineVersion });
     const args = { workspace: "default", path: "note.txt" };
     value(await tool("fs_write", { ...args, content: "hello", mode: "create" }));
     const read = value(await tool("fs_read", args));

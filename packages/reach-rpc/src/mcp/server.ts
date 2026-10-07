@@ -4,16 +4,11 @@ import { GatewayHttpError, HttpGatewayClient, SessionReplacedError, type Gateway
 import { deviceScopedTools, deviceTools, staticDeviceScopedTools } from "./tools.js";
 import { MCP_VERSION } from "./version.js";
 
-export const MCP_PROTOCOL_VERSION = "2025-03-26";
-
-export interface JsonRpcRequest {
-  jsonrpc: "2.0";
-  id?: string | number | null;
-  method: string;
-  params?: unknown;
-}
-
-type JsonRpcId = string | number | null;
+export { MCP_PROTOCOL_VERSION, type JsonRpcRequest } from "./protocol.js";
+export { toolError, toolText } from "./result.js";
+import { McpProtocol } from "./protocol.js";
+import { GrantAwareInvoker } from "./invoker.js";
+import { toolError, toolText } from "./result.js";
 type Send = (message: Record<string, unknown>) => void;
 type GatewayFactory = (device: DeviceConfig, config: ConnectorConfig) => GatewayClient;
 
@@ -24,25 +19,19 @@ interface SelectedDevice {
   uncertain?: boolean;
 }
 
-function isRequest(value: unknown): value is JsonRpcRequest {
-  if (typeof value !== "object" || value === null) return false;
-  const request = value as Record<string, unknown>;
-  return request.jsonrpc === "2.0" && typeof request.method === "string";
-}
-
-function error(id: JsonRpcId, code: number, message: string): Record<string, unknown> {
-  return { jsonrpc: "2.0", id, error: { code, message } };
-}
-
 export class McpServer {
-  private initialized = false;
+  private readonly protocol: McpProtocol;
+  private readonly invoker: GrantAwareInvoker;
   private pendingToolListChange = false;
 
   public constructor(
     protected readonly config: ConnectorConfig,
     protected readonly send: Send,
     private readonly gateways: GatewayFactory = (device, config) => new HttpGatewayClient(device, config.readyTimeoutMs, config.readyPollMs, fetch, config.requestTimeoutMs),
-  ) {}
+  ) {
+    this.protocol = new McpProtocol(send, () => this.listTools(), params => this.callTool(params), () => this.flushToolListChange());
+    this.invoker = new GrantAwareInvoker(() => this.releaseAfterFailure(), gateway => this.selected?.gateway === gateway);
+  }
 
   protected selected: SelectedDevice | undefined;
 
@@ -57,51 +46,7 @@ export class McpServer {
     }
   }
 
-  public async receive(value: unknown): Promise<void> {
-    if (!isRequest(value)) {
-      this.send(error(null, -32600, "Invalid Request"));
-      return;
-    }
-    const isNotification = value.id === undefined;
-    try {
-      const result = await this.dispatch(value);
-      if (!isNotification) {
-        this.send({ jsonrpc: "2.0", id: value.id ?? null, result });
-        this.flushToolListChange();
-      }
-    } catch (cause) {
-      if (!isNotification) {
-        this.send(error(value.id ?? null, this.errorCode(cause), cause instanceof Error ? cause.message : "Internal error"));
-      }
-    }
-  }
-
-  protected errorCode(_cause: unknown): number {
-    return -32603;
-  }
-
-  protected async dispatch(request: JsonRpcRequest): Promise<Record<string, unknown>> {
-    switch (request.method) {
-      case "initialize":
-        this.initialized = true;
-        return {
-          protocolVersion: MCP_PROTOCOL_VERSION,
-          capabilities: { tools: { listChanged: true } },
-          serverInfo: { name: "reach-mcp", version: MCP_VERSION },
-          instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. Engine uses this private runtime for trusted workspace scripts when execution is locally enabled. Scripts run with the Engine account privileges and are stopped when their owner session ends. Supply a unique launchId and recover uncertain launches with process.status on the same session. Filesystem tools execute on the selected Engine through its Gateway.",
-        };
-      case "notifications/initialized":
-        return {};
-      case "tools/list":
-        this.requireInitialized();
-        return { tools: this.listTools() };
-      case "tools/call":
-        this.requireInitialized();
-        return this.callTool(request.params);
-      default:
-        throw new Error(`Method not found: ${request.method}`);
-    }
-  }
+  public receive(value: unknown): Promise<void> { return this.protocol.receive(value); }
 
   protected listTools(): readonly Record<string, unknown>[] {
     if (this.config.toolMode === "static") return [...deviceTools(), ...staticDeviceScopedTools()];
@@ -240,60 +185,10 @@ export class McpServer {
       const selected = observing ? this.selected : await this.selectDevice(this.selected.device.id, this.config.toolMode === "dynamic");
       if (selected instanceof Error) return toolError(selected.message);
       await this.renewIfNeeded(selected);
-      return await this.callOnGateway(selected.gateway, method, argumentsValue as Record<string, unknown>);
+      return await this.invoker.call(selected.gateway, method, argumentsValue as Record<string, unknown>);
     } catch (cause) {
       if (!(cause instanceof GatewayHttpError && cause.isRequestRejection)) await this.releaseAfterFailure();
       return toolError(cause instanceof Error ? cause.message : "Gateway tool call failed");
-    }
-  }
-
-  /** Common grant acquisition and RPC dispatch for both MCP transports. */
-  protected async callOnGateway(gateway: GatewayClient, method: string, params: Record<string, unknown>): Promise<Record<string, unknown>> {
-    if (method.startsWith("process.")) {
-      const status = await gateway.status();
-      if (!status.methods?.includes(method)) return toolError("PROCESS_UNSUPPORTED: Engine does not advertise this process method");
-    }
-    const permission = await this.mutationPermission(gateway, method, params);
-    if (permission instanceof Error) return toolError(permission.message);
-    let reply: Record<string, unknown>;
-    try { reply = await gateway.rpc(method, params, permission); }
-    catch (cause) {
-      if (method === "process.run") {
-        try {
-          const status = await gateway.status();
-          if (status.status !== "ready" && this.selected?.gateway === gateway) await this.releaseAfterFailure();
-        } catch { if (this.selected?.gateway === gateway) await this.releaseAfterFailure(); }
-        return toolError(`${cause instanceof Error ? cause.message : "Launch outcome uncertain"}; launchId=${String(params.launchId)}. Query process.status with this launchId on the same session. If PROCESS_NOT_FOUND, retry only with the same launchId and identical parameters; never replay automatically.`);
-      }
-      throw cause;
-    }
-    if (reply.type === "error") {
-      const code = typeof reply.error === "object" && reply.error !== null ? (reply.error as Record<string, unknown>).code : undefined;
-      if (code === "SESSION_CLOSED") await this.releaseAfterFailure();
-      if (method === "process.run" && code === "DEADLINE_EXCEEDED") return toolError(`DEADLINE_EXCEEDED; launchId=${String(params.launchId)}. Query process.status with this launchId on the same session. If PROCESS_NOT_FOUND, retry only with the same launchId and identical parameters; never replay automatically.`);
-      return toolError(typeof code === "string" ? code : "Gateway RPC error");
-    }
-    return toolText(reply.result ?? reply);
-  }
-
-  private async mutationPermission(
-    gateway: GatewayClient,
-    method: string,
-    params: Record<string, unknown>,
-  ): Promise<{ grantId: string; kind?: "execute" | "control" } | undefined | Error> {
-    if (method === "process.run" || method === "process.stop") {
-      if (!gateway.processGrant) return new Error("PROCESS_UNSUPPORTED");
-      try { return await gateway.processGrant(method === "process.run" ? { kind: "execute", workspace: params.workspace, script: params.script, launchId: params.launchId } : { kind: "control", processId: params.processId }); }
-      catch (cause) { return new Error(cause instanceof Error ? cause.message : "Unable to obtain process grant"); }
-    }
-    if (method !== "fs.write" && method !== "fs.edit") return undefined;
-    if (typeof params.workspace !== "string" || !params.workspace || typeof params.path !== "string" || !params.path) {
-      return new Error(`${method} requires non-empty workspace and path for a Gateway grant`);
-    }
-    try {
-      return await gateway.grant(params.workspace, params.path, method);
-    } catch (cause) {
-      return new Error(cause instanceof Error ? cause.message : "Unable to obtain Gateway mutation grant");
     }
   }
 
@@ -343,23 +238,11 @@ export class McpServer {
     }
   }
 
-  protected requireInitialized(): void {
-    if (!this.initialized) throw new Error("MCP client must initialize before using tools");
-  }
-
   private flushToolListChange(): void {
     if (!this.pendingToolListChange) return;
     this.pendingToolListChange = false;
     this.send({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
   }
-}
-
-export function toolText(value: unknown): Record<string, unknown> {
-  return { content: [{ type: "text", text: JSON.stringify(value) }] };
-}
-
-export function toolError(message: string): Record<string, unknown> {
-  return { content: [{ type: "text", text: message }], isError: true };
 }
 
 /** Starts an MCP stdio server. Stdout carries JSON-RPC only; diagnostics use stderr. */

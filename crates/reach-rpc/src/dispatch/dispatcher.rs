@@ -71,7 +71,7 @@ impl SessionDispatcher {
         }
         // 3. Session state: draining/cancelled rejects queued work that has not
         //    started.
-        if session.cancelled || session.workspace.is_cancelled() {
+        if session.is_cancelled() {
             return Err(SESSION_CLOSED.to_owned());
         }
         // 4. Deadline gate: do not start work past its deadline.
@@ -214,7 +214,7 @@ mod tests {
     fn cancelled_session_rejects_queued_work_before_start() {
         let mut workspace = workspace();
         let mut session = SessionContext::new("session-1".into(), 0, 0, &mut workspace);
-        session.cancelled = true;
+        session.cancel();
         let mut d = dispatcher();
         assert_eq!(
             d.dispatch(&mut session, &envelope("q1", "fs.read", json!({}), None), 0)

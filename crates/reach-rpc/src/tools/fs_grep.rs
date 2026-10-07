@@ -5,7 +5,7 @@ use serde_json::Value;
 
 use crate::{
     dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError},
-    parse_fs_grep_params, FsGrepParams,
+    parse_fs_grep_params_value, FsGrepParams,
 };
 
 use super::{check_deadline, deadline, parse_params, to_value, workspace_error};
@@ -29,7 +29,7 @@ impl Tool for FsGrepTool {
 
     fn execute(&self, context: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
         check_deadline(context)?;
-        let params: FsGrepParams = parse_params(context.params, parse_fs_grep_params)?;
+        let params: FsGrepParams = parse_params(context.params, parse_fs_grep_params_value)?;
         let result = context
             .workspace
             .grep_until(&params, deadline(context))

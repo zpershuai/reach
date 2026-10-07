@@ -17,7 +17,6 @@ export interface McpHttpOptions {
 interface HttpSession {
   id: string;
   version: string;
-  initialized: boolean;
   server: RemoteMcpServer;
   messages: Record<string, unknown>[];
   tail: Promise<unknown>;
@@ -211,6 +210,8 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       const body = await readBody(request, deadline);
       if (stopped) throw new HttpError(503, "Gateway is shutting down");
       if (session) requireActive(session);
+      // No await until enqueue increments queued: idle sweeping cannot interleave
+      // with this synchronous handoff. releaseReadPin also refreshes lastUsed.
       releaseReadPin();
       const batch = Array.isArray(body);
       const messages: unknown[] = batch ? body : [body];
@@ -230,7 +231,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         if (sessions.size + retired.size >= maxSessions) throw new HttpError(503, "MCP session limit reached");
         const negotiated = VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : VERSIONS.at(-1)!;
         const output: Record<string, unknown>[] = [];
-        session = { id: randomUUID(), version: negotiated, initialized: false,
+        session = { id: randomUUID(), version: negotiated,
           server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated), messages: output,
           tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now() };
         sessions.set(session.id, session);
@@ -248,8 +249,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         for (const message of requests) {
           requireActive(current);
           if (Date.now() >= current.server.deadlineAt) throw new HttpError(408, "MCP response budget exceeded before dispatch");
-          if (message.method === "notifications/initialized") current.initialized = true;
-          else if (!current.initialized && message.method !== "initialize" && message.method !== "ping") throw new HttpError(400, "Send notifications/initialized before using tools");
+          if (!current.server.initialized && message.method !== "notifications/initialized" && message.method !== "initialize" && message.method !== "ping") throw new HttpError(400, "Send notifications/initialized before using tools");
           await current.server.receive(message);
         }
         return current.messages.filter((message) => "id" in message).slice();

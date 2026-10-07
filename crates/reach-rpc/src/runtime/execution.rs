@@ -4,7 +4,6 @@
 
 use std::{
     collections::VecDeque,
-    sync::atomic::Ordering,
     time::{Duration, Instant},
 };
 
@@ -66,7 +65,7 @@ impl ExecutionControl<'_> {
                     };
                 }
                 if closure.is_some() {
-                    cancellation.store(true, Ordering::Release);
+                    cancellation.cancel();
                     (self.sleep)(Duration::from_millis(1));
                     continue;
                 }
@@ -133,8 +132,8 @@ impl ExecutionControl<'_> {
         self.last_activity_ms = self.clock.now_ms();
         context.lease_expires_at_ms = lease_expiry;
         if closure.is_some() {
-            cancellation.store(true, Ordering::Release);
-            context.cancelled = true;
+            cancellation.cancel();
+            context.cancel();
             self.queue.clear();
         }
         ExecutionResult { result, closure }
@@ -226,7 +225,7 @@ mod tests {
         };
         let outcome = execution.dispatch(&mut context, &mut dispatcher, &envelope, &mut transport);
         assert_eq!(outcome.closure, Some(SessionClosureReason::AgentRequested));
-        assert!(context.cancelled);
+        assert!(context.is_cancelled());
         assert!(execution.queue.is_empty());
         assert_eq!(context.request_ids.len(), 1);
     }
@@ -291,11 +290,11 @@ mod tests {
                 execution.dispatch(&mut context, &mut dispatcher, &envelope, &mut transport);
             if hit_hard_bound {
                 assert_eq!(outcome.closure, Some(SessionClosureReason::RpcTimeout));
-                assert!(context.cancelled);
+                assert!(context.is_cancelled());
             } else {
                 assert!(outcome.result.is_ok());
                 assert_eq!(outcome.closure, None);
-                assert!(!context.cancelled);
+                assert!(!context.is_cancelled());
                 assert_eq!(execution.last_activity_ms, 2_000);
             }
         }

@@ -27,10 +27,9 @@ use crate::{
 /// Parse typed params from the invocation context's JSON `Value`.
 pub(crate) fn parse_params<T>(
     value: &Value,
-    parse: fn(&str) -> Result<T, ContractError>,
+    parse: fn(&Value) -> Result<T, ContractError>,
 ) -> Result<T, ToolError> {
-    let text = serde_json::to_string(value).map_err(|_| ToolError::invalid_params())?;
-    parse(&text).map_err(|_| ToolError::invalid_params())
+    parse(value).map_err(|_| ToolError::invalid_params())
 }
 
 /// Refuse to begin work when the request deadline window has already elapsed.
@@ -260,6 +259,19 @@ mod tests {
             "fs.read", "fs.list", "fs.stat", "fs.write", "fs.edit", "fs.glob", "fs.grep",
         ] {
             assert!(methods.iter().any(|m| m == method), "missing {method}");
+        }
+        for method in [
+            "process.run",
+            "process.status",
+            "process.logs",
+            "process.stop",
+            "process.list",
+        ] {
+            assert_eq!(
+                methods.iter().any(|m| m == method),
+                cfg!(unix),
+                "{method} platform capability"
+            );
         }
         // A tool.call wrapper must not resolve to a registered business method.
         assert!(!methods.iter().any(|m| m == "tool.call"));
