@@ -4,6 +4,17 @@ Defines the portable Reach RPC wire contract for filesystem and trusted process 
 
 ## Requirements
 
+### Requirement: Error frames are terminal
+Endpoints MUST NOT send an error response to a parsed JSON frame whose type is error, even if its other fields are malformed. The Engine MUST apply this rule both while idle and during Tool execution. The Gateway MUST validate correlated error fields before resolving an RPC and silently ignore malformed error frames.
+
+#### Scenario: A malformed frame is rejected
+- **WHEN** the Gateway rejects a malformed Engine frame with INVALID_PARAMS
+- **THEN** the Engine does not answer that error frame and subsequent RPCs on that session and another Engine session can complete
+
+#### Scenario: A legacy Engine answers an error with a malformed error
+- **WHEN** the Gateway receives an error frame with a missing or empty requestId or invalid error fields
+- **THEN** it sends no error reply and does not resolve an RPC with that malformed frame
+
 ### Requirement: Reach RPC request envelope
 The system SHALL represent a request as a JSON object with required camelCase fields `type`, `protocol`, `version`, `sessionId`, `requestId`, `method`, and `params`.
 

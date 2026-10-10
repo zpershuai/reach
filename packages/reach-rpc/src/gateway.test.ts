@@ -4,10 +4,11 @@ import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
 import { connect, type Socket } from "node:net";
+import { createServer } from "node:http";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
 import { GATEWAY_VERSION } from "./version.js";
 import {
   createGateway,
@@ -76,7 +77,7 @@ test("malformed HTTP targets and Engine JSON cannot terminate the Gateway proces
       assert.match(response, /^HTTP\/1\.1 400/, diagnostics);
       await checkOtherSession();
     }
-    for (const value of [null, [], "text", 1, true, { type: "response", requestId: 1 }, { type: "error", requestId: "r", error: null }, { type: "session.ready" }]) {
+    for (const value of [null, [], "text", 1, true, { type: "response", requestId: 1 }, { type: "response", requestId: "r" }, { type: "session.ready" }]) {
       const rejected = once(peers[0]!, "message");
       peers[0]!.send(JSON.stringify(value));
       const [message] = await rejected;
@@ -1393,6 +1394,162 @@ async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs 
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
 }
+
+test("malformed Upgrade releases the accepted socket even when the client keeps its write side open", async () => {
+  const server = createGateway({ logger: () => {} });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  const address = server.address();
+  assert.ok(address && typeof address === "object");
+  const accepted = once(server, "connection");
+  const client = connect({ port: address.port, host: "127.0.0.1", allowHalfOpen: true });
+  const [socket] = await accepted as [Socket];
+  let response = "";
+  client.on("data", chunk => { response += chunk; });
+  try {
+    const ended = once(client, "end", { signal: AbortSignal.timeout(2000) });
+    client.write("GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n\r\n");
+    await ended;
+    assert.match(response, /^HTTP\/1\.1 400/);
+    assert.equal(client.writableEnded, false);
+    await waitUntil(() => socket.destroyed, 500);
+  } finally {
+    client.destroy();
+    socket.destroy();
+    await new Promise<void>(resolve => server.close(() => resolve()));
+  }
+});
+
+test("malformed Engine frames do not create an error loop with a real Rust Engine or disrupt another session", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-error-loop-"));
+  const controllerToken = "c".repeat(48);
+  const engines = [{ engineId: "a", engineToken: "a".repeat(48) }, { engineId: "b", engineToken: "b".repeat(48) }];
+  const children: ChildProcess[] = [];
+  try {
+    await fs.writeFile(join(root, "note.txt"), "healthy");
+    await withGateway(async baseUrl => {
+      const post = (id: string, path: string, body: unknown) => fetch(baseUrl + path + "?engineId=" + id, {
+        method: "POST", headers: { authorization: "Bearer " + controllerToken, "content-type": "application/json" },
+        body: JSON.stringify(body), signal: AbortSignal.timeout(5000),
+      });
+      const ready = async (id: string) => (await (await post(id, "/session/status", {})).json() as { status: string }).status === "ready";
+      await post("b", "/session/open", {});
+      children.push(await startEngine(baseUrl, { fixture: root }, { REACH_ENGINE_ID: "b", REACH_ENGINE_TOKEN: engines[1]!.engineToken }));
+      await waitUntil(() => ready("b"), 5000);
+
+      // Proxy the real Engine and corrupt its first ready frame. Forward the
+      // Gateway's rejection to Rust so both actual protocol handlers run.
+      const proxy = createServer((request, response) => {
+        void (async () => {
+          const chunks: Buffer[] = [];
+          for await (const chunk of request) chunks.push(Buffer.from(chunk));
+          const upstream = await fetch(new URL(request.url ?? "/", baseUrl), {
+            method: request.method,
+            headers: { authorization: request.headers.authorization ?? "", "content-type": "application/json" },
+            body: Buffer.concat(chunks),
+          });
+          const body = Buffer.from(await upstream.arrayBuffer());
+          response.writeHead(upstream.status, { "content-type": "application/json", "content-length": body.length });
+          response.end(body);
+        })().catch(() => response.destroy());
+      });
+      // Rust half-closes each heartbeat request; keep the proxy response side
+      // open while waiting for the additional upstream HTTP round trip.
+      Object.assign(proxy, { httpAllowHalfOpen: true });
+      const upgrades = new WebSocketServer({ noServer: true });
+      const sockets = new Set<Socket>();
+      const peers = new Set<WebSocket>();
+      let gatewayErrors = 0;
+      let engineErrors = 0;
+      let enginePeer: WebSocket | undefined;
+      let gatewayPeer: WebSocket | undefined;
+      proxy.on("connection", socket => {
+        sockets.add(socket);
+        socket.on("close", () => sockets.delete(socket));
+      });
+      proxy.on("upgrade", (request, socket, head) => {
+        const upstream = new WebSocket(wsBaseUrl(baseUrl) + request.url);
+        peers.add(upstream);
+        upstream.on("error", () => socket.destroy());
+        upstream.once("open", () => upgrades.handleUpgrade(request, socket, head, downstream => {
+          peers.add(downstream);
+          enginePeer = downstream;
+          gatewayPeer = upstream;
+          let originalReady: string | undefined;
+          downstream.on("error", () => upstream.terminate());
+          downstream.on("message", data => {
+            const text = data.toString();
+            const message = JSON.parse(text) as { type: string };
+            if (message.type === "session.ready") {
+              originalReady = text;
+              upstream.send("null");
+            } else {
+              if (message.type === "error") engineErrors++;
+              // Bound the failing pre-fix reproduction instead of flooding CI.
+              if (engineErrors >= 16) {
+                upstream.terminate();
+                downstream.terminate();
+              } else upstream.send(text);
+            }
+          });
+          upstream.on("message", data => {
+            if ((JSON.parse(data.toString()) as { type: string }).type === "error") gatewayErrors++;
+            downstream.send(data.toString());
+            if (originalReady !== undefined) {
+              upstream.send(originalReady);
+              originalReady = undefined;
+            }
+          });
+          upstream.on("close", () => downstream.terminate());
+          downstream.on("close", () => upstream.terminate());
+        }));
+      });
+      proxy.listen(0, "127.0.0.1");
+      await once(proxy, "listening");
+      const address = proxy.address();
+      assert.ok(address && typeof address === "object");
+      try {
+        await post("a", "/session/open", {});
+        children.push(await startEngine("http://127.0.0.1:" + address.port, { fixture: root }, { REACH_ENGINE_ID: "a", REACH_ENGINE_TOKEN: engines[0]!.engineToken }));
+        try {
+          await waitUntil(() => gatewayErrors > 0, 5000);
+        } catch (cause) {
+          const child = children[children.length - 1] as ChildProcess & { reachOutput?: () => string };
+          throw new Error("Gateway rejection not observed: " + child.reachOutput?.(), { cause });
+        }
+        await new Promise(resolve => setTimeout(resolve, 250));
+        assert.equal(engineErrors, 0, "Rust Engine answered a Gateway error frame");
+        assert.equal(gatewayErrors, 1, "Gateway answered an Engine error frame");
+        assert.ok(enginePeer && gatewayPeer);
+
+        // Include legacy malformed errors with empty/missing request ids.
+        gatewayPeer.send(JSON.stringify({ type: "error", requestId: "", error: { code: "INVALID_PARAMS" } }));
+        gatewayPeer.send(JSON.stringify({ type: "error", error: null }));
+        enginePeer.send(JSON.stringify({ type: "error", error: null }));
+        enginePeer.send(JSON.stringify({ type: "error", requestId: "", error: { code: "INVALID_PARAMS" } }));
+        for (const id of ["a", "b"]) {
+          await waitUntil(() => ready(id), 5000);
+          const response = await post(id, "/session/rpc", rpcBody("after-error-" + id, "fs.read", { workspace: "fixture", path: "note.txt" }));
+          assert.equal(response.status, 200);
+          assert.equal((await response.json() as { result: { content: string } }).result.content, "healthy");
+        }
+        assert.equal(engineErrors, 0);
+        assert.equal(gatewayErrors, 1);
+        assert.equal((await fetch(baseUrl + "/healthz")).status, 200);
+      } finally {
+        for (const child of children) await stopEngine(child);
+        children.length = 0;
+        for (const peer of peers) peer.terminate();
+        for (const socket of sockets) socket.destroy();
+        upgrades.close();
+        await new Promise<void>(resolve => proxy.close(() => resolve()));
+      }
+    }, { authentication: { controllerToken, ...engines[0]! }, engines: [engines[1]!], logger: () => {} });
+  } finally {
+    for (const child of children) await stopEngine(child);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
 
 test("Rust engine lifecycle: open -> ready -> rpc -> renew -> close", async () => {
   const root = await fs.mkdtemp(join(tmpdir(), "reach-integration-"));

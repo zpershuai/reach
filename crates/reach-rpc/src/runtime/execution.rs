@@ -89,6 +89,10 @@ impl ExecutionControl<'_> {
                                 continue;
                             }
                         };
+                        // Keep the terminal-error rule while a Tool is running.
+                        if value.get("type").and_then(Value::as_str) == Some("error") {
+                            continue;
+                        }
                         if value.get("type").and_then(Value::as_str) == Some("request") {
                             if self.queue.len() < MAX_QUEUED_REQUESTS {
                                 self.queue.push_back(text);
