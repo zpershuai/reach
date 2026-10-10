@@ -36,6 +36,7 @@ export class EngineSessionState {
   public lastClosureReason: string | undefined;
   public leaseTimer: ReturnType<typeof setTimeout> | undefined;
   public idleTimer: ReturnType<typeof setTimeout> | undefined;
+  public connectingTimer: ReturnType<typeof setTimeout> | undefined;
   public resetIdleTimer: (() => void) | undefined;
   constructor(
     private readonly now: () => number,

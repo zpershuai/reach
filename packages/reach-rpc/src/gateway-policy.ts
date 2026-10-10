@@ -10,6 +10,8 @@ export const SESSION_IDLE_MS = 5 * 60 * 1000;
 /** Client advisory for how often an Agent should renew before its lease expires. */
 export const SESSION_RENEW_CADENCE_MS = 60 * 1000;
 export const SESSION_RPC_TIMEOUT_MS = 30_000;
+/** Bound on a live WebSocket that has not yet sent valid `session.ready`. */
+export const SESSION_CONNECTING_MS = 15_000;
 export const MAX_PENDING_RPCS = 16;
 /** The Gateway-relative WebSocket session endpoint returned on heartbeat. */
 export const SESSION_ENDPOINT_PATH = "/session";

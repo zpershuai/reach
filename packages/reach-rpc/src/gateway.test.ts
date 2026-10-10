@@ -1258,6 +1258,27 @@ test("open is rejected while another Engine session is live", async () => {
   });
 });
 
+test("connecting session that never becomes ready is released", async () => {
+  await withGateway(async (baseUrl) => {
+    const { socket } = await openEngineSession(baseUrl, { ready: false });
+    const during = await fetch(`${baseUrl}/session/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(during.status, 409);
+    assert.equal((await during.json() as { error: string }).error, "session already active");
+    await once(socket, "close");
+    const reopened = await fetch(`${baseUrl}/session/open`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{}",
+    });
+    assert.equal(reopened.status, 200);
+    assert.equal((await reopened.json() as { status: string }).status, "wanted");
+  }, { sessionConnectingMs: 50 });
+});
+
 async function waitUntil(condition: () => boolean, timeoutMs = 2000): Promise<void> {
   const started = Date.now();
   while (!condition()) {
