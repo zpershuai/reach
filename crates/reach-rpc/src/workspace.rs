@@ -148,6 +148,47 @@ impl WorkspaceFilesystem {
     }
 }
 
+#[cfg(test)]
+mod path_identity_tests {
+    use super::*;
+
+    #[test]
+    fn shared_grant_paths_resolve_to_exact_engine_files_and_scripts() {
+        let directory = tempfile::tempdir().unwrap();
+        let workspace = WorkspaceFilesystem::new(HashMap::from([(
+            "fixture".into(),
+            directory.path().to_path_buf(),
+        )]));
+        let cases: Vec<serde_json::Value> =
+            serde_json::from_str(include_str!("../../../fixtures/workspace-paths.json")).unwrap();
+        for case in &cases {
+            let path = directory.path().join(case["normalized"].as_str().unwrap());
+            fs::create_dir_all(path.parent().unwrap()).unwrap();
+            fs::write(path, case["normalized"].as_str().unwrap()).unwrap();
+        }
+        for case in cases {
+            let input = case["input"].as_str().unwrap();
+            let normalized = case["normalized"].as_str().unwrap();
+            let params: FsReadParams =
+                serde_json::from_value(serde_json::json!({"workspace":"fixture", "path":input}))
+                    .unwrap();
+            assert_eq!(workspace.read(&params).unwrap().content, normalized);
+            if case["script"] == true {
+                let params = crate::ProcessRunParams::parse(&serde_json::json!({"workspace":"fixture", "script":input, "launchId":"launch"})).unwrap().normalized();
+                assert_eq!(params.script, normalized);
+                #[cfg(unix)]
+                assert_eq!(
+                    workspace
+                        .process_entry("fixture", &params.script, ".")
+                        .unwrap()
+                        .2,
+                    normalized
+                );
+            }
+        }
+    }
+}
+
 pub(crate) fn revision_str(content: &str) -> String {
     revision_bytes(content.as_bytes())
 }

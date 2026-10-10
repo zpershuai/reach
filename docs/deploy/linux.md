@@ -15,7 +15,7 @@ REACH_ENGINE_TOKEN=替换为该设备的独立凭证
 REACH_WORKSPACE_ROOTS=default:/absolute/path/to/workspace
 ```
 
-先按 [多设备 Gateway 注册](openwrt.md) 为设备配置凭证，再将二进制、配置和以下文件上传到同一临时目录：`install-engine-linux.sh`、`install-node-runtime.py`、`node-runtime.json`、`run-node.sh`。安装时以最终运行 Engine 的账号执行：
+先按 [多设备 Gateway 注册](openwrt.md) 为设备配置凭证，再将二进制、配置和以下文件上传到同一临时目录：`install-engine-linux.sh`、`install-engine-linux.py`、`install-node-runtime.py`、`node-runtime.json`、`run-node.sh`。安装时以最终运行 Engine 的账号执行：
 
 ```sh
 bash install-engine-linux.sh ./engine ./engine.env
@@ -27,7 +27,9 @@ bash install-engine-linux.sh ./engine ./engine.env
 bash install-engine-linux.sh ./engine ./engine.env ./node-v24.21.0-linux-x64.tar.gz
 ```
 
-安装器在替换服务之前验证 Engine 和 runtime，备份旧文件到 `~/.reach/backups/<时间>-linux`，安装后启动服务并启用开机运行。已有 MCP 文件保留，安装记录写入 `~/.reach/versions.json`。重复安装会重启该 Engine 并中断其活动会话。
+安装器先验证源文件、配置语法、Engine 和 runtime，在各目标文件系统暂存完整文件，再停止旧服务并逐文件原子替换。成功后启动服务并启用开机运行。失败会恢复旧文件、Node runtime 链接及原先的运行和启用状态；回滚本身失败时，错误会报告恢复备份的位置。备份位于 `~/.reach/backups/linux-<唯一标识>`。已有 MCP 文件保留，安装记录写入 `~/.reach/versions.json`。重复安装会重启该 Engine 并中断其活动会话。
+
+故障注入测试通过临时目录和模拟 systemctl 验证安装及回滚。实际 systemd、开机启动、断电和 SIGKILL 恢复还需在目标 Linux 主机验证；进程被强制终止时不会执行自动回滚。
 
 | 文件 | 位置 |
 | --- | --- |

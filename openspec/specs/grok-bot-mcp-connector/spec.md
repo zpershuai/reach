@@ -63,7 +63,16 @@ The connector SHALL provide a documented Path 1 mode for MCP hosts that ignore `
 - **THEN** the documentation identifies how to enable the static `deviceId`-parameter fallback and its trade-off
 
 ### Requirement: Bounded readiness and session recovery
-The connector MUST default readiness waiting to 150 seconds to cover the Engine's 120-second idle poll and setup. Each HTTP request and response body MUST have a timeout, defaulting to 35 seconds. A failed readiness wait MUST attempt to release its own session intent. Before filesystem calls, the connector MUST verify selected-session readiness and identity and reopen an expired session before forwarding a new RPC. Device switching MUST drain the old session before opening the new one. Renew, close, and RPC MUST carry the bound session id. Stdio EOF MUST close the selected session after received work finishes.
+The connector MUST default readiness waiting to 150 seconds to cover the Engine's 120-second idle poll and setup.
+
+#### Scenario: Required bounded readiness and session recovery behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** Each HTTP request and response body MUST have a timeout, defaulting to 35 seconds.
+- **AND** A failed readiness wait MUST attempt to release its own session intent.
+- **AND** Before filesystem calls, the connector MUST verify selected-session readiness and identity and reopen an expired session before forwarding a new RPC.
+- **AND** Device switching MUST drain the old session before opening the new one.
+- **AND** Renew, close, and RPC MUST carry the bound session id.
+- **AND** Stdio EOF MUST close the selected session after received work finishes.
 
 #### Scenario: Idle session has expired
 - **WHEN** a filesystem tool is invoked for a previously selected session whose Gateway reports no active session
@@ -81,9 +90,16 @@ The connector MUST NOT automatically replay a forwarded RPC after timeout or tra
 - **THEN** the connector returns an error and sends no retry of that write
 
 ### Requirement: Failure cleanup retains session ownership
-On readiness, status, or transport failure, the connector MUST attempt to drain its owned intent. If drain fails, it MUST retain that Gateway client as an uncertain selection, hide its dynamic filesystem tools, and drain it before opening another session. Confirmed ownership loss MUST release only the stale local reference and MUST NOT close the replacement session. A request-scoped deadline error MUST NOT invalidate an otherwise healthy selection. Explicit close and shutdown MAY retry lifecycle cleanup, but MUST NOT replay a forwarded filesystem RPC.
+On readiness, status, or transport failure, the connector MUST attempt to drain its owned intent.
 
-Known pre-forwarding HTTP RPC rejections, including invalid parameters, oversized payloads, duplicate ids, and a full queue, MUST return tool errors without draining a healthy selected session. Uncertain forwarding failures and session-unavailable errors MUST remain eligible for cleanup; HTTP 503 alone MUST NOT imply either category.
+#### Scenario: Required failure cleanup retains session ownership behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** If drain fails, it MUST retain that Gateway client as an uncertain selection, hide its dynamic filesystem tools, and drain it before opening another session.
+- **AND** Confirmed ownership loss MUST release only the stale local reference and MUST NOT close the replacement session.
+- **AND** A request-scoped deadline error MUST NOT invalidate an otherwise healthy selection.
+- **AND** Explicit close and shutdown MAY retry lifecycle cleanup, but MUST NOT replay a forwarded filesystem RPC.
+- **AND** Known pre-forwarding HTTP RPC rejections, including invalid parameters, oversized payloads, duplicate ids, and a full queue, MUST return tool errors without draining a healthy selected session.
+- **AND** Uncertain forwarding failures and session-unavailable errors MUST remain eligible for cleanup; HTTP 503 alone MUST NOT imply either category.
 
 #### Scenario: Gateway status and cleanup are temporarily unavailable
 - **WHEN** status fails and a best-effort close also fails
@@ -97,9 +113,14 @@ If `/session/open` returns a session id, the connector MUST bind that acknowledg
 - **THEN** the connector adopts that id and includes it in subsequent RPC, renew, and close requests
 
 ### Requirement: Shared remote static tool surface
-The Gateway HTTP MCP server SHALL reuse connector schemas and filesystem dispatch in process. It SHALL expose static underscore names with required deviceId on filesystem and close tools, and list every registered Engine without a client devices file. Existing stdio names, dynamic behavior, and standalone artifacts SHALL remain compatible.
+The Gateway HTTP MCP server SHALL reuse connector schemas and filesystem dispatch in process.
 
-Remote session_close SHALL report ENGINE_BUSY when this MCP session has no bound client but the Engine remains owned by another caller. It SHALL report success only after closing its own Engine session or confirming that no Engine session exists.
+#### Scenario: Required shared remote static tool surface behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** It SHALL expose static underscore names with required deviceId on filesystem and close tools, and list every registered Engine without a client devices file.
+- **AND** Existing stdio names, dynamic behavior, and standalone artifacts SHALL remain compatible.
+- **AND** Remote session_close SHALL report ENGINE_BUSY when this MCP session has no bound client but the Engine remains owned by another caller.
+- **AND** It SHALL report success only after closing its own Engine session or confirming that no Engine session exists.
 
 #### Scenario: Remote discovery
 - **WHEN** an HTTP MCP client lists tools and devices
@@ -110,7 +131,14 @@ Remote session_close SHALL report ENGINE_BUSY when this MCP session has no bound
 - **THEN** the tool returns ENGINE_BUSY and leaves the owner's session intact
 
 ### Requirement: Private Grok plugin configuration
-The repository SHALL distribute a plugin template using a reserved example HTTPS endpoint and a generator that creates a private installation with a literal public HTTPS /mcp URL. Only the Authorization header SHALL use the Controller token setup variable. The generator MUST NOT copy deployment tokens and MUST refuse to overwrite an existing private installation. Verification SHALL optionally send the actual client's exact Origin and report an allowlist rejection without weakening the Gateway's Origin checks. Interactive deployment instructions SHALL configure a 15-second heartbeat without changing existing installations automatically.
+The repository SHALL distribute a plugin template using a reserved example HTTPS endpoint and a generator that creates a private installation with a literal public HTTPS /mcp URL.
+
+#### Scenario: Required private grok plugin configuration behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** Only the Authorization header SHALL use the Controller token setup variable.
+- **AND** The generator MUST NOT copy deployment tokens and MUST refuse to overwrite an existing private installation.
+- **AND** Verification SHALL optionally send the actual client's exact Origin and report an allowlist rejection without weakening the Gateway's Origin checks.
+- **AND** Interactive deployment instructions SHALL configure a 15-second heartbeat without changing existing installations automatically.
 
 #### Scenario: Configure a public Gateway
 - **WHEN** the user generates a plugin from a private deployment JSON containing a public HTTPS Gateway root
@@ -143,7 +171,14 @@ Remote filesystem calls MUST retain Gateway canonicalization, grant validation, 
 - **THEN** its error preserves the local validation message without describing it as an Engine failure
 
 ### Requirement: Shared managed process tools
-MCP SHALL expose process.run, process.status, process.logs, process.stop and process.list through common schemas and dispatch. Dynamic stdio SHALL expose dot-named tools after device selection without deviceId; static stdio SHALL require deviceId; HTTP SHALL expose underscore names with required deviceId. Calls MUST use the target Engine through Gateway and MUST NOT execute scripts on the MCP host. Older Engines lacking process methods MUST produce a clear unsupported-capability error without attempted execution. Existing filesystem tool behavior and transports MUST remain compatible.
+MCP SHALL expose process.run, process.status, process.logs, process.stop and process.list through common schemas and dispatch.
+
+#### Scenario: Required shared managed process tools behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** Dynamic stdio SHALL expose dot-named tools after device selection without deviceId; static stdio SHALL require deviceId; HTTP SHALL expose underscore names with required deviceId.
+- **AND** Calls MUST use the target Engine through Gateway and MUST NOT execute scripts on the MCP host.
+- **AND** Older Engines lacking process methods MUST produce a clear unsupported-capability error without attempted execution.
+- **AND** Existing filesystem tool behavior and transports MUST remain compatible.
 
 #### Scenario: HTTP run targets selected remote device
 - **WHEN** process_run is called with deviceId and a valid script request on a ready owned session
@@ -154,7 +189,13 @@ MCP SHALL expose process.run, process.status, process.logs, process.stop and pro
 - **THEN** a run call returns a clear unsupported-capability error without forwarding a launch
 
 ### Requirement: Accurate shared process and filesystem descriptions
-Both MCP transports SHALL share process descriptions explaining trusted-code privileges, fixed runtime, workspace-relative entry/cwd, mandatory launchId, asynchronous results, owner-scoped observation, bounded logs and idempotent stop. Running status MUST NOT be described as service readiness. Write/edit descriptions SHALL both explain revision/ifMatch and uncertain-outcome rereads; mode=create guidance MUST appear only on write. Initialization and documentation MUST explain Engine's optional script use of its private runtime rather than state that Engine never executes Node.
+Both MCP transports SHALL share process descriptions explaining trusted-code privileges, fixed runtime, workspace-relative entry/cwd, mandatory launchId, asynchronous results, owner-scoped observation, bounded logs and idempotent stop.
+
+#### Scenario: Required accurate shared process and filesystem descriptions behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** Running status MUST NOT be described as service readiness.
+- **AND** Write/edit descriptions SHALL both explain revision/ifMatch and uncertain-outcome rereads; mode=create guidance MUST appear only on write.
+- **AND** Initialization and documentation MUST explain Engine's optional script use of its private runtime rather than state that Engine never executes Node.
 
 #### Scenario: Client inspects tools over either transport
 - **WHEN** tools/list returns process and filesystem definitions
@@ -168,7 +209,13 @@ MCP MUST NOT automatically replay a forwarded process.run or silently establish 
 - **THEN** the tool error includes launchId, no automatic retry occurs and status lookup remains possible on the same session
 
 ### Requirement: Process release version reporting
-The feature release SHALL upgrade Engine from 0.1.0 to 0.2.0 and Gateway/MCP from 0.2.0 to 0.3.0, synchronizing component manifests and lockfiles. Built CLI versions, MCP serverInfo/get_versions, Gateway health/status and Engine heartbeat/session.ready MUST report actual component artifacts. Wire protocol and bundled Node runtime versions MUST remain unchanged. If intervening changes advance versions before implementation, targets MUST be reconciled to a later compatible feature release without downgrading.
+The feature release SHALL upgrade Engine from 0.1.0 to 0.2.0 and Gateway/MCP from 0.2.0 to 0.3.0, synchronizing component manifests and lockfiles.
+
+#### Scenario: Required process release version reporting behavior
+- **WHEN** a client uses the connector or its configuration tools
+- **THEN** Built CLI versions, MCP serverInfo/get_versions, Gateway health/status and Engine heartbeat/session.ready MUST report actual component artifacts.
+- **AND** Wire protocol and bundled Node runtime versions MUST remain unchanged.
+- **AND** If intervening changes advance versions before implementation, targets MUST be reconciled to a later compatible feature release without downgrading.
 
 #### Scenario: Built release artifacts are inspected
 - **WHEN** release verification queries CLI and protocol version reporting paths
@@ -206,3 +253,17 @@ This change SHALL raise Engine from 0.2.0 to 0.2.1 and Gateway/MCP from 0.3.0 to
 #### Scenario: Verify patched components
 - **WHEN** patched artifacts are built
 - **THEN** Engine/Gateway/MCP CLI versions, MCP serverInfo/get_versions, Gateway health/status and Engine heartbeat/session.ready report their actual component artifact versions
+
+### Requirement: Static stdio close respects selected ownership
+Static stdio session.close MUST inspect the requested device without selecting it or opening a session. Closing an unowned device MUST return closed=false and owned=false and preserve the current selection and its tasks. Stale ownership MUST clear only the local reference and report ENGINE_BUSY without closing a successor.
+
+#### Scenario: Closing another or offline device
+- **WHEN** device A is selected and the client closes device B
+- **THEN** A remains usable and B is never opened, including when B is offline
+
+### Requirement: Stdio Gateway credentials require secure transport
+Stdio Gateway URLs MUST use HTTPS except for HTTP on localhost, IPv4 127/8 or IPv6 ::1. Credentials, queries and fragments in base URLs MUST be rejected. Configuration and every HTTP request MUST validate the URL before Authorization is attached; redirects MUST be refused.
+
+#### Scenario: Misconfigured remote plaintext URL
+- **WHEN** a configured or directly constructed Gateway client uses remote HTTP or a malformed URL
+- **THEN** it fails before sending credentials while HTTPS and loopback HTTP remain supported

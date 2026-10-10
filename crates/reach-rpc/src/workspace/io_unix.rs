@@ -124,7 +124,28 @@ pub(super) fn descriptor_atomic_write(
     name: &str,
     content: &str,
 ) -> Result<(), FilesystemError> {
-    use rustix::fs::{openat, renameat, statat, unlinkat, AtFlags, Mode, OFlags};
+    use rustix::fs::{fchmod, openat, renameat, statat, unlinkat, AtFlags, Mode, OFlags};
+    use std::os::unix::fs::MetadataExt;
+
+    let original = match openat(
+        parent,
+        name,
+        OFlags::RDONLY | OFlags::NOFOLLOW | OFlags::CLOEXEC | OFlags::NONBLOCK,
+        Mode::empty(),
+    ) {
+        Ok(fd) => {
+            let file = File::from(fd);
+            let metadata = file.metadata().map_err(|_| denied())?;
+            if !metadata.is_file() {
+                return Err(denied());
+            }
+            // Hold the descriptor until replacement so an unlinked inode
+            // cannot be recycled into a different target during validation.
+            Some((file, metadata))
+        }
+        Err(error) if error == rustix::io::Errno::NOENT => None,
+        Err(_) => return Err(denied()),
+    };
 
     let temporary = format!(".{name}.{}.tmp", Uuid::new_v4());
     let write_flags =
@@ -139,6 +160,12 @@ pub(super) fn descriptor_atomic_write(
         .map_err(|_| denied())?;
         let mut file = File::from(fd);
         file.write_all(content.as_bytes()).map_err(|_| denied())?;
+        // Preserve ordinary access/execution bits, never setuid/setgid/sticky.
+        // New files have a private default independent of the process umask.
+        let mode = original
+            .as_ref()
+            .map_or(0o600, |(_, metadata)| metadata.mode() & 0o777);
+        fchmod(&file, Mode::from_raw_mode(mode as _)).map_err(|_| denied())?;
         file.sync_all().map_err(|_| denied())?;
         drop(file);
         // Re-validate the final component immediately before renameat. The
@@ -147,12 +174,14 @@ pub(super) fn descriptor_atomic_write(
         // silently: deny instead of replacing the link in place.
         match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(meta) => {
-                if rustix::fs::FileType::from_raw_mode(meta.st_mode).is_symlink() {
+                if !original.as_ref().is_some_and(|(_, original)| {
+                    meta.st_dev as u64 == original.dev() && meta.st_ino as u64 == original.ino()
+                }) {
                     return Err(denied());
                 }
             }
-            // Missing target is fine (the create case); other errors deny below.
-            Err(_) => {}
+            Err(error) if error == rustix::io::Errno::NOENT && original.is_none() => {}
+            Err(_) => return Err(denied()),
         }
         renameat(parent, temporary.as_str(), parent, name).map_err(|_| denied())?;
         Ok(())

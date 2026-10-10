@@ -13,10 +13,9 @@ interface WriteGrant {
 
 /** Normalize workspace-relative grant scopes without allowing parent traversal. */
 export function normalizeWorkspacePath(path: string): string | undefined {
-  const trimmed = path.trim();
-  if (!trimmed || trimmed.startsWith("/") || trimmed.includes("\0")) return undefined;
+  if (!path || path.startsWith("/") || path.includes("\0")) return undefined;
   const parts: string[] = [];
-  for (const part of trimmed.split("/")) {
+  for (const part of path.split("/")) {
     if (!part || part === ".") continue;
     if (part === "..") return undefined;
     parts.push(part);

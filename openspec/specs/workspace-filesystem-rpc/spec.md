@@ -42,9 +42,20 @@ The system SHALL provide `fs.read`, `fs.list`, and `fs.stat`. `fs.read` SHALL re
 - **THEN** `fs.list` returns a cursor that continues the same listing query
 
 ### Requirement: Atomic conditional writes and edits
-The system SHALL provide `fs.write` with `overwrite` and `create` modes and `fs.edit` with `oldString`, `newString`, and `replaceAll` defaulting to false. Mutations MUST be permission-checked, serialized, atomic, and confined to a verified real workspace directory. The system MUST open the real workspace root once, descend each path component with no-follow directory opens (descriptor-relative / `openat`+`O_NOFOLLOW` or equivalent), create missing parents one component at a time without following links, create the temporary file through the verified parent descriptor, and rename onto the target name only through that same parent descriptor. Path-string check-then-create-then-rename MUST NOT be used as the sole containment mechanism. When `ifMatch` is supplied and does not equal the current revision, the operation MUST fail with `REVISION_CONFLICT`; a missing edit source MUST fail with `OLD_STRING_NOT_FOUND`; and multiple occurrences without `replaceAll` MUST fail with `OLD_STRING_NOT_UNIQUE`. On platforms where no-follow descriptor-relative mutation is unavailable, the system MUST fail closed with `WORKSPACE_ACCESS_DENIED` rather than falling back to path-string mutation.
+The system SHALL provide `fs.write` with `overwrite` and `create` modes and `fs.edit` with `oldString`, `newString`, and `replaceAll` defaulting to false.
 
-The mutation read of the target MUST open it without blocking on non-regular files (e.g. `O_NONBLOCK`), so a FIFO/device at the target is rejected promptly instead of stalling the engine thread; the read MUST NOT precede an `is_file` check with a blocking open. Missing parent directories MUST be created only after the write/edit existence and revision checks have passed, and a failed mutation MUST NOT create any parent directories. A parent whose concurrent creation races the `mkdirat` (returning `EEXIST`) MUST be re-opened and re-validated with `NOFOLLOW` rather than treated as a denial. Immediately before `renameat`, a mutation MUST re-check that the final component is not a symbolic link that appeared after validation and reject it with `WORKSPACE_ACCESS_DENIED` rather than replacing the link in place.
+#### Scenario: Required atomic conditional writes and edits behavior
+- **WHEN** a filesystem RPC is executed
+- **THEN** Mutations MUST be permission-checked, serialized, atomic, and confined to a verified real workspace directory.
+- **AND** The system MUST open the real workspace root once, descend each path component with no-follow directory opens (descriptor-relative / `openat`+`O_NOFOLLOW` or equivalent), create missing parents one component at a time without following links, create the temporary file through the verified parent descriptor, and rename onto the target name only through that same parent descriptor.
+- **AND** Path-string check-then-create-then-rename MUST NOT be used as the sole containment mechanism.
+- **AND** When `ifMatch` is supplied and does not equal the current revision, the operation MUST fail with `REVISION_CONFLICT`; a missing edit source MUST fail with `OLD_STRING_NOT_FOUND`; and multiple occurrences without `replaceAll` MUST fail with `OLD_STRING_NOT_UNIQUE`.
+- **AND** On platforms where no-follow descriptor-relative mutation is unavailable, the system MUST fail closed with `WORKSPACE_ACCESS_DENIED` rather than falling back to path-string mutation.
+- **AND** The mutation read of the target MUST open it without blocking on non-regular files (e.g.
+- **AND** `O_NONBLOCK`), so a FIFO/device at the target is rejected promptly instead of stalling the engine thread; the read MUST NOT precede an `is_file` check with a blocking open.
+- **AND** Missing parent directories MUST be created only after the write/edit existence and revision checks have passed, and a failed mutation MUST NOT create any parent directories.
+- **AND** A parent whose concurrent creation races the `mkdirat` (returning `EEXIST`) MUST be re-opened and re-validated with `NOFOLLOW` rather than treated as a denial.
+- **AND** Immediately before `renameat`, a mutation MUST re-check that the final component is not a symbolic link that appeared after validation and reject it with `WORKSPACE_ACCESS_DENIED` rather than replacing the link in place.
 
 #### Scenario: Reject a symlink mutation path
 - **WHEN** any target path component is a symbolic link
@@ -79,7 +90,13 @@ The mutation read of the target MUST open it without blocking on non-regular fil
 - **THEN** the mutation re-opens that component with `NOFOLLOW` and continues instead of failing with `WORKSPACE_ACCESS_DENIED`
 
 ### Requirement: Bounded glob and grep search
-The system SHALL provide `fs.glob` and `fs.grep`, both rooted at `path` defaulting to `.` and supporting pagination cursors. `fs.glob` SHALL traverse until the workspace tree is exhausted or 10,000 matching files have been found, apply its pattern during traversal, return files only, default `maxResults` to 200, and honor `respectGitignore` defaulting to true. `fs.grep` SHALL treat `pattern` as a literal substring, skip symbolic links, walk incrementally, scan at most 8 MiB, return at most 10,000 matches, and truncate each returned line to 16 KiB. Both operations SHALL mark results truncated when their applicable hard limit is reached.
+The system SHALL provide `fs.glob` and `fs.grep`, both rooted at `path` defaulting to `.` and supporting pagination cursors.
+
+#### Scenario: Required bounded glob and grep search behavior
+- **WHEN** a filesystem RPC is executed
+- **THEN** `fs.glob` SHALL traverse until the workspace tree is exhausted or 10,000 matching files have been found, apply its pattern during traversal, return files only, default `maxResults` to 200, and honor `respectGitignore` defaulting to true.
+- **AND** `fs.grep` SHALL treat `pattern` as a literal substring, skip symbolic links, walk incrementally, scan at most 8 MiB, return at most 10,000 matches, and truncate each returned line to 16 KiB.
+- **AND** Both operations SHALL mark results truncated when their applicable hard limit is reached.
 
 #### Scenario: Continue globbing past nonmatching files
 - **WHEN** a traversal visits more than 10,000 nonmatching files before later matching files
@@ -94,7 +111,13 @@ The system SHALL provide `fs.glob` and `fs.grep`, both rooted at `path` defaulti
 - **THEN** it returns only bounded matches and indicates that its result is truncated
 
 ### Requirement: Session-scoped query cursors and tool dispatch
-The system SHALL bind pagination cursors to the active Engine session, canonical filesystem method, and complete query. It MUST reject cursors after session disconnect, expiry, drain, or when reused for another method or query. Each filesystem method SHALL be invokable directly through its registered canonical method. A single-level `tool.call` wrapper MAY be accepted only as a compatibility adapter and MUST be canonicalized before authorization and Tool dispatch; nested or malformed `tool.call` MUST be rejected as `INVALID_PARAMS`.
+The system SHALL bind pagination cursors to the active Engine session, canonical filesystem method, and complete query.
+
+#### Scenario: Required session-scoped query cursors and tool dispatch behavior
+- **WHEN** a filesystem RPC is executed
+- **THEN** It MUST reject cursors after session disconnect, expiry, drain, or when reused for another method or query.
+- **AND** Each filesystem method SHALL be invokable directly through its registered canonical method.
+- **AND** A single-level `tool.call` wrapper MAY be accepted only as a compatibility adapter and MUST be canonicalized before authorization and Tool dispatch; nested or malformed `tool.call` MUST be rejected as `INVALID_PARAMS`.
 
 #### Scenario: Reject a cursor reused for another query
 - **WHEN** a cursor issued for one filesystem query is used with changed query parameters or another method
@@ -123,7 +146,15 @@ The system SHALL reject missing required fields, invalid field types, empty requ
 - **THEN** the system returns `INVALID_PARAMS`
 
 ### Requirement: Session-scoped query cursors and operation sizes
-The system SHALL bind pagination cursors to the active session, method, and complete query. It MUST reject cursors after disconnect or when reused for another method or query, and it MUST allow no more than 32 live cursors per session. Each read, write, and edit operation MUST reject a file larger than 8 MiB with `FILE_TOO_LARGE`. Each filesystem method SHALL be invokable directly and through a single-level `tool.call` using `{ name, arguments }` where `name` is a supported filesystem method. Nested `tool.call` (a `tool.call` whose `name` is itself `tool.call`) MUST be rejected with `INVALID_PARAMS` and MUST NOT dispatch a filesystem operation. When a session ends for any reason, including abnormal disconnect or send failure, the system MUST clear all cursors belonging to that session so a later session cannot resume them.
+The system SHALL bind pagination cursors to the active session, method, and complete query.
+
+#### Scenario: Required session-scoped query cursors and operation sizes behavior
+- **WHEN** a filesystem RPC is executed
+- **THEN** It MUST reject cursors after disconnect or when reused for another method or query, and it MUST allow no more than 32 live cursors per session.
+- **AND** Each read, write, and edit operation MUST reject a file larger than 8 MiB with `FILE_TOO_LARGE`.
+- **AND** Each filesystem method SHALL be invokable directly and through a single-level `tool.call` using `{ name, arguments }` where `name` is a supported filesystem method.
+- **AND** Nested `tool.call` (a `tool.call` whose `name` is itself `tool.call`) MUST be rejected with `INVALID_PARAMS` and MUST NOT dispatch a filesystem operation.
+- **AND** When a session ends for any reason, including abnormal disconnect or send failure, the system MUST clear all cursors belonging to that session so a later session cannot resume them.
 
 #### Scenario: Reject an excess cursor
 - **WHEN** a session attempts to create a 33rd live filesystem cursor
@@ -150,7 +181,15 @@ The system SHALL bind pagination cursors to the active session, method, and comp
 - **THEN** all cursors created during that session are invalidated and a later session cannot resume them
 
 ### Requirement: Descriptor-relative inspection and bounded snapshots
-The Rust Engine MUST inspect and traverse workspace paths through no-follow directory descriptors. Opening and reading regular files MUST reject non-regular targets without waiting on a FIFO. The 8 MiB bound MUST be enforced during reads even when files grow after metadata inspection. Directory enumeration MUST retain at most 10,000 entries per directory and recursion MUST be bounded to 128 directory levels, failing as `DIRECTORY_TOO_LARGE` or `DIRECTORY_TOO_DEEP`. Platforms lacking descriptor-relative primitives MUST fail closed. Completed pagination snapshots, including the TypeScript test reference, MUST be deleted and exhausted cursors MUST be invalid.
+The Rust Engine MUST inspect and traverse workspace paths through no-follow directory descriptors.
+
+#### Scenario: Required descriptor-relative inspection and bounded snapshots behavior
+- **WHEN** a filesystem RPC is executed
+- **THEN** Opening and reading regular files MUST reject non-regular targets without waiting on a FIFO.
+- **AND** The 8 MiB bound MUST be enforced during reads even when files grow after metadata inspection.
+- **AND** Directory enumeration MUST retain at most 10,000 entries per directory and recursion MUST be bounded to 128 directory levels, failing as `DIRECTORY_TOO_LARGE` or `DIRECTORY_TOO_DEEP`.
+- **AND** Platforms lacking descriptor-relative primitives MUST fail closed.
+- **AND** Completed pagination snapshots, including the TypeScript test reference, MUST be deleted and exhausted cursors MUST be invalid.
 
 #### Scenario: Directory is swapped during inspection
 - **WHEN** a validated directory's path is replaced with a symbolic link to an outside directory
@@ -161,7 +200,14 @@ The Rust Engine MUST inspect and traverse workspace paths through no-follow dire
 - **THEN** completed snapshots do not consume the 32-live-cursor allowance and exhausted cursors are rejected
 
 ### Requirement: Bounded cooperative text reads
-Regular-file reads and grep's partial byte-budget reads MUST check cooperative cancellation between chunks no larger than 64 KiB. Grep MUST also check its invocation deadline between chunks and scanned lines while preserving its truncation behavior. Text reads and mutation pre-reads MUST return `INVALID_UTF8` for invalid UTF-8 content on supported platforms, without modifying that content. Reading a directory as a text file MUST return `FILE_NOT_FOUND`; non-regular special targets MUST remain access-denied. `fs.stat` MAY hash raw file bytes without requiring valid UTF-8.
+Regular-file reads and grep's partial byte-budget reads MUST check cooperative cancellation between chunks no larger than 64 KiB.
+
+#### Scenario: Required bounded cooperative text reads behavior
+- **WHEN** a filesystem RPC is executed
+- **THEN** Grep MUST also check its invocation deadline between chunks and scanned lines while preserving its truncation behavior.
+- **AND** Text reads and mutation pre-reads MUST return `INVALID_UTF8` for invalid UTF-8 content on supported platforms, without modifying that content.
+- **AND** Reading a directory as a text file MUST return `FILE_NOT_FOUND`; non-regular special targets MUST remain access-denied.
+- **AND** `fs.stat` MAY hash raw file bytes without requiring valid UTF-8.
 
 #### Scenario: Cancel grep during one large file
 - **WHEN** session cancellation is requested between read chunks of a large regular file
@@ -173,3 +219,24 @@ Within a verified pinned directory, traversal MUST skip children removed or repl
 #### Scenario: A listed regular file is replaced before opening
 - **WHEN** a listed file is replaced with a FIFO or symlink before the no-follow child open
 - **THEN** traversal skips that entry, does not wait on the FIFO or read outside content, and continues to surviving regular files
+
+### Requirement: Edit allocation is bounded before replacement
+fs.edit MUST compute the final UTF-8 byte length with checked arithmetic before allocating replaced content. Overflow or results over 8 MiB MUST return FILE_TOO_LARGE and preserve file content and revision. Revision and occurrence checks MUST retain their existing precedence.
+
+#### Scenario: Repeated replacement would amplify memory
+- **WHEN** many matches and a large or multibyte replacement produce an oversized result
+- **THEN** the result is rejected before materialization and the file is unchanged
+
+### Requirement: Atomic mutation preserves ordinary permissions
+On Unix, atomic edit and overwrite MUST retain the verified original regular file's rwx permission bits on the replacement descriptor before rename. Special setuid, setgid and sticky bits MUST be cleared. New files MUST default to 0600. No-follow access and final inode checks MUST prevent replacing a target substituted during the mutation.
+
+#### Scenario: Edit or overwrite an executable or shared file
+- **WHEN** a revision-safe mutation replaces a 0755 or 0644 file
+- **THEN** its access/execution bits are retained and stale revisions still reject without mutation
+
+### Requirement: Recursive glob tokens have consistent semantics
+Rust and TypeScript MUST parse glob tokens without rewriting generated regex. A star matches zero or more non-slash characters, a question mark one Unicode non-slash character, double-star any characters including slash, and double-star-slash zero or more directory levels. Other characters MUST be literal and the entire path MUST match. Both implementations MUST satisfy independent fixtures/glob-patterns.json expectations.
+
+#### Scenario: Recursive and literal patterns
+- **WHEN** src/**, nested double-star patterns or regex-special literal filenames are queried
+- **THEN** matching files agree with the fixture's expected results, including nested paths and Unicode

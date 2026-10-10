@@ -28,6 +28,28 @@ test("default readiness budget includes idle heartbeat and connection setup", ()
   assert.equal(loadConfig({}).readyTimeoutMs, 150_000);
 });
 
+test("Gateway URL validation rejects remote HTTP and malformed URLs before credentials are sent", async () => {
+  const token = "c".repeat(48);
+  const accepted = ["http://127.0.0.1:8787", "http://127.2.3.4:8787", "http://[::1]:8787", "http://localhost:8787", "https://reach.example.com"];
+  const rejected = ["http://reach.example.com", "http://192.0.2.1", "http://[2001:db8::1]", "http://localhost.example.com", "ftp://127.0.0.1", "https://[", "https://user:pass@reach.example.com", "https://reach.example.com?query=1", "https://reach.example.com#fragment"];
+  for (const gatewayUrl of accepted) {
+    const config = loadConfig({ REACH_MCP_DEVICES: JSON.stringify([{ id: "fixture", gatewayUrl, controllerToken: token }]) });
+    const client = new HttpGatewayClient(config.devices[0]!, 1000, 1, async (_url, init) => {
+      assert.equal((init!.headers as Record<string, string>).authorization, `Bearer ${token}`);
+      assert.equal(init!.redirect, "error");
+      return new Response('{"status":"none"}');
+    });
+    assert.equal((await client.status()).status, "none");
+  }
+  for (const gatewayUrl of rejected) {
+    assert.throws(() => loadConfig({ REACH_MCP_DEVICES: JSON.stringify([{ id: "fixture", gatewayUrl, controllerToken: token }]) }));
+    let sent = false;
+    const client = new HttpGatewayClient({ id: "fixture", gatewayUrl, controllerToken: token }, 1000, 1, async () => { sent = true; return new Response('{"status":"none"}'); });
+    await assert.rejects(client.status());
+    assert.equal(sent, false);
+  }
+});
+
 test("HTTP status preserves component versions and tolerates unversioned peers", async () => {
   let reply: Record<string, unknown> = { status: "none", gatewayVersion: "2.0.0", engineVersion: "1.2.3" };
   const client = new HttpGatewayClient({ id: "mac", gatewayUrl: "https://reach.example" }, 1000, 1, async () => new Response(JSON.stringify(reply)));
