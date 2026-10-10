@@ -21,9 +21,15 @@ The Runtime SHALL keep an active session only while it has a valid lease from it
 - **THEN** the Engine rejects new RPC, drains the session, emits a lease-expired closure reason, and returns to heartbeat
 
 ### Requirement: Runtime safety limits
-The Runtime SHALL enforce bounded connection setup, RPC execution, session inactivity, and continuous connection age. The Engine MUST treat configured values as upper bounds and MUST NOT accept an Agent or Gateway request that relaxes its hard maximum. The initial defaults SHALL be 15 seconds for connection setup, five minutes for idle and lease duration, 30 seconds for an unspecified RPC deadline, and eight hours for continuous session rotation.
+The Runtime SHALL enforce bounded connection setup, RPC execution, session inactivity, and continuous connection age.
 
-Running a Tool MUST count as activity even when the configured idle timeout is shorter than its RPC execution bound. The idle window MUST restart after the worker drains. Lease expiry, rotation, and the hard execution bound MUST remain enforceable during active work.
+#### Scenario: Required runtime safety limits behavior
+- **WHEN** the Runtime enters, maintains or leaves an active session
+- **THEN** The Engine MUST treat configured values as upper bounds and MUST NOT accept an Agent or Gateway request that relaxes its hard maximum.
+- **AND** The initial defaults SHALL be 15 seconds for connection setup, five minutes for idle and lease duration, 30 seconds for an unspecified RPC deadline, and eight hours for continuous session rotation.
+- **AND** Running a Tool MUST count as activity even when the configured idle timeout is shorter than its RPC execution bound.
+- **AND** The idle window MUST restart after the worker drains.
+- **AND** Lease expiry, rotation, and the hard execution bound MUST remain enforceable during active work.
 
 #### Scenario: A Tool executes longer than the idle interval
 - **WHEN** a Tool runs beyond the idle interval while within its lease, rotation, and execution bounds
@@ -66,7 +72,14 @@ The Runtime MUST retain at most 1,024 lifecycle events, evicting the oldest on o
 - **THEN** memory remains bounded and a second drain returns no previously consumed events
 
 ### Requirement: Session-owned background process cleanup
-The Runtime SHALL own managed process state through the active SessionContext. Close, disconnect, lease expiry, rotation, shutdown and session failure MUST reject new launches, terminate and reap owned processes, close collectors and release records before heartbeat resumes or a replacement session opens. Cleanup MUST use bounded graceful and forced termination; unresolved cleanup failures MUST be reported and MUST NOT be represented as successful draining. Tasks, logs, launch identities and permissions MUST NOT resume in a later session. Abrupt OS termination of Engine is outside graceful-cleanup guarantees.
+The Runtime SHALL own managed process state through the active SessionContext.
+
+#### Scenario: Required session-owned background process cleanup behavior
+- **WHEN** the Runtime enters, maintains or leaves an active session
+- **THEN** Close, disconnect, lease expiry, rotation, shutdown and session failure MUST reject new launches, terminate and reap owned processes, close collectors and release records before heartbeat resumes or a replacement session opens.
+- **AND** Cleanup MUST use bounded graceful and forced termination; unresolved cleanup failures MUST be reported and MUST NOT be represented as successful draining.
+- **AND** Tasks, logs, launch identities and permissions MUST NOT resume in a later session.
+- **AND** Abrupt OS termination of Engine is outside graceful-cleanup guarantees.
 
 #### Scenario: Disconnect with background tasks
 - **WHEN** transport disconnects while scripts are active

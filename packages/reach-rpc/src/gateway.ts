@@ -21,7 +21,27 @@ import {
   MESSAGE_READY,
   parseSessionClosed,
   parseSessionReady,
+  sessionReadySchema,
+  sessionClosedSchema,
+  requestEnvelopeSchema,
 } from "./index.js";
+
+const engineMessageSchema = z.discriminatedUnion("type", [
+  sessionReadySchema,
+  sessionClosedSchema,
+  requestEnvelopeSchema,
+  z.object({ type: z.literal("response"), requestId: z.string().min(1), result: z.unknown() }).passthrough(),
+  z.object({ type: z.literal("error"), requestId: z.string().min(1), error: z.object({ code: z.string().min(1) }).passthrough() }).passthrough(),
+  z.object({ type: z.literal("job.done") }),
+]);
+
+function requestUrl(request: IncomingMessage): URL | undefined {
+  try {
+    return new URL(request.url ?? "/", "http://localhost");
+  } catch {
+    return undefined;
+  }
+}
 
 const heartbeatRequestSchema = z.object({
   device: z.object({ engineVersion: z.string().min(1).optional() }).passthrough(),
@@ -87,9 +107,8 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
   response.end(body);
 }
 
-function rejectUpgrade(socket: Duplex): void {
-  socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-  socket.destroy();
+function rejectUpgrade(socket: Duplex, status: "400 Bad Request" | "401 Unauthorized" = "401 Unauthorized"): void {
+  socket.end("HTTP/1.1 " + status + "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
 }
 
 function isoDate(epochMs: number): string {
@@ -118,8 +137,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
     const address = gateway.address();
     return typeof address === "object" && address !== null && ["127.0.0.1", "::1"].includes(address.address);
   });
-  const selectGateway = (request: IncomingMessage): Server | undefined => {
-    const url = new URL(request.url ?? "/", "http://localhost");
+  const selectGateway = (request: IncomingMessage, url: URL): Server | undefined => {
     const selected = url.searchParams.get("engineId");
     if (url.pathname === "/heartbeat" && authentication) {
       const provided = Buffer.from(request.headers.authorization ?? "");
@@ -133,21 +151,31 @@ export function createGateway(options: GatewayOptions = {}): Server {
     return gateways.get(selected ?? defaultId)?.server;
   };
   gateway.on("request", (request: IncomingMessage, response: ServerResponse) => {
-    if (new URL(request.url ?? "/", "http://localhost").pathname === "/mcp") {
+    const url = requestUrl(request);
+    if (!url) {
+      sendJson(response, 400, { error: "invalid request target" });
+      return;
+    }
+    if (url.pathname === "/mcp") {
       void mcp.handle(request, response);
       return;
     }
-    const target = selectGateway(request);
+    const target = selectGateway(request, url);
     if (!target) {
-      const heartbeat = new URL(request.url ?? "/", "http://localhost").pathname === "/heartbeat";
+      const heartbeat = url.pathname === "/heartbeat";
       sendJson(response, heartbeat ? 401 : 404, { error: "unknown or unauthorized engine" });
       return;
     }
-    request.url = new URL(request.url ?? "/", "http://localhost").pathname;
+    request.url = url.pathname;
     target.emit("request", request, response);
   });
   gateway.on("upgrade", (request, socket, head) => {
-    const target = selectGateway(request);
+    const url = requestUrl(request);
+    if (!url) {
+      rejectUpgrade(socket, "400 Bad Request");
+      return;
+    }
+    const target = selectGateway(request, url);
     if (!target) return rejectUpgrade(socket);
     target.emit("upgrade", request, socket, head);
   });
@@ -427,17 +455,26 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         return;
       }
 
-      let message: { type?: unknown; requestId?: unknown; error?: { code?: unknown } };
+      let value: unknown;
       try {
-        message = JSON.parse(text.toString()) as typeof message;
+        value = JSON.parse(text.toString()) as unknown;
       } catch {
         webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
         return;
       }
 
+      const parsed = engineMessageSchema.safeParse(value);
+      if (!parsed.success || (parsed.data.type === "response" && !Object.hasOwn(parsed.data, "result"))) {
+        // Error frames are terminal, including malformed/legacy ones. Replying
+        // to them can create a feedback loop with the peer's error handler.
+        if (typeof value === "object" && value !== null && "type" in value && value.type === "error") return;
+        webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
+        return;
+      }
+      const message = parsed.data;
+
       if (message.type === "response" || message.type === "error") {
-        const requestId = typeof message.requestId === "string" ? message.requestId : undefined;
-        if (!requestId) return;
+        const requestId = message.requestId;
         const pending = forwarder.pendingRpcs.get(requestId);
         if (!pending) return;
         clearTimeout(pending.timer);

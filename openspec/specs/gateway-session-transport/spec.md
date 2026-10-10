@@ -5,7 +5,14 @@ Defines the bounded, authenticated session transport between a Reach engine and 
 ## Requirements
 
 ### Requirement: Authenticated renewable engine session
-The gateway SHALL accept an Engine WebSocket connection only when it presents the currently issued, unexpired session token and no session WebSocket is live. On successful upgrade it MUST consume the token, retain the Agent-controlled session state, and bind the WebSocket to the issued session id and lease. The gateway MUST reject a connection with a missing, invalid, expired, already-consumed token, wrong configured origin, or while another session WebSocket is open; rejection MUST not create a session. After accepting the session, the Gateway is the sole originator of data-plane filesystem `request` envelopes on that socket; the connected Engine is the executor. The gateway MUST wait for valid `session.ready` before forwarding data-plane requests.
+The gateway SHALL accept an Engine WebSocket connection only when it presents the currently issued, unexpired session token and no session WebSocket is live.
+
+#### Scenario: Required authenticated renewable engine session behavior
+- **WHEN** the Gateway accepts or uses an Engine WebSocket
+- **THEN** On successful upgrade it MUST consume the token, retain the Agent-controlled session state, and bind the WebSocket to the issued session id and lease.
+- **AND** The gateway MUST reject a connection with a missing, invalid, expired, already-consumed token, wrong configured origin, or while another session WebSocket is open; rejection MUST not create a session.
+- **AND** After accepting the session, the Gateway is the sole originator of data-plane filesystem `request` envelopes on that socket; the connected Engine is the executor.
+- **AND** The gateway MUST wait for valid `session.ready` before forwarding data-plane requests.
 
 #### Scenario: Engine connects with issued credentials
 - **WHEN** an Engine connects with the currently issued token before its 30-second expiry and no session is live
@@ -27,7 +34,14 @@ The gateway SHALL keep a ready session open until the Agent requests close, the 
 - **THEN** the gateway clears the live session and reports the closure without attempting to reuse the old session id
 
 ### Requirement: Bounded and valid session messages
-The gateway SHALL reject WebSocket text messages larger than 1 MiB and SHALL close a session after the Engine or Gateway policy deadline. Every data-plane request the gateway sends MUST be a complete `reach-rpc` version `1.0` request envelope with non-empty `sessionId`, `requestId`, and `method`, object `params`, and a session id equal to the bound connection. The Engine MUST answer each such request with a `response` or `error` that echoes `requestId`. The gateway MUST relay valid session control messages and MUST ignore inbound Engine filesystem `request` envelopes for dispatch purposes. Malformed data-plane or control messages MUST NOT dispatch filesystem work.
+The gateway SHALL reject WebSocket text messages larger than 1 MiB and SHALL close a session after the Engine or Gateway policy deadline.
+
+#### Scenario: Required bounded and valid session messages behavior
+- **WHEN** the Gateway accepts or uses an Engine WebSocket
+- **THEN** Every data-plane request the gateway sends MUST be a complete `reach-rpc` version `1.0` request envelope with non-empty `sessionId`, `requestId`, and `method`, object `params`, and a session id equal to the bound connection.
+- **AND** The Engine MUST answer each such request with a `response` or `error` that echoes `requestId`.
+- **AND** The gateway MUST relay valid session control messages and MUST ignore inbound Engine filesystem `request` envelopes for dispatch purposes.
+- **AND** Malformed data-plane or control messages MUST NOT dispatch filesystem work.
 
 #### Scenario: Reject incomplete request envelope
 - **WHEN** a session party sends a filesystem request missing `requestId` or using another protocol or version
@@ -50,7 +64,17 @@ The gateway SHALL reject WebSocket text messages larger than 1 MiB and SHALL clo
 - **THEN** the gateway does not execute filesystem operations against a gateway-local workspace
 
 ### Requirement: Local session RPC proxy
-While a ready Engine session is live and not draining, the gateway SHALL accept a local JSON `POST /session/rpc` body that is a complete `reach-rpc/1.0` request envelope (or sufficient fields for the gateway to fill the bound `sessionId`) and forward it to the Engine over the WebSocket. The gateway MUST return the Engine’s `response` or `error` payload to the HTTP caller. When no ready session is live or draining has started, the gateway MUST return HTTP 409 or 503 without inventing filesystem results. Mutation methods MUST pass grant validation before forward as required by `gateway-write-grants`. The gateway MUST reject nested `tool.call` (a `tool.call` whose unwrap leaves a `tool.call`, or whose unwrap fails) with `INVALID_PARAMS` before grant matching and MUST NOT forward it. The gateway MUST allow at most 16 concurrent pending forwarded RPCs; an additional request while 16 are outstanding MUST return HTTP 503 without forwarding. When a forwarded RPC exceeds the session RPC timeout, the gateway MUST fail that waiter with an error, close the live session WebSocket to abort in-flight Engine work, and fail any other pending waiters for that session. Timed-out request identifiers MUST be retained in a bounded set that survives session teardown, and a later retry of a timed-out `requestId` MUST be rejected as a duplicate (HTTP 409) rather than re-executed, because the Engine may already have applied the timed-out mutation on disk.
+While a ready Engine session is live and not draining, the gateway SHALL accept a local JSON `POST /session/rpc` body that is a complete `reach-rpc/1.0` request envelope (or sufficient fields for the gateway to fill the bound `sessionId`) and forward it to the Engine over the WebSocket.
+
+#### Scenario: Required local session rpc proxy behavior
+- **WHEN** the Gateway accepts or uses an Engine WebSocket
+- **THEN** The gateway MUST return the Engine’s `response` or `error` payload to the HTTP caller.
+- **AND** When no ready session is live or draining has started, the gateway MUST return HTTP 409 or 503 without inventing filesystem results.
+- **AND** Mutation methods MUST pass grant validation before forward as required by `gateway-write-grants`.
+- **AND** The gateway MUST reject nested `tool.call` (a `tool.call` whose unwrap leaves a `tool.call`, or whose unwrap fails) with `INVALID_PARAMS` before grant matching and MUST NOT forward it.
+- **AND** The gateway MUST allow at most 16 concurrent pending forwarded RPCs; an additional request while 16 are outstanding MUST return HTTP 503 without forwarding.
+- **AND** When a forwarded RPC exceeds the session RPC timeout, the gateway MUST fail that waiter with an error, close the live session WebSocket to abort in-flight Engine work, and fail any other pending waiters for that session.
+- **AND** Timed-out request identifiers MUST be retained in a bounded set that survives session teardown, and a later retry of a timed-out `requestId` MUST be rejected as a duplicate (HTTP 409) rather than re-executed, because the Engine may already have applied the timed-out mutation on disk.
 
 #### Scenario: Forward a read through the gateway
 - **WHEN** an engine session is live and a caller POSTs a valid `fs.read` envelope to `/session/rpc`
@@ -90,3 +114,21 @@ The gateway SHALL close a live Engine WebSocket that has not sent a valid `sessi
 #### Scenario: Open remains rejected while connecting
 - **WHEN** an Engine WebSocket is live and has not yet sent `session.ready`
 - **THEN** `/session/open` returns HTTP 409 with `session already active`
+
+### Requirement: Malformed ingress is isolated
+The Gateway MUST catch HTTP and upgrade request-target parsing errors and return 400. Rejected upgrade sockets MUST be destroyed after the response is written, even when the client keeps its write side open. It MUST parse Engine JSON as unknown and validate object and message schemas before accessing fields or resolving RPC waiters. Invalid payloads MUST be rejected without terminating the shared process or disrupting another Engine session.
+
+#### Scenario: Malformed targets and primitive Engine frames
+- **WHEN** a client sends an invalid URL target or an Engine sends null, an array, a primitive, or an invalid response/control object
+- **THEN** the Gateway remains alive, health succeeds, and another Engine session completes RPC
+
+#### Scenario: Malformed upgrade from a half-open client
+- **WHEN** an upgrade request has an invalid target and the client keeps its write side open after receiving 400
+- **THEN** the Gateway destroys its accepted socket without waiting for the client's FIN
+
+### Requirement: Serialized response byte budget
+Engine responses MUST fit the shared 1 MiB serialized WebSocket budget, counting JSON escaping and envelope fields including requestId. Results exceeding that budget MUST return RESPONSE_TOO_LARGE without closing the session. The limit MUST agree with fixtures/rpc-limits.json and Gateway policy.
+
+#### Scenario: Long or heavily escaped file content
+- **WHEN** fs.read would exceed the budget through a long line, UTF-8 bytes or JSON escaping
+- **THEN** a bounded error is returned and subsequent RPCs on that session and another Engine session succeed

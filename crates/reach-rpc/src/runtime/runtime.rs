@@ -39,6 +39,30 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Maximum backoff between failed heartbeat/session attempts.
 const MAX_BACKOFF_SECS: u64 = 60;
 const MAX_RUNTIME_EVENTS: usize = 1024;
+/// Shared with Gateway WebSocket policy and fixtures/rpc-limits.json.
+pub const MAX_SERIALIZED_RESPONSE_BYTES: usize = 1024 * 1024;
+
+struct ResponseBuffer(Vec<u8>);
+
+impl std::io::Write for ResponseBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MAX_SERIALIZED_RESPONSE_BYTES.saturating_sub(self.0.len()) {
+            return Err(std::io::Error::other("response exceeds message budget"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_response(request_id: &str, result: Value) -> Option<String> {
+    let response = json!({ "type": "response", "requestId": request_id, "result": result });
+    let mut buffer = ResponseBuffer(Vec::new());
+    serde_json::to_writer(&mut buffer, &response).ok()?;
+    String::from_utf8(buffer.0).ok()
+}
 
 #[derive(Default)]
 struct EventBuffer(VecDeque<RuntimeEvent>);
@@ -549,6 +573,8 @@ fn handle_session_message(
     };
 
     match message_type {
+        // Never answer an error frame, even when its other fields are invalid.
+        "error" => Ok(Flow::Continue),
         "request" => {
             let envelope = match parse_request_envelope(text) {
                 Ok(envelope) => envelope,
@@ -674,8 +700,10 @@ fn send_response(
     request_id: &str,
     result: Value,
 ) -> Result<(), String> {
-    transport
-        .send(&json!({ "type": "response", "requestId": request_id, "result": result }).to_string())
+    match serialize_response(request_id, result) {
+        Some(text) => transport.send(&text),
+        None => send_error(transport, request_id, "RESPONSE_TOO_LARGE"),
+    }
 }
 
 fn send_error(
@@ -713,6 +741,30 @@ pub fn finalize_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_budget_counts_envelope_utf8_and_json_escaping() {
+        let limits: Value =
+            serde_json::from_str(include_str!("../../../../fixtures/rpc-limits.json")).unwrap();
+        assert_eq!(
+            limits["maxSerializedResponseBytes"].as_u64().unwrap() as usize,
+            MAX_SERIALIZED_RESPONSE_BYTES
+        );
+        let id = "id\"\\猫";
+        let overhead = serialize_response(id, json!({"content": ""}))
+            .unwrap()
+            .len();
+        let remaining = MAX_SERIALIZED_RESPONSE_BYTES - overhead;
+        let exact = serialize_response(id, json!({"content": "a".repeat(remaining)})).unwrap();
+        assert_eq!(exact.len(), MAX_SERIALIZED_RESPONSE_BYTES);
+        assert!(serialize_response(id, json!({"content": "a".repeat(remaining + 1)})).is_none());
+        assert!(
+            serialize_response(id, json!({"content": "猫".repeat(remaining / 3 + 1)})).is_none()
+        );
+        assert!(
+            serialize_response(id, json!({"content": "\u{1}".repeat(remaining / 6 + 1)})).is_none()
+        );
+    }
     use crate::{
         dispatch::tool::test_support::default_test_registry,
         dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError, ToolRegistry},
@@ -762,6 +814,93 @@ mod tests {
 
     fn request_text(id: &str, method: &str, params: Value) -> String {
         json!({"type": "request", "protocol": "reach-rpc", "version": "1.0", "sessionId": "session-1", "requestId": id, "method": method, "params": params, "permission": {"grantId": "g"}}).to_string()
+    }
+
+    #[test]
+    fn gateway_errors_are_not_answered_idle_or_during_tool_execution() {
+        struct WaitingRead(Arc<Barrier>, ToolDescriptor);
+        impl Tool for WaitingRead {
+            fn descriptor(&self) -> &ToolDescriptor {
+                &self.1
+            }
+            fn execute(&self, _: &mut InvocationContext<'_>) -> Result<Value, ToolError> {
+                self.0.wait();
+                Ok(json!({"ok": true}))
+            }
+        }
+        let errors = [
+            json!({"type": "error"}),
+            json!({"type": "error", "error": {"code": "INVALID_PARAMS"}}),
+            json!({"type": "error", "requestId": "", "error": {"code": "INVALID_PARAMS"}}),
+            json!({"type": "error", "requestId": 1, "error": null}),
+            json!({"type": "error", "requestId": "r", "error": {"code": "INVALID_PARAMS"}}),
+        ]
+        .map(|value| value.to_string());
+        let mut workspace = WorkspaceFilesystem::new(HashMap::new());
+        let barrier = Arc::new(Barrier::new(2));
+        let mut registry = ToolRegistry::default();
+        registry.register(Arc::new(WaitingRead(
+            barrier.clone(),
+            ToolDescriptor::read("fs.wait"),
+        )));
+        let mut dispatcher =
+            SessionDispatcher::new("session-1".into(), registry, Duration::from_secs(30));
+        let mut context = SessionContext::new("session-1".into(), 1_000_000, 2_000, &mut workspace);
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut transport: Box<dyn SessionTransport> = Box::new(BarrierTransport {
+            inbox: errors.clone().into(),
+            release: Some(barrier),
+            release_after_messages: true,
+            sent: sent.clone(),
+        });
+        let clock = SharedClock::new(2_000);
+        let mut execution = ExecutionControl {
+            queue: VecDeque::new(),
+            clock: &clock,
+            timeouts: TimeoutPolicy::default(),
+            sleep: &std::thread::sleep,
+            last_activity_ms: 2_000,
+        };
+        let events = RefCell::new(EventBuffer::default());
+        for error in errors {
+            assert!(matches!(
+                handle_session_message(
+                    &events,
+                    &mut context,
+                    &mut dispatcher,
+                    &mut transport,
+                    &error,
+                    2_000,
+                    300_000,
+                    &mut execution
+                )
+                .unwrap(),
+                Flow::Continue
+            ));
+        }
+        assert!(
+            sent.lock().unwrap().is_empty(),
+            "idle Engine answered an error frame"
+        );
+        let request = request_text("read", "fs.wait", json!({}));
+        assert!(matches!(
+            handle_session_message(
+                &events,
+                &mut context,
+                &mut dispatcher,
+                &mut transport,
+                &request,
+                2_000,
+                300_000,
+                &mut execution
+            )
+            .unwrap(),
+            Flow::Continue
+        ));
+        let sent = sent.lock().unwrap();
+        assert_eq!(sent.len(), 1, "busy Engine answered an error frame");
+        assert_eq!(sent[0]["type"], "response");
+        assert!(!context.is_cancelled());
     }
 
     #[test]
