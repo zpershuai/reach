@@ -1,5 +1,5 @@
 export * from "./gateway-policy.js";
-import { DEFAULT_HEARTBEAT_INTERVAL_SECONDS, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, SESSION_TOKEN_TTL_MS, MAX_HTTP_BODY_BYTES, MAX_WEBSOCKET_TEXT_BYTES, SESSION_LEASE_MS, SESSION_IDLE_MS, SESSION_RPC_TIMEOUT_MS, SESSION_ENDPOINT_PATH } from "./gateway-policy.js";
+import { DEFAULT_HEARTBEAT_INTERVAL_SECONDS, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, SESSION_TOKEN_TTL_MS, MAX_HTTP_BODY_BYTES, MAX_WEBSOCKET_TEXT_BYTES, SESSION_LEASE_MS, SESSION_IDLE_MS, SESSION_RPC_TIMEOUT_MS, SESSION_CONNECTING_MS, SESSION_ENDPOINT_PATH } from "./gateway-policy.js";
 import { EngineSessionState } from "./gateway-state.js";
 import { SessionRpcForwarder } from "./gateway-forwarder.js";
 import { processGrantSchema } from "./process.js";
@@ -51,6 +51,7 @@ export interface GatewayOptions {
   sessionDurationMs?: number;
   sessionIdleMs?: number;
   sessionRpcTimeoutMs?: number;
+  sessionConnectingMs?: number;
   heartbeatIntervalSeconds?: number;
   authentication?: { controllerToken: string; engineToken: string; engineId: string };
   /** Additional Engines sharing the controller token; legacy requests target authentication.engineId. */
@@ -174,6 +175,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   const sessionLeaseMs = options.sessionDurationMs ?? SESSION_LEASE_MS;
   const sessionIdleMs = options.sessionIdleMs ?? SESSION_IDLE_MS;
   const sessionRpcTimeoutMs = options.sessionRpcTimeoutMs ?? SESSION_RPC_TIMEOUT_MS;
+  const sessionConnectingMs = options.sessionConnectingMs ?? SESSION_CONNECTING_MS;
   const state = new EngineSessionState(now, logger, sessionLeaseMs, sessionEndpoint);
   const forwarder = new SessionRpcForwarder(state, grants, now, sessionRpcTimeoutMs);
   const sessions = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_TEXT_BYTES });
@@ -402,6 +404,12 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
       }, sessionIdleMs);
     };
     state.resetIdleTimer();
+    if (state.connectingTimer) clearTimeout(state.connectingTimer);
+    state.connectingTimer = setTimeout(() => {
+      if (!state.liveSession || state.liveSession.socket !== webSocket || state.liveSession.ready || state.liveSession.closed) return;
+      state.lastClosureReason = "connecting_timeout";
+      state.closeLiveSession(1008, "session connecting timeout");
+    }, sessionConnectingMs);
 
     webSocket.on("error", (error) => {
       logger(`Reach session socket error: ${error instanceof Error ? error.message : String(error)}`);
@@ -454,6 +462,10 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
           session.ready = true;
           session.methods = ready.methods;
           state.engineVersion = ready.engineVersion;
+          if (state.connectingTimer) {
+            clearTimeout(state.connectingTimer);
+            state.connectingTimer = undefined;
+          }
           logger("Reach session ready");
         } catch {
           webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
@@ -500,6 +512,10 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     webSocket.on("close", (code: number) => {
       if (state.leaseTimer) clearTimeout(state.leaseTimer);
       if (state.idleTimer) clearTimeout(state.idleTimer);
+      if (state.connectingTimer) {
+        clearTimeout(state.connectingTimer);
+        state.connectingTimer = undefined;
+      }
       state.resetIdleTimer = undefined;
       if (state.liveSession?.socket === webSocket) {
         // If the Engine never reported a closure reason before the socket ended,
@@ -527,6 +543,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   gateway.on("close", () => {
     if (state.leaseTimer) clearTimeout(state.leaseTimer);
     if (state.idleTimer) clearTimeout(state.idleTimer);
+    if (state.connectingTimer) clearTimeout(state.connectingTimer);
     forwarder.clearPendingRpcs("gateway closed");
     state.liveSession?.socket.terminate();
   });
