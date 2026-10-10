@@ -134,11 +134,14 @@ pub(super) fn descriptor_atomic_write(
         Mode::empty(),
     ) {
         Ok(fd) => {
-            let metadata = File::from(fd).metadata().map_err(|_| denied())?;
+            let file = File::from(fd);
+            let metadata = file.metadata().map_err(|_| denied())?;
             if !metadata.is_file() {
                 return Err(denied());
             }
-            Some(metadata)
+            // Hold the descriptor until replacement so an unlinked inode
+            // cannot be recycled into a different target during validation.
+            Some((file, metadata))
         }
         Err(error) if error == rustix::io::Errno::NOENT => None,
         Err(_) => return Err(denied()),
@@ -161,7 +164,7 @@ pub(super) fn descriptor_atomic_write(
         // New files have a private default independent of the process umask.
         let mode = original
             .as_ref()
-            .map_or(0o600, |metadata| metadata.mode() & 0o777);
+            .map_or(0o600, |(_, metadata)| metadata.mode() & 0o777);
         fchmod(&file, Mode::from_raw_mode(mode as _)).map_err(|_| denied())?;
         file.sync_all().map_err(|_| denied())?;
         drop(file);
@@ -171,7 +174,7 @@ pub(super) fn descriptor_atomic_write(
         // silently: deny instead of replacing the link in place.
         match statat(parent, name, AtFlags::SYMLINK_NOFOLLOW) {
             Ok(meta) => {
-                if !original.as_ref().is_some_and(|original| {
+                if !original.as_ref().is_some_and(|(_, original)| {
                     meta.st_dev as u64 == original.dev() && meta.st_ino as u64 == original.ino()
                 }) {
                     return Err(denied());
