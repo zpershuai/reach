@@ -107,9 +107,8 @@ function sendJson(response: ServerResponse, statusCode: number, payload: unknown
   response.end(body);
 }
 
-function rejectUpgrade(socket: Duplex): void {
-  socket.write("HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
-  socket.destroy();
+function rejectUpgrade(socket: Duplex, status: "400 Bad Request" | "401 Unauthorized" = "401 Unauthorized"): void {
+  socket.end("HTTP/1.1 " + status + "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
 }
 
 function isoDate(epochMs: number): string {
@@ -173,7 +172,7 @@ export function createGateway(options: GatewayOptions = {}): Server {
   gateway.on("upgrade", (request, socket, head) => {
     const url = requestUrl(request);
     if (!url) {
-      socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+      rejectUpgrade(socket, "400 Bad Request");
       return;
     }
     const target = selectGateway(request, url);
@@ -466,6 +465,9 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
 
       const parsed = engineMessageSchema.safeParse(value);
       if (!parsed.success || (parsed.data.type === "response" && !Object.hasOwn(parsed.data, "result"))) {
+        // Error frames are terminal, including malformed/legacy ones. Replying
+        // to them can create a feedback loop with the peer's error handler.
+        if (typeof value === "object" && value !== null && "type" in value && value.type === "error") return;
         webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
         return;
       }

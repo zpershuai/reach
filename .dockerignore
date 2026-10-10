@@ -5,7 +5,7 @@
 node_modules
 **/node_modules
 target
-*.log
+**/*.log
 **/__pycache__
 deploy/*.env
 deploy/engines.json

@@ -116,11 +116,15 @@ The gateway SHALL close a live Engine WebSocket that has not sent a valid `sessi
 - **THEN** `/session/open` returns HTTP 409 with `session already active`
 
 ### Requirement: Malformed ingress is isolated
-The Gateway MUST catch HTTP and upgrade request-target parsing errors and return 400. It MUST parse Engine JSON as unknown and validate object and message schemas before accessing fields or resolving RPC waiters. Invalid payloads MUST be rejected without terminating the shared process or disrupting another Engine session.
+The Gateway MUST catch HTTP and upgrade request-target parsing errors and return 400. Rejected upgrade sockets MUST be destroyed after the response is written, even when the client keeps its write side open. It MUST parse Engine JSON as unknown and validate object and message schemas before accessing fields or resolving RPC waiters. Invalid payloads MUST be rejected without terminating the shared process or disrupting another Engine session.
 
 #### Scenario: Malformed targets and primitive Engine frames
 - **WHEN** a client sends an invalid URL target or an Engine sends null, an array, a primitive, or an invalid response/control object
 - **THEN** the Gateway remains alive, health succeeds, and another Engine session completes RPC
+
+#### Scenario: Malformed upgrade from a half-open client
+- **WHEN** an upgrade request has an invalid target and the client keeps its write side open after receiving 400
+- **THEN** the Gateway destroys its accepted socket without waiting for the client's FIN
 
 ### Requirement: Serialized response byte budget
 Engine responses MUST fit the shared 1 MiB serialized WebSocket budget, counting JSON escaping and envelope fields including requestId. Results exceeding that budget MUST return RESPONSE_TOO_LARGE without closing the session. The limit MUST agree with fixtures/rpc-limits.json and Gateway policy.
