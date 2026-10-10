@@ -1,0 +1,10 @@
+{
+  "name": "@reach/verification",
+  "private": true,
+  "scripts": {
+    "verify": "bash scripts/verify.sh"
+  },
+  "devDependencies": {
+    "@fission-ai/openspec": "1.14.1"
+  }
+}

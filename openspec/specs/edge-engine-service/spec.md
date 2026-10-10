@@ -7,7 +7,15 @@ Defines the long-running Reach Engine agent that heartbeats to a Gateway, accept
 ## Requirements
 
 ### Requirement: Resident Engine Runtime heartbeat loop
-The Engine SHALL run as a long-lived single-Gateway Runtime that repeatedly POSTs device information to the configured Gateway `/heartbeat` endpoint while it has no active session. It SHALL wait `intervalSeconds` from each successful idle response before the next heartbeat. `REACH_HEARTBEAT_INTERVAL_SECS` SHALL configure Gateway response policy; it MUST NOT be documented as an Engine-local interval override. Explicit session.close SHALL be the ordinary session termination path; job completion signals remain legacy compatibility only. When a heartbeat response includes a valid session lease, the Runtime MUST validate the endpoint against its configured Gateway origin, attempt one WebSocket connection, and enter `ActiveSession` only after session readiness is established. The Runtime MUST not perform ordinary heartbeat polling while a session is active and MUST return to heartbeat after every session exit.
+The Engine SHALL run as a long-lived single-Gateway Runtime that repeatedly POSTs device information to the configured Gateway `/heartbeat` endpoint while it has no active session.
+
+#### Scenario: Required resident engine runtime heartbeat loop behavior
+- **WHEN** the resident Engine receives a heartbeat reply or session message
+- **THEN** It SHALL wait `intervalSeconds` from each successful idle response before the next heartbeat.
+- **AND** `REACH_HEARTBEAT_INTERVAL_SECS` SHALL configure Gateway response policy; it MUST NOT be documented as an Engine-local interval override.
+- **AND** Explicit session.close SHALL be the ordinary session termination path; job completion signals remain legacy compatibility only.
+- **AND** When a heartbeat response includes a valid session lease, the Runtime MUST validate the endpoint against its configured Gateway origin, attempt one WebSocket connection, and enter `ActiveSession` only after session readiness is established.
+- **AND** The Runtime MUST not perform ordinary heartbeat polling while a session is active and MUST return to heartbeat after every session exit.
 
 #### Scenario: Idle polling continues
 - **WHEN** the Engine receives a heartbeat response with `intervalSeconds` 120 and no session credentials
@@ -29,7 +37,14 @@ The Engine SHALL execute `fs.*` and `tool.call` filesystem methods against its o
 - **THEN** the Engine returns `WORKSPACE_ACCESS_DENIED` and does not touch the host filesystem outside configured roots
 
 ### Requirement: Engine session control and RPC handler role
-While a session WebSocket is open, the Engine SHALL first initialize a session context and send `session.ready`. It SHALL accept `session.renew` and `session.close` only when they match the bound session id, apply their lease or draining effects, and accept data-plane `reach-rpc/1.0` requests only from the Gateway after readiness. It MUST route each valid request through the SessionDispatcher and reply with `response` or `error` that echoes `requestId`. It MUST NOT send filesystem `request` envelopes to the Gateway. On Agent close or Engine policy expiry it SHALL emit `session.closed`, clean up the session context, and close the socket.
+While a session WebSocket is open, the Engine SHALL first initialize a session context and send `session.ready`.
+
+#### Scenario: Required engine session control and rpc handler role behavior
+- **WHEN** the resident Engine receives a heartbeat reply or session message
+- **THEN** It SHALL accept `session.renew` and `session.close` only when they match the bound session id, apply their lease or draining effects, and accept data-plane `reach-rpc/1.0` requests only from the Gateway after readiness.
+- **AND** It MUST route each valid request through the SessionDispatcher and reply with `response` or `error` that echoes `requestId`.
+- **AND** It MUST NOT send filesystem `request` envelopes to the Gateway.
+- **AND** On Agent close or Engine policy expiry it SHALL emit `session.closed`, clean up the session context, and close the socket.
 
 #### Scenario: Engine handles explicit Agent close
 - **WHEN** the Gateway sends a valid `session.close` for the active session

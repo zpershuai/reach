@@ -8,7 +8,7 @@ import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { GATEWAY_VERSION } from "./version.js";
-import { GrantStore, GRANT_TTL_MS } from "./grants.js";
+import { GrantStore, GRANT_TTL_MS, normalizeWorkspacePath } from "./grants.js";
 import {
   ContractError,
   INVALID_PARAMS,
@@ -47,6 +47,29 @@ const validRequest = {
   method: "fs.read",
   params: { workspace: "repo", path: "README.md" },
 };
+
+test("grant paths preserve filesystem identities across shared Engine path fixtures", () => {
+  const cases = JSON.parse(readFileSync(new URL("../../../fixtures/workspace-paths.json", import.meta.url), "utf8")) as { input: string; normalized: string; script?: boolean }[];
+  const grants = new GrantStore(Date.now);
+  for (const entry of cases) {
+    assert.equal(normalizeWorkspacePath(entry.input), entry.normalized);
+    const grant = grants.issue("fixture", entry.normalized, ["fs.write"]);
+    assert.equal(grants.matches(grant.grantId, "fs.write", "fixture", entry.input), true);
+    for (const other of cases.filter(other => other.normalized !== entry.normalized)) {
+      assert.equal(grants.matches(grant.grantId, "fs.write", "fixture", other.input), false);
+    }
+    if (entry.script) {
+      const params = { workspace: "fixture", script: entry.input, launchId: "launch" };
+      const grant = grants.issueProcess({ kind: "execute", sessionId: "s", ...params });
+      assert.equal(grants.matchesProcess(grant.grantId, "s", "process.run", params), "execute");
+      assert.equal(grants.matchesProcess(grant.grantId, "s", "process.run", { ...params, script: entry.input.trim() }), entry.input === entry.input.trim() ? "execute" : undefined);
+    }
+  }
+  for (const path of ["", ".", "../safe/file.txt", "safe/../file.txt", "/safe/file.txt", "safe/\0file.txt"]) {
+    assert.ok(!normalizeWorkspacePath(path));
+    assert.throws(() => grants.issue("fixture", path, ["fs.write"]));
+  }
+});
 
 test("defaults line parameters and serializes camelCase", () => {
   const request = parseFsReadRequest(validRequest);
@@ -226,6 +249,22 @@ async function fixtureWorkspace(): Promise<{ root: string; workspace: WorkspaceF
   return { root, workspace: new WorkspaceFilesystem({ fixture: root }) };
 }
 
+test("glob patterns match independent expected fixtures", async () => {
+  const fixture = JSON.parse(readFileSync(new URL("../../../fixtures/glob-patterns.json", import.meta.url), "utf8")) as { paths: string[]; cases: { pattern: string; matches: string[] }[] };
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-glob-fixtures-"));
+  try {
+    for (const path of fixture.paths) {
+      await fs.mkdir(join(root, path, ".."), { recursive: true });
+      await fs.writeFile(join(root, path), "fixture");
+    }
+    const workspace = new WorkspaceFilesystem(root);
+    for (const entry of fixture.cases) {
+      const result = await workspace.glob({ workspace: "default", path: ".", pattern: entry.pattern, maxResults: 100, respectGitignore: false });
+      assert.deepEqual(result.matches.sort(), [...entry.matches].sort(), entry.pattern);
+    }
+  } finally { await fs.rm(root, { recursive: true, force: true }); }
+});
+
 test("fixture workspace reads, lists, stats, writes, and edits safely", async () => {
   const { root, workspace } = await fixtureWorkspace();
   try {
@@ -395,7 +434,7 @@ test("grant issuance and expiry use the same injected clock", () => {
 test("grant storage normalizes paths and owns its method list", () => {
   const grants = new GrantStore(() => 1_000);
   const methods: Array<"fs.write" | "fs.edit"> = ["fs.write"];
-  const grant = grants.issue("fixture", " ./notes// ", methods);
+  const grant = grants.issue("fixture", "./notes//", methods);
   methods.push("fs.edit");
   assert.equal(grants.matches(grant.grantId, "fs.write", "fixture", "notes/a.txt"), true);
   assert.equal(grants.matches(grant.grantId, "fs.edit", "fixture", "notes/a.txt"), false);

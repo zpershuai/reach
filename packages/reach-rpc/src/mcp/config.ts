@@ -31,20 +31,31 @@ function positiveInteger(value: string | undefined, fallback: number, name: stri
   return parsed;
 }
 
+/** Local plaintext development is restricted to known loopback hosts. */
+export function validateGatewayUrl(value: string): URL {
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("invalid Gateway URL");
+  }
+  const loopback = url.hostname === "localhost" || url.hostname === "[::1]"
+    || /^127(?:\.\d{1,3}){3}$/.test(url.hostname);
+  if (url.protocol !== "https:" && !(url.protocol === "http:" && loopback)) {
+    throw new Error("Gateway URL requires HTTPS except on loopback");
+  }
+  if (url.username || url.password || url.search || url.hash) {
+    throw new Error("Gateway URL must not contain credentials, a query or a fragment");
+  }
+  return url;
+}
+
 function normalizeDevice(value: unknown): DeviceConfig {
   if (typeof value !== "object" || value === null) throw new Error("REACH_MCP_DEVICES entries must be objects");
   const candidate = value as Record<string, unknown>;
   if (typeof candidate.id !== "string" || !candidate.id.trim()) throw new Error("device id must be a non-empty string");
   if (typeof candidate.gatewayUrl !== "string") throw new Error("device gatewayUrl must be a string");
-  let gatewayUrl: URL;
-  try {
-    gatewayUrl = new URL(candidate.gatewayUrl);
-  } catch {
-    throw new Error(`device ${candidate.id} has an invalid gatewayUrl`);
-  }
-  if (gatewayUrl.protocol !== "http:" && gatewayUrl.protocol !== "https:") {
-    throw new Error(`device ${candidate.id} gatewayUrl must use HTTP(S)`);
-  }
+  const gatewayUrl = validateGatewayUrl(candidate.gatewayUrl);
   gatewayUrl.pathname = gatewayUrl.pathname.replace(/\/$/, "");
   const controllerToken = candidate.controllerToken;
   if (candidate.engineId !== undefined && (typeof candidate.engineId !== "string" || !candidate.engineId.trim())) {

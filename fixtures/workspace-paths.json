@@ -1,0 +1,10 @@
+[
+  { "input": "safe/file.txt", "normalized": "safe/file.txt" },
+  { "input": " safe/file.txt", "normalized": " safe/file.txt" },
+  { "input": "safe/file.txt ", "normalized": "safe/file.txt " },
+  { "input": "./safe//./file.txt", "normalized": "safe/file.txt" },
+  { "input": "目录/猫.txt", "normalized": "目录/猫.txt" },
+  { "input": " scripts/task.js", "normalized": " scripts/task.js", "script": true },
+  { "input": "scripts /task.js", "normalized": "scripts /task.js", "script": true },
+  { "input": "./scripts//./task.js", "normalized": "scripts/task.js", "script": true }
+]

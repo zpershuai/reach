@@ -153,6 +153,8 @@ New Agents must use explicit session control (`/session/open`, `/session/renew`,
 
 HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. Every RPC request must be a complete `reach-rpc/1.0` envelope; controllers may omit `sessionId` on `POST /session/rpc` and the Gateway binds the live session id. Write grants are validated before forward (issuance, path scope, method scope, expiry) and cannot be bypassed by nesting `tool.call`.
 
+The Engine bounds serialized responses to the same 1 MiB, including JSON escaping and the request-id envelope. An oversized result returns `RESPONSE_TOO_LARGE` and keeps the session usable; reduce `fs.read` line ranges when possible. A single oversized line requires another means of retrieval. Edits check their final UTF-8 size before allocation. Atomic overwrite/edit preserves ordinary file permission bits; new files default to 0600, and special permission bits are cleared. Grant paths preserve filename whitespace exactly.
+
 ## Multiple Engines and remote MCP
 
 One Gateway can manage multiple registered Engines, each with its own credential, session, lease, grants and RPC state. Controller requests select an Engine with `?engineId=...`; requests without it target the default Engine. MCP device entries use `engineId` to route through a shared Gateway. See [OpenWrt and multi-device deployment](docs/deploy/openwrt.md).
@@ -178,6 +180,6 @@ Runtime events use a 1,024-entry FIFO buffer. `drain_events()` consumes it. The 
 
 ## Validation
 
-Install Node dependencies with `npm --prefix packages/reach-rpc ci --ignore-scripts`, then run `bash scripts/verify.sh`. The script checks Rust formatting, Rust tests, TypeScript Gateway tests, MCP tests including a real Rust Engine integration, and shared fixtures in both languages. CI runs this workflow on Linux and macOS with Node 24 and stable Rust. The TypeScript workspace filesystem is a test reference; production session execution uses the Rust Engine.
+Install tools with `npm ci --ignore-scripts` and RPC dependencies with `npm --prefix packages/reach-rpc ci --ignore-scripts`, then run `bash scripts/verify.sh`. The script gates pinned OpenSpec 1.14.1 strict validation, installer failure/rollback tests, Rust formatting/tests, TypeScript Gateway/MCP tests including real Engine integration, shared fixtures, and standalone MCP distribution smoke. CI runs on Linux and macOS with Node 24 and stable Rust. A separate Linux x86_64 job runs `bash scripts/verify-packaging.sh` to build the Gateway container and static Engine, compare two OpenWrt bundles, and execute bundled Node and its child in an isolated container. It requires Docker, musl-tools and the Rust musl target. See [deployment validation](docs/deploy/deployment-checklist.md) for platform gaps. The TypeScript workspace filesystem is a test reference; production session execution uses the Rust Engine.
 
 Trusted script tools are `process.run`, `process.status`, `process.logs`, `process.stop`, and `process.list`. Dynamic stdio exposes them after device selection; HTTP uses underscore names with `deviceId`. See [process execution and recovery](docs/deploy/processes.md).

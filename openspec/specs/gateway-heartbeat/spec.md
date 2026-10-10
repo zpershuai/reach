@@ -5,7 +5,17 @@ Defines the local gateway heartbeat loop that lets the engine report device info
 ## Requirements
 
 ### Requirement: Device heartbeat endpoint
-The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` object from a resident Engine service. The gateway SHALL return a JSON response containing an integer `intervalSeconds` that tells the Engine when to send its next device heartbeat. The response MUST be 120 when no Agent-controlled session is open or wanted and 5 while an Agent-controlled session is wanted and no WebSocket is live. When a session is wanted and no WebSocket is live, the response MUST also contain a non-empty one-time `token`, non-empty `sessionId`, a session endpoint whose origin is the configured Gateway origin, and an absolute `leaseExpiresAt` timestamp. The token MUST expire 30 seconds after issuance. Repeated heartbeats while a token is pending MUST return the same token, session id, endpoint, and lease expiry without extending token expiry. When no session is wanted or a WebSocket is live, the response MUST NOT contain connection credentials. The heartbeat contract assumes the caller is a long-running Engine Runtime that uses the response only to acquire a session lease.
+The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` object from a resident Engine service.
+
+#### Scenario: Required device heartbeat endpoint behavior
+- **WHEN** an Agent changes session intent or an Engine sends a heartbeat
+- **THEN** The gateway SHALL return a JSON response containing an integer `intervalSeconds` that tells the Engine when to send its next device heartbeat.
+- **AND** The response MUST be 120 when no Agent-controlled session is open or wanted and 5 while an Agent-controlled session is wanted and no WebSocket is live.
+- **AND** When a session is wanted and no WebSocket is live, the response MUST also contain a non-empty one-time `token`, non-empty `sessionId`, a session endpoint whose origin is the configured Gateway origin, and an absolute `leaseExpiresAt` timestamp.
+- **AND** The token MUST expire 30 seconds after issuance.
+- **AND** Repeated heartbeats while a token is pending MUST return the same token, session id, endpoint, and lease expiry without extending token expiry.
+- **AND** When no session is wanted or a WebSocket is live, the response MUST NOT contain connection credentials.
+- **AND** The heartbeat contract assumes the caller is a long-running Engine Runtime that uses the response only to acquire a session lease.
 
 #### Scenario: Idle device heartbeat
 - **WHEN** the engine POSTs device information while no session is wanted
@@ -39,7 +49,13 @@ The gateway SHALL provide a local JSON HTTP POST at `/session-wanted` that accep
 - **THEN** the gateway returns HTTP 400
 
 ### Requirement: Agent session intent control
-The gateway SHALL provide Agent-facing local control for opening, renewing, querying, and closing the one Engine session. It MUST record session ownership and desired state, issue or extend leases only for the active Agent-controlled session, and relay valid renew and close control messages to a ready Engine WebSocket. A close request MUST clear the wanted state and cause subsequent heartbeats to return the idle interval. A renewal MUST NOT extend a session beyond Gateway or Engine policy maxima.
+The gateway SHALL provide Agent-facing local control for opening, renewing, querying, and closing the one Engine session.
+
+#### Scenario: Required agent session intent control behavior
+- **WHEN** an Agent changes session intent or an Engine sends a heartbeat
+- **THEN** It MUST record session ownership and desired state, issue or extend leases only for the active Agent-controlled session, and relay valid renew and close control messages to a ready Engine WebSocket.
+- **AND** A close request MUST clear the wanted state and cause subsequent heartbeats to return the idle interval.
+- **AND** A renewal MUST NOT extend a session beyond Gateway or Engine policy maxima.
 
 #### Scenario: Agent renews a live session
 - **WHEN** the active Agent renews its live session before its lease expires
@@ -50,9 +66,15 @@ The gateway SHALL provide Agent-facing local control for opening, renewing, quer
 - **THEN** the gateway sends `session.close`, stops accepting new session RPC after draining begins, and subsequent heartbeats return the idle interval
 
 ### Requirement: Optional session intent binding
-`POST /session/open` MUST accept an optional non-empty caller-selected `sessionId`, otherwise generate one, and expose it in the open reply and wanted status before heartbeat acquisition. The acquired Engine lease MUST use that intent id. Renew and close controls MAY contain a `sessionId`; supplied ids MUST match the pending or live intent. Omitting the id MUST retain the legacy single-session behavior.
+`POST /session/open` MUST accept an optional non-empty caller-selected `sessionId`, otherwise generate one, and expose it in the open reply and wanted status before heartbeat acquisition.
 
-While a wanted or pending intent exists, opening with another supplied id MUST return HTTP 409 without changing pending credentials. Opening with the same id, or omitting an id through the legacy single-session API, MUST be idempotent and preserve the pending token and lease.
+#### Scenario: Required optional session intent binding behavior
+- **WHEN** an Agent changes session intent or an Engine sends a heartbeat
+- **THEN** The acquired Engine lease MUST use that intent id.
+- **AND** Renew and close controls MAY contain a `sessionId`; supplied ids MUST match the pending or live intent.
+- **AND** Omitting the id MUST retain the legacy single-session behavior.
+- **AND** While a wanted or pending intent exists, opening with another supplied id MUST return HTTP 409 without changing pending credentials.
+- **AND** Opening with the same id, or omitting an id through the legacy single-session API, MUST be idempotent and preserve the pending token and lease.
 
 #### Scenario: Repeat an open while the Engine is connecting
 - **WHEN** a controller retries an open for its existing intent after heartbeat credentials were issued

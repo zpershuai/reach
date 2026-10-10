@@ -125,8 +125,11 @@ export class McpServer {
 
   private async closeSessionForMode(argumentsValue: unknown): Promise<Record<string, unknown>> {
     if (this.config.toolMode === "static") {
-      const params = await this.argumentsForMode(argumentsValue);
-      if (params instanceof Error) return toolError(params.message);
+      if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) return toolError("Tool arguments must be an object");
+      const { deviceId } = argumentsValue as Record<string, unknown>;
+      if (typeof deviceId !== "string" || !deviceId) return toolError("Static tool mode requires a string deviceId");
+      if (!this.config.devices.some(device => device.id === deviceId)) return toolError(`Unknown device: ${deviceId}`);
+      if (this.selected?.device.id !== deviceId) return toolText({ closedDeviceId: deviceId, closed: false, owned: false });
     }
     return this.closeSession();
   }
@@ -200,6 +203,10 @@ export class McpServer {
       this.clearSelection();
       return toolText({ closedDeviceId: selected.device.id });
     } catch (cause) {
+      if (cause instanceof SessionReplacedError) {
+        this.clearSelection();
+        return toolError("ENGINE_BUSY: selected session was replaced");
+      }
       if (await this.releaseAfterFailure()) return toolText({ closedDeviceId: selected.device.id });
       return toolError(cause instanceof Error ? cause.message : "Unable to close selected device session");
     }

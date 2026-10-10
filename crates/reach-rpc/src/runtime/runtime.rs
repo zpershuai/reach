@@ -39,6 +39,30 @@ const POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// Maximum backoff between failed heartbeat/session attempts.
 const MAX_BACKOFF_SECS: u64 = 60;
 const MAX_RUNTIME_EVENTS: usize = 1024;
+/// Shared with Gateway WebSocket policy and fixtures/rpc-limits.json.
+pub const MAX_SERIALIZED_RESPONSE_BYTES: usize = 1024 * 1024;
+
+struct ResponseBuffer(Vec<u8>);
+
+impl std::io::Write for ResponseBuffer {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if bytes.len() > MAX_SERIALIZED_RESPONSE_BYTES.saturating_sub(self.0.len()) {
+            return Err(std::io::Error::other("response exceeds message budget"));
+        }
+        self.0.extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+fn serialize_response(request_id: &str, result: Value) -> Option<String> {
+    let response = json!({ "type": "response", "requestId": request_id, "result": result });
+    let mut buffer = ResponseBuffer(Vec::new());
+    serde_json::to_writer(&mut buffer, &response).ok()?;
+    String::from_utf8(buffer.0).ok()
+}
 
 #[derive(Default)]
 struct EventBuffer(VecDeque<RuntimeEvent>);
@@ -674,8 +698,10 @@ fn send_response(
     request_id: &str,
     result: Value,
 ) -> Result<(), String> {
-    transport
-        .send(&json!({ "type": "response", "requestId": request_id, "result": result }).to_string())
+    match serialize_response(request_id, result) {
+        Some(text) => transport.send(&text),
+        None => send_error(transport, request_id, "RESPONSE_TOO_LARGE"),
+    }
 }
 
 fn send_error(
@@ -713,6 +739,30 @@ pub fn finalize_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn response_budget_counts_envelope_utf8_and_json_escaping() {
+        let limits: Value =
+            serde_json::from_str(include_str!("../../../../fixtures/rpc-limits.json")).unwrap();
+        assert_eq!(
+            limits["maxSerializedResponseBytes"].as_u64().unwrap() as usize,
+            MAX_SERIALIZED_RESPONSE_BYTES
+        );
+        let id = "id\"\\猫";
+        let overhead = serialize_response(id, json!({"content": ""}))
+            .unwrap()
+            .len();
+        let remaining = MAX_SERIALIZED_RESPONSE_BYTES - overhead;
+        let exact = serialize_response(id, json!({"content": "a".repeat(remaining)})).unwrap();
+        assert_eq!(exact.len(), MAX_SERIALIZED_RESPONSE_BYTES);
+        assert!(serialize_response(id, json!({"content": "a".repeat(remaining + 1)})).is_none());
+        assert!(
+            serialize_response(id, json!({"content": "猫".repeat(remaining / 3 + 1)})).is_none()
+        );
+        assert!(
+            serialize_response(id, json!({"content": "\u{1}".repeat(remaining / 6 + 1)})).is_none()
+        );
+    }
     use crate::{
         dispatch::tool::test_support::default_test_registry,
         dispatch::{InvocationContext, Tool, ToolDescriptor, ToolError, ToolRegistry},

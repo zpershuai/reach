@@ -5,7 +5,12 @@ Provides hosted, authenticated MCP access to registered Reach Engines.
 ## Requirements
 
 ### Requirement: Authenticated Streamable HTTP transport
-The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method with the Controller token, reject unapproved supplied Origins, and permit unauthenticated use only on loopback. It SHALL negotiate MCP 2025-03-26 or 2025-06-18, validate subsequent protocol headers, acknowledge notifications with empty 202, return GET 405, and support March batches after initialization. Received HTTP bodies MUST be bounded to 64 KiB; internal RPC metadata MUST NOT reduce this allowance, while forwarded WebSocket envelopes remain bounded.
+The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method with the Controller token, reject unapproved supplied Origins, and permit unauthenticated use only on loopback.
+
+#### Scenario: Required authenticated streamable http transport behavior
+- **WHEN** a client uses an HTTP MCP session
+- **THEN** It SHALL negotiate MCP 2025-03-26 or 2025-06-18, validate subsequent protocol headers, acknowledge notifications with empty 202, return GET 405, and support March batches after initialization.
+- **AND** Received HTTP bodies MUST be bounded to 64 KiB; internal RPC metadata MUST NOT reduce this allowance, while forwarded WebSocket envelopes remain bounded.
 
 #### Scenario: Missing credentials
 - **WHEN** an authenticated Gateway receives an MCP request without the Controller token
@@ -16,7 +21,15 @@ The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method 
 - **THEN** it receives a secure Mcp-Session-Id; later missing ids receive 400 and unknown or expired ids receive 404
 
 ### Requirement: Bounded owned sessions
-HTTP sessions SHALL serialize work with bounded queues, expire after configurable inactivity, and close only Engine sessions they own on DELETE, expiry, or shutdown. Reading bodies, queued work, and running requests SHALL count toward per-session admission limits. Body reads SHALL prevent idle expiry within the request budget. Retirement SHALL immediately schedule serialized cleanup and reject subsequent tool dispatch, including requests still reading or queued. Requests SHALL use a configurable response budget defaulting to 25 seconds. The Gateway SHALL bound active HTTP sessions and preserve failed cleanup for retry.
+HTTP sessions SHALL serialize work with bounded queues, expire after configurable inactivity, and close only Engine sessions they own on DELETE, expiry, or shutdown.
+
+#### Scenario: Required bounded owned sessions behavior
+- **WHEN** a client uses an HTTP MCP session
+- **THEN** Reading bodies, queued work, and running requests SHALL count toward per-session admission limits.
+- **AND** Body reads SHALL prevent idle expiry within the request budget.
+- **AND** Retirement SHALL immediately schedule serialized cleanup and reject subsequent tool dispatch, including requests still reading or queued.
+- **AND** Requests SHALL use a configurable response budget defaulting to 25 seconds.
+- **AND** The Gateway SHALL bound active HTTP sessions and preserve failed cleanup for retry.
 
 #### Scenario: Another controller owns the Engine
 - **WHEN** an MCP session tries to connect to an Engine already held by another owner

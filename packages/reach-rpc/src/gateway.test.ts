@@ -3,7 +3,7 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { promises as fs } from "node:fs";
 import { tmpdir } from "node:os";
-import type { Socket } from "node:net";
+import { connect, type Socket } from "node:net";
 import { join } from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
@@ -21,6 +21,74 @@ import {
 } from "./gateway.js";
 
 const repositoryRoot = fileURLToPath(new URL("../../..", import.meta.url));
+
+test("Gateway WebSocket limit matches the shared serialized response budget", async () => {
+  const limits = JSON.parse(await fs.readFile(join(repositoryRoot, "fixtures/rpc-limits.json"), "utf8")) as { maxSerializedResponseBytes: number };
+  assert.equal(MAX_WEBSOCKET_TEXT_BYTES, limits.maxSerializedResponseBytes);
+});
+
+test("malformed HTTP targets and Engine JSON cannot terminate the Gateway process or another session", async () => {
+  const controllerToken = "c".repeat(48);
+  const engines = [{ engineId: "a", engineToken: "a".repeat(48) }, { engineId: "b", engineToken: "b".repeat(48) }];
+  const options = { authentication: { controllerToken, ...engines[0]! }, engines: [engines[1]!] };
+  const child = spawn(process.execPath, ["--input-type=module", "-e", `
+    import { createGateway } from ${JSON.stringify(new URL("./gateway.js", import.meta.url).href)};
+    const server = createGateway({ ...${JSON.stringify(options)}, logger: () => {} });
+    server.listen(0, "127.0.0.1", () => process.send(server.address().port));
+  `], { stdio: ["ignore", "ignore", "pipe", "ipc"] });
+  let diagnostics = "";
+  child.stderr?.on("data", chunk => { diagnostics += chunk; });
+  const exit = once(child, "exit");
+  const peers: WebSocket[] = [];
+  try {
+    const [port] = await once(child, "message", { signal: AbortSignal.timeout(5000) });
+    const baseUrl = `http://127.0.0.1:${port}`;
+    const post = (engineId: string, path: string, body: unknown, token = controllerToken) => fetch(`${baseUrl}${path}?engineId=${engineId}`, {
+      method: "POST", headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body), signal: AbortSignal.timeout(3000),
+    });
+    for (const engine of engines) {
+      await post(engine.engineId, "/session/open", {});
+      const lease = await (await post(engine.engineId, "/heartbeat", { device: { id: engine.engineId } }, engine.engineToken)).json() as { endpoint: string; token: string; sessionId: string };
+      const endpoint = new URL(lease.endpoint, wsBaseUrl(baseUrl));
+      endpoint.searchParams.set("token", lease.token);
+      const peer = new WebSocket(endpoint); peers.push(peer);
+      await once(peer, "open");
+      peer.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: lease.sessionId, engineId: engine.engineId, workspaces: ["fixture"], methods: ["fs.read"] }));
+      attachMockEngine(peer);
+      await waitUntil(async () => (await (await fetch(`${baseUrl}/session/status?engineId=${engine.engineId}`, { headers: { authorization: `Bearer ${controllerToken}` } })).json() as { status: string }).status === "ready");
+    }
+    async function checkOtherSession(): Promise<void> {
+      assert.equal(child.exitCode, null, diagnostics);
+      assert.equal((await fetch(`${baseUrl}/healthz`)).status, 200);
+      const reply = await post("b", "/session/rpc", rpcBody(`healthy-${Math.random()}`, "fs.read", { workspace: "fixture", path: "note.txt" }));
+      assert.equal(reply.status, 200, diagnostics);
+    }
+    for (const upgrade of [false, true]) {
+      const raw = connect(Number(port), "127.0.0.1");
+      let response = "";
+      raw.on("data", chunk => { response += chunk; });
+      raw.on("error", () => {});
+      const closed = once(raw, "close");
+      await once(raw, "connect");
+      raw.end(`GET http://[ HTTP/1.1\r\nHost: localhost\r\nConnection: ${upgrade ? "Upgrade" : "close"}\r\n${upgrade ? "Upgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: AAAAAAAAAAAAAAAAAAAAAA==\r\n" : ""}\r\n`);
+      await closed;
+      assert.match(response, /^HTTP\/1\.1 400/, diagnostics);
+      await checkOtherSession();
+    }
+    for (const value of [null, [], "text", 1, true, { type: "response", requestId: 1 }, { type: "error", requestId: "r", error: null }, { type: "session.ready" }]) {
+      const rejected = once(peers[0]!, "message");
+      peers[0]!.send(JSON.stringify(value));
+      const [message] = await rejected;
+      assert.equal(JSON.parse(String(message)).error.code, "INVALID_PARAMS");
+      await checkOtherSession();
+    }
+  } finally {
+    for (const peer of peers) peer.terminate();
+    child.kill();
+    await exit;
+  }
+});
 
 async function withGateway(
   check: (baseUrl: string) => Promise<void>,
@@ -1099,6 +1167,45 @@ async function waitForStatus(baseUrl: string, expected: string, timeoutMs = 2000
   }
 }
 
+test("Rust Engine bounds serialized fs.read replies and keeps both Engine sessions usable", async () => {
+  const root = await fs.mkdtemp(join(tmpdir(), "reach-response-budget-"));
+  const controllerToken = "c".repeat(48);
+  const engines = [{ engineId: "a", engineToken: "a".repeat(48) }, { engineId: "b", engineToken: "b".repeat(48) }];
+  const children: ChildProcess[] = [];
+  try {
+    await fs.writeFile(join(root, "small.txt"), "small");
+    await fs.writeFile(join(root, "long.txt"), "x".repeat(MAX_WEBSOCKET_TEXT_BYTES + 1));
+    await fs.writeFile(join(root, "escaped.txt"), "\u0001".repeat(MAX_WEBSOCKET_TEXT_BYTES / 4));
+    await fs.writeFile(join(root, "unicode.txt"), "猫".repeat(Math.ceil(MAX_WEBSOCKET_TEXT_BYTES / 3)));
+    await withGateway(async baseUrl => {
+      const post = (id: string, path: string, body: unknown) => fetch(`${baseUrl}${path}?engineId=${id}`, {
+        method: "POST", headers: { authorization: `Bearer ${controllerToken}`, "content-type": "application/json" }, body: JSON.stringify(body),
+      });
+      for (const engine of engines) {
+        await post(engine.engineId, "/session/open", {});
+        children.push(await startEngine(baseUrl, { fixture: root }, { REACH_ENGINE_ID: engine.engineId, REACH_ENGINE_TOKEN: engine.engineToken }));
+        await waitUntil(async () => (await (await fetch(`${baseUrl}/session/status?engineId=${engine.engineId}`, { headers: { authorization: `Bearer ${controllerToken}` } })).json() as {status: string}).status === "ready", 30000);
+      }
+      for (const path of ["long.txt", "escaped.txt", "unicode.txt"]) {
+        const rejected = await post("a", "/session/rpc", rpcBody(`oversize-${path}`, "fs.read", { workspace: "fixture", path, maxLines: 1 }));
+        assert.equal(rejected.status, 200);
+        assert.equal((await rejected.json() as {error: {code: string}}).error.code, "RESPONSE_TOO_LARGE");
+        for (const engine of engines) {
+          const reply = await post(engine.engineId, "/session/rpc", rpcBody(`small-${path}-${engine.engineId}`, "fs.read", { workspace: "fixture", path: "small.txt" }));
+          assert.equal(reply.status, 200);
+          assert.equal((await reply.json() as {result: {content: string}}).result.content, "small");
+        }
+      }
+      assert.equal((await fetch(`${baseUrl}/healthz`)).status, 200);
+      for (const child of children) await stopEngine(child);
+      children.length = 0;
+    }, { authentication: { controllerToken, ...engines[0]! }, engines: [engines[1]!], logger: () => {} });
+  } finally {
+    for (const child of children) await stopEngine(child);
+    await fs.rm(root, { recursive: true, force: true });
+  }
+});
+
 test("agent renewal relays a bounded lease to the Engine", async () => {
   await withGateway(async (baseUrl) => {
     const { socket, sessionId } = await openEngineSession(baseUrl);
@@ -1279,9 +1386,9 @@ test("connecting session that never becomes ready is released", async () => {
   }, { sessionConnectingMs: 50 });
 });
 
-async function waitUntil(condition: () => boolean, timeoutMs = 2000): Promise<void> {
+async function waitUntil(condition: () => boolean | Promise<boolean>, timeoutMs = 2000): Promise<void> {
   const started = Date.now();
-  while (!condition()) {
+  while (!await condition()) {
     if (Date.now() - started > timeoutMs) throw new Error("timed out waiting for condition");
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
