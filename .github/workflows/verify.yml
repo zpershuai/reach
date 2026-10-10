@@ -18,6 +18,27 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: packages/reach-rpc/package-lock.json
+          cache-dependency-path: |
+            package-lock.json
+            packages/reach-rpc/package-lock.json
+      - run: npm ci --ignore-scripts
       - run: npm --prefix packages/reach-rpc ci --ignore-scripts
       - run: bash scripts/verify.sh
+
+  packaging:
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-unknown-linux-musl
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: packages/reach-rpc/package-lock.json
+      - run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: npm --prefix packages/reach-rpc ci --ignore-scripts
+      - run: bash scripts/verify-packaging.sh

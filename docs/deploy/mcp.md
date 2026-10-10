@@ -2,6 +2,8 @@
 
 Reach 提供两种 MCP 接入：桌面客户端启动本地 stdio Connector；Grok Bot 等远程客户端连接 Gateway 的 HTTPS `/mcp`。两种方式都由 Engine 执行文件工具。HTTP 方式复用 Gateway 的端口、域名和容器，无需额外服务。
 
+stdio 的 Gateway URL 也必须使用 HTTPS；本地开发仅允许 `localhost`、IPv4 127/8 和 IPv6 `::1` 使用 HTTP。URL 不接受内嵌账号密码、query 或 fragment，请求禁止跟随重定向。静态 stdio 的 `session.close` 只关闭所指定设备的自有会话；未持有该设备时返回 `closed=false`、`owned=false`，不会切换设备或建立新会话。
+
 仓库路径 `packages/grok-bot-mcp-connector` 和 npm package 名保留历史命名，实际 MCP server 名为 `reach-mcp`。下面的配置可用于支持该传输方式的 MCP 客户端。
 
 ## Grok Bot（remote HTTP）

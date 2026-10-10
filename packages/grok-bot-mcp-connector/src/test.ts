@@ -33,6 +33,40 @@ function testServer() {
   return { server, messages };
 }
 
+test("static close never selects another device or wakes an offline device and preserves owned tasks", async () => {
+  const config = loadConfig({ REACH_MCP_TOOL_MODE: "static", REACH_MCP_DEVICES: JSON.stringify([{ id: "a", gatewayUrl: "http://127.0.0.1:8787" }, { id: "b", gatewayUrl: "http://127.0.0.1:8788" }]) });
+  const messages: Record<string, unknown>[] = [];
+  const lifecycle: string[] = [];
+  let replaced = false;
+  const server = new McpServer(config, message => messages.push(message), device => {
+    assert.equal(device.id, "a", "closing an unowned/offline device must not even create a client");
+    return {
+      ...readyGateway(),
+      openAndWait: async () => { lifecycle.push("open(a)"); return { sessionId: "owner", methods: ["process.status"] }; },
+      status: async () => ({ status: "ready", sessionId: replaced ? "successor" : "owner", methods: ["process.status"] }),
+      rpc: async () => ({ type: "response", result: { processId: "running-task" } }),
+      close: async () => { lifecycle.push("close(a)"); if (replaced) throw new SessionReplacedError(); },
+    };
+  });
+  let sequence = 0;
+  const call = async (name: string, deviceId: string) => {
+    const id = ++sequence;
+    await server.receive({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: { deviceId, launchId: "launch" } } });
+    return messages.find(message => message.id === id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+  };
+  await server.receive({ jsonrpc: "2.0", id: "init", method: "initialize" });
+  assert.equal((await call("pick_device", "a")).isError, undefined);
+  assert.deepEqual(JSON.parse((await call("session.close", "b")).content[0].text), { closedDeviceId: "b", closed: false, owned: false });
+  assert.deepEqual(lifecycle, ["open(a)"]);
+  assert.equal((await call("process.status", "a")).isError, undefined);
+  assert.deepEqual(lifecycle, ["open(a)"]);
+  replaced = true;
+  assert.match((await call("session.close", "a")).content[0].text, /ENGINE_BUSY/);
+  assert.deepEqual(lifecycle, ["open(a)", "close(a)"]);
+  assert.deepEqual(JSON.parse((await call("session.close", "a")).content[0].text), { closedDeviceId: "a", closed: false, owned: false });
+  assert.deepEqual(lifecycle, ["open(a)", "close(a)"]);
+});
+
 test("process launch deadlines preserve identity and observation never replaces a session", async () => {
   for (const toolMode of ["dynamic", "static"] as const) {
     const messages: Record<string, unknown>[] = [];

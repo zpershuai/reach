@@ -1,5 +1,23 @@
 use super::*;
 
+fn replacement_byte_len(
+    current: usize,
+    old: usize,
+    new: usize,
+    count: usize,
+) -> Result<usize, FilesystemError> {
+    let size = old
+        .checked_mul(count)
+        .and_then(|removed| current.checked_sub(removed))
+        .and_then(|remaining| {
+            new.checked_mul(count)
+                .and_then(|added| remaining.checked_add(added))
+        })
+        .filter(|size| *size <= MAX_FILE_BYTES)
+        .ok_or_else(|| FilesystemError::new("FILE_TOO_LARGE"))?;
+    Ok(size)
+}
+
 impl WorkspaceFilesystem {
     pub fn write(&self, params: &FsWriteParams) -> Result<FsWriteResult, FilesystemError> {
         self.write_with_deadline(params, None)
@@ -101,14 +119,18 @@ impl WorkspaceFilesystem {
         if occurrences > 1 && !params.replace_all {
             return Err(FilesystemError::new(OLD_STRING_NOT_UNIQUE));
         }
+        let replacements = if params.replace_all { occurrences } else { 1 };
+        replacement_byte_len(
+            current.len(),
+            params.old_string.len(),
+            params.new_string.len(),
+            replacements,
+        )?;
         let content = if params.replace_all {
             current.replace(&params.old_string, &params.new_string)
         } else {
             current.replacen(&params.old_string, &params.new_string, 1)
         };
-        if content.len() > MAX_FILE_BYTES {
-            return Err(FilesystemError::new("FILE_TOO_LARGE"));
-        }
         // Last gate before the mutation boundary (see `write_with_deadline`).
         ensure_before_deadline(deadline, Some(&self.cancelled))?;
         self.atomic_write(root, &params.path, &content)?;
@@ -145,5 +167,36 @@ impl WorkspaceFilesystem {
             return Err(denied());
         };
         descriptor_atomic_write(&parent, &name, content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn replacement_size_checks_utf8_boundaries_and_overflow() {
+        assert_eq!(
+            replacement_byte_len(4, "é".len(), "猫".len(), 2).unwrap(),
+            6
+        );
+        assert_eq!(replacement_byte_len(4, 2, 0, 2).unwrap(), 0);
+        assert_eq!(
+            replacement_byte_len(MAX_FILE_BYTES, 1, 1, MAX_FILE_BYTES).unwrap(),
+            MAX_FILE_BYTES
+        );
+        for (current, old, new, count) in [
+            (1, 1, MAX_FILE_BYTES + 1, 1),
+            (2, 1, usize::MAX, 2),
+            (usize::MAX, 1, 2, 1),
+            (1, usize::MAX, 1, 2),
+        ] {
+            assert_eq!(
+                replacement_byte_len(current, old, new, count)
+                    .unwrap_err()
+                    .code,
+                "FILE_TOO_LARGE"
+            );
+        }
     }
 }

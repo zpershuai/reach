@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import type { DeviceConfig } from "./config.js";
+import { validateGatewayUrl, type DeviceConfig } from "./config.js";
 
 export interface ReadySession {
   sessionId?: string;
@@ -189,11 +189,12 @@ export class HttpGatewayClient implements GatewayClient {
   }
 
   private async post(path: string, body?: unknown, timeoutMs = this.requestTimeoutMs): Promise<Record<string, unknown>> {
+    const gatewayUrl = validateGatewayUrl(this.device.gatewayUrl).toString().replace(/\/$/, "");
     const headers: Record<string, string> = {};
     if (body !== undefined) headers["content-type"] = "application/json";
     if (this.device.controllerToken) headers.authorization = `Bearer ${this.device.controllerToken}`;
     const target = this.device.engineId ? `${path}?engineId=${encodeURIComponent(this.device.engineId)}` : path;
-    const response = await this.request(`${this.device.gatewayUrl}${target}`, {
+    const response = await this.request(`${gatewayUrl}${target}`, {
       method: "POST",
       headers,
       redirect: "error",

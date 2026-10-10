@@ -5,7 +5,13 @@ Defines gateway-issued grants that authorize narrowly scoped filesystem mutation
 ## Requirements
 
 ### Requirement: Gateway-issued mutation grants
-The gateway SHALL accept a local JSON `POST /grants` request with non-empty `workspace` and `path` strings and a non-empty `methods` array containing supported mutation methods. It SHALL return a gateway-generated non-empty `grantId` and an `expiresAt` timestamp. A grant SHALL be valid only until its expiry and only for its issued workspace, exact file or path-prefix scope, and listed methods. Grants authorize mutations that the gateway will later forward to the connected Engine; they do not authorize the Engine to mutate files on its own initiative.
+The gateway SHALL accept a local JSON `POST /grants` request with non-empty `workspace` and `path` strings and a non-empty `methods` array containing supported mutation methods.
+
+#### Scenario: Required gateway-issued mutation grants behavior
+- **WHEN** the Gateway issues or validates a grant
+- **THEN** It SHALL return a gateway-generated non-empty `grantId` and an `expiresAt` timestamp.
+- **AND** A grant SHALL be valid only until its expiry and only for its issued workspace, exact file or path-prefix scope, and listed methods.
+- **AND** Grants authorize mutations that the gateway will later forward to the connected Engine; they do not authorize the Engine to mutate files on its own initiative.
 
 #### Scenario: Issue a scoped grant
 - **WHEN** a caller posts a valid workspace, path, and `fs.write` method to `/grants`
@@ -16,7 +22,16 @@ The gateway SHALL accept a local JSON `POST /grants` request with non-empty `wor
 - **THEN** the gateway returns HTTP 400 and does not issue a grant
 
 ### Requirement: Mutation authorization validation
-Before sending `fs.write` or `fs.edit` to the Engine on a live session, the gateway SHALL require a live issued grant that matches the requested workspace, path, and method. It MUST unwrap nested `tool.call` envelopes (bounded depth) solely to identify the leaf mutation method and path for grant checks so nesting cannot hide a mutation from authorization. Nested `tool.call` — a `tool.call` whose unwrap leaves a `tool.call`, or whose unwrap fails — MUST be rejected with `INVALID_PARAMS` BEFORE grant matching and MUST NOT be forwarded, so the response code never depends on grant state. Grant matching applies only to supported non-nested mutation leaves. It MUST reject a missing, forged, expired, workspace-mismatched, path-mismatched, or method-mismatched grant with `PERMISSION_DENIED` and MUST NOT forward that mutation to the Engine. The Engine SHALL refuse to execute `fs.write` or `fs.edit` unless the inbound session request includes a `permission.grantId` and the gateway has marked that request as grant-checked for the live session (by only forwarding mutations that passed gateway validation). The Engine MUST NOT invent or accept operator-supplied grant identifiers outside that gateway-forwarded path.
+Before sending `fs.write` or `fs.edit` to the Engine on a live session, the gateway SHALL require a live issued grant that matches the requested workspace, path, and method.
+
+#### Scenario: Required mutation authorization validation behavior
+- **WHEN** the Gateway issues or validates a grant
+- **THEN** It MUST unwrap nested `tool.call` envelopes (bounded depth) solely to identify the leaf mutation method and path for grant checks so nesting cannot hide a mutation from authorization.
+- **AND** Nested `tool.call` — a `tool.call` whose unwrap leaves a `tool.call`, or whose unwrap fails — MUST be rejected with `INVALID_PARAMS` BEFORE grant matching and MUST NOT be forwarded, so the response code never depends on grant state.
+- **AND** Grant matching applies only to supported non-nested mutation leaves.
+- **AND** It MUST reject a missing, forged, expired, workspace-mismatched, path-mismatched, or method-mismatched grant with `PERMISSION_DENIED` and MUST NOT forward that mutation to the Engine.
+- **AND** The Engine SHALL refuse to execute `fs.write` or `fs.edit` unless the inbound session request includes a `permission.grantId` and the gateway has marked that request as grant-checked for the live session (by only forwarding mutations that passed gateway validation).
+- **AND** The Engine MUST NOT invent or accept operator-supplied grant identifiers outside that gateway-forwarded path.
 
 #### Scenario: Reject a forged grant
 - **WHEN** a mutation request presents a grant identifier that the gateway did not issue
@@ -35,7 +50,15 @@ Before sending `fs.write` or `fs.edit` to the Engine on a live session, the gate
 - **THEN** the gateway still rejects the nested envelope with `INVALID_PARAMS` before forward because nested `tool.call` is not an allowed dispatch form and its rejection is independent of grant state
 
 ### Requirement: Separately scoped process grants
-Gateway SHALL support a discriminated process grant request alongside the unchanged filesystem grant form. Execution grants MUST bind the active session, target Engine, workspace, exact normalized entry script, launchId and process.run method. Control grants MUST bind active owner session, target Engine, processId and process.stop method. Both SHALL expire after five minutes. Filesystem grants MUST NOT authorize process methods, process grants MUST NOT authorize filesystem mutation, and execution matching MUST NOT use path-prefix scope. MCP grant acquisition SHALL be automatic and MUST NOT be described as human approval.
+Gateway SHALL support a discriminated process grant request alongside the unchanged filesystem grant form.
+
+#### Scenario: Required separately scoped process grants behavior
+- **WHEN** the Gateway issues or validates a grant
+- **THEN** Execution grants MUST bind the active session, target Engine, workspace, exact normalized entry script, launchId and process.run method.
+- **AND** Control grants MUST bind active owner session, target Engine, processId and process.stop method.
+- **AND** Both SHALL expire after five minutes.
+- **AND** Filesystem grants MUST NOT authorize process methods, process grants MUST NOT authorize filesystem mutation, and execution matching MUST NOT use path-prefix scope.
+- **AND** MCP grant acquisition SHALL be automatic and MUST NOT be described as human approval.
 
 #### Scenario: Run claim uses a different launch identity
 - **WHEN** a grant issued for one launchId is presented on another run
@@ -55,3 +78,10 @@ Gateway MUST validate process grant type, expiry, session, Engine and applicable
 #### Scenario: In-process control uses forged grant
 - **WHEN** in-process forwarding receives process.stop with a fabricated claim
 - **THEN** it is rejected by the same grant policy as HTTP forwarding
+
+### Requirement: Grant paths preserve execution identity
+Grant issuance and matching MUST preserve filename whitespace and Unicode exactly, remove only empty and dot components, and reject absolute paths, parent components and NUL. The same accepted path MUST address the Engine file or process script represented by that grant. Filesystem and script identities MUST satisfy fixtures/workspace-paths.json.
+
+#### Scenario: Whitespace distinguishes two files
+- **WHEN** a request adds leading or trailing whitespace to an issued file or script scope
+- **THEN** it cannot use that grant to authorize the different path

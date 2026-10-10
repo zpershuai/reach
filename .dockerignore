@@ -1,7 +1,11 @@
 .git
 .reach
-target
+.agents
+.claude
+node_modules
 **/node_modules
+target
+*.log
+**/__pycache__
 deploy/*.env
 deploy/engines.json
-**/*.log

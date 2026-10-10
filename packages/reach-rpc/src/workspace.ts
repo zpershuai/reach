@@ -124,6 +124,9 @@ export class WorkspaceFilesystem {
       const occurrences = countOccurrences(current, params.oldString);
       if (occurrences === 0) throw new FilesystemError(OLD_STRING_NOT_FOUND);
       if (occurrences > 1 && !params.replaceAll) throw new FilesystemError(OLD_STRING_NOT_UNIQUE);
+      const replacements = params.replaceAll ? occurrences : 1;
+      const outputBytes = Buffer.byteLength(current) + replacements * (Buffer.byteLength(params.newString) - Buffer.byteLength(params.oldString));
+      if (!Number.isSafeInteger(outputBytes) || outputBytes > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
       const content = params.replaceAll ? current.split(params.oldString).join(params.newString) : current.replace(params.oldString, params.newString);
       if (Buffer.byteLength(content) > MAX_FILE_BYTES) throw new FilesystemError("FILE_TOO_LARGE");
       await this.atomicWrite(root, params.path, content);
@@ -341,4 +344,26 @@ async function* walkFileEntries(root: string, current: string, ignored: string[]
   }
 }
 function gitignoreMatches(pattern: string, path: string): boolean { const normalized = pattern.replace(/^\//, "").replace(/\/$/, ""); return pattern.endsWith("/") ? path === normalized || path.startsWith(`${normalized}/`) : globMatches(normalized.includes("/") ? normalized : `**/${normalized}`, path) || basename(path) === normalized; }
-function globMatches(pattern: string, path: string): boolean { const source = pattern.split("**/").map((part) => part.replace(/[.+^${}()|[\]\\]/g, "\\$&").replace(/\*\*/g, ".*").replace(/\*/g, "[^/]*").replace(/\?/g, "[^/]")).join("(?:.*/)?"); return new RegExp(`^${source}$`).test(path); }
+function globMatches(pattern: string, path: string): boolean {
+  const characters = [...pattern];
+  let source = "";
+  for (let index = 0; index < characters.length; index++) {
+    const character = characters[index]!;
+    if (character === "*" && characters[index + 1] === "*") {
+      index++;
+      if (characters[index + 1] === "/") {
+        index++;
+        source += "(?:[\\s\\S]*/)?";
+      } else {
+        source += "[\\s\\S]*";
+      }
+    } else if (character === "*") {
+      source += "[^/]*";
+    } else if (character === "?") {
+      source += "[^/]";
+    } else {
+      source += character.replace(/[.+^${}()|[\]\\]/g, "\\$&");
+    }
+  }
+  return new RegExp(`^${source}(?![\\s\\S])`, "u").test(path);
+}

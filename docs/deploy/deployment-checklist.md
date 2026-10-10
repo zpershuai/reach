@@ -33,3 +33,9 @@
 - 回滚程序时同步检查配置兼容性，文件工作区单独恢复。
 
 操作流程见 [运维与回滚](operations.md)。
+
+## 仓库自动验证与平台覆盖
+
+- `bash scripts/verify.sh` 在 Linux/macOS CI 运行固定版本的 OpenSpec 严格校验、源码和真实 Engine 测试、独立 MCP 发行 smoke、Linux 安装故障注入与回滚测试。OpenSpec 校验检查规格结构，代码行为由对应回归和共享 fixture 验证。
+- `bash scripts/verify-packaging.sh` 在 Linux x86_64 Docker runner 构建 Gateway 镜像、静态 musl Engine 和 OpenWrt Node bundle，检查版本、容器健康、两次 bundle 的一致性、manifest 摘要，以及私有库环境中的 Node 子进程。
+- 模拟 systemctl 的测试覆盖事务恢复，不证明实际 systemd 或启动时序。OpenWrt bundle 检查不模拟真实 procd、路由器内核或不同设备库。目标机安装、开机自启和真实故障恢复仍按本清单执行；macOS/OpenWrt 安装器未获得 Linux 安装器的事务回滚保证，Windows 无对应部署 gate。

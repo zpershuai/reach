@@ -1,0 +1,16 @@
+{
+  "paths": ["src/a.txt", "src/lib/a.txt", "src/lib/deep/b.js", "a.txt", "a\n.txt", "src/猫.txt", "literal/[a]+(b){c}$.txt", "back\\slash.txt"],
+  "cases": [
+    { "pattern": "src/**", "matches": ["src/a.txt", "src/lib/a.txt", "src/lib/deep/b.js", "src/猫.txt"] },
+    { "pattern": "src/**/*", "matches": ["src/a.txt", "src/lib/a.txt", "src/lib/deep/b.js", "src/猫.txt"] },
+    { "pattern": "src/*", "matches": ["src/a.txt", "src/猫.txt"] },
+    { "pattern": "src/?.txt", "matches": ["src/a.txt", "src/猫.txt"] },
+    { "pattern": "**/*.txt", "matches": ["src/a.txt", "src/lib/a.txt", "a.txt", "a\n.txt", "src/猫.txt", "literal/[a]+(b){c}$.txt", "back\\slash.txt"] },
+    { "pattern": "**/lib/**", "matches": ["src/lib/a.txt", "src/lib/deep/b.js"] },
+    { "pattern": "**/deep/*.js", "matches": ["src/lib/deep/b.js"] },
+    { "pattern": "literal/[a]+(b){c}$.txt", "matches": ["literal/[a]+(b){c}$.txt"] },
+    { "pattern": "back\\slash.txt", "matches": ["back\\slash.txt"] },
+    { "pattern": "a.txt", "matches": ["a.txt"] },
+    { "pattern": "**", "matches": ["src/a.txt", "src/lib/a.txt", "src/lib/deep/b.js", "a.txt", "a\n.txt", "src/猫.txt", "literal/[a]+(b){c}$.txt", "back\\slash.txt"] }
+  ]
+}

@@ -42,7 +42,16 @@ The Dispatcher SHALL canonicalize one `tool.call` wrapper with `{ name, argument
 - **THEN** the Engine returns `INVALID_PARAMS` and does not invoke a Tool
 
 ### Requirement: Shared deadline and responsive control lane
-The Engine MUST honor an optional Gateway-stamped absolute `deadlineAt`, including time spent queued. It MUST convert the remaining budget to a monotonic deadline and cap it by Runtime and Tool policy without restarting the budget after authorization. One serial Tool worker MAY execute while the Runtime receives session controls and a bounded queue of at most 16 deferred requests. An individual caller or Tool deadline MUST return `DEADLINE_EXCEEDED` without closing an otherwise healthy session or discarding other requests. Close, lease expiry, rotation, and the Runtime's hard RPC execution bound MUST signal cooperative cancellation and discard deferred requests before session teardown. The Runtime MUST drain the worker before resuming heartbeat; a syscall or atomic mutation already past its commit boundary MAY finish. A successful write-class Tool result MUST NOT be changed to a cancellation or deadline error after commit, and the Runtime MUST attempt to send that result before finalizing transport closure.
+The Engine MUST honor an optional Gateway-stamped absolute `deadlineAt`, including time spent queued.
+
+#### Scenario: Required shared deadline and responsive control lane behavior
+- **WHEN** the Engine executes or cancels queued Tool work
+- **THEN** It MUST convert the remaining budget to a monotonic deadline and cap it by Runtime and Tool policy without restarting the budget after authorization.
+- **AND** One serial Tool worker MAY execute while the Runtime receives session controls and a bounded queue of at most 16 deferred requests.
+- **AND** An individual caller or Tool deadline MUST return `DEADLINE_EXCEEDED` without closing an otherwise healthy session or discarding other requests.
+- **AND** Close, lease expiry, rotation, and the Runtime's hard RPC execution bound MUST signal cooperative cancellation and discard deferred requests before session teardown.
+- **AND** The Runtime MUST drain the worker before resuming heartbeat; a syscall or atomic mutation already past its commit boundary MAY finish.
+- **AND** A successful write-class Tool result MUST NOT be changed to a cancellation or deadline error after commit, and the Runtime MUST attempt to send that result before finalizing transport closure.
 
 #### Scenario: Expired queued mutation
 - **WHEN** a forwarded write reaches dispatch after its absolute deadline
