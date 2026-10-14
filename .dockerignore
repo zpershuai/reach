@@ -9,3 +9,4 @@ target
 **/__pycache__
 deploy/*.env
 deploy/engines.json
+deploy/update

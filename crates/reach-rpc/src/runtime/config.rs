@@ -286,6 +286,7 @@ pub struct EngineConfig {
     pub timeouts: TimeoutPolicy,
     pub workspace_roots: HashMap<String, PathBuf>,
     pub processes: crate::process::ProcessPolicy,
+    pub update: Option<super::update::UpdateConfig>,
 }
 
 impl EngineConfig {
@@ -348,6 +349,7 @@ impl EngineConfig {
             timeouts,
             workspace_roots,
             processes,
+            update: super::update::UpdateConfig::parse(lookup)?,
         })
     }
 

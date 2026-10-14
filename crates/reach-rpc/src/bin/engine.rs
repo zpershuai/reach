@@ -60,6 +60,16 @@ fn main() {
         }),
     );
 
+    if let Some(update) = config.update.clone() {
+        match reach_rpc::runtime::update::EngineUpdater::new(update) {
+            Ok(updater) => runtime.set_updater(Box::new(updater)),
+            Err(error) => {
+                eprintln!("Reach updater initialization failed: {error}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     println!(
         "Reach engine v{} ({}) heartbeating {}",
         ENGINE_VERSION, config.engine_id, config.gateway.base_url

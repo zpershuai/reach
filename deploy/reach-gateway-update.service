@@ -1,0 +1,11 @@
+[Unit]
+Description=Apply verified Reach Gateway release
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+EnvironmentFile=/etc/reach/updater.env
+ExecStart=/bin/bash /opt/reach/scripts/apply-gateway-release.sh /opt/reach/deploy/update /opt/reach
+Restart=on-failure
+RestartSec=60

@@ -11,6 +11,7 @@ pub mod runtime;
 pub mod session;
 pub mod state;
 pub mod transports;
+pub mod update;
 
 pub use config::{EngineConfig, GatewayConfig, TimeoutPolicy};
 pub use endpoint::resolve_session_endpoint;

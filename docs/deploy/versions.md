@@ -58,4 +58,26 @@ npm --prefix packages/grok-bot-mcp-connector version 0.3.1 --no-git-tag-version
 
 随后重新构建目标组件、运行 `bash scripts/verify.sh`，按 [运维与回滚](operations.md) 更新安装产物或 Gateway 容器。Gateway/MCP 发布时必须携带整个构建输出，包括 `dist/version.json`；只修改包清单不会改变已有 JS 产物报告的版本。MCP 安装器会复制版本模块和版本 JSON。
 
-升级后通过 CLI、`get_versions` 或 Gateway 状态确认版本。当前提供版本标识、查询与安装记录；更新仍由现有构建和安装流程完成。
+升级后通过 CLI、`get_versions` 或 Gateway 状态确认版本。除现有构建和安装流程外，也可选择下述 GitHub Release 自动更新。
+
+## GitHub Release 发布
+
+提交组件版本及对应 lockfile 后，推送与 manifest 一致的 `engine-vX.Y.Z` 或 `gateway-vX.Y.Z` 标签。标签不匹配、验证失败或缺少必需资产时 workflow 失败；普通 push / pull_request 只验证，不发布 Release 或 GHCR 镜像。
+
+| 组件 | Release 资产 |
+| --- | --- |
+| Engine | `engine-linux-x64-musl`、`engine-darwin-arm64`、`engine-darwin-x64` |
+| Gateway | `gateway-amd64.tgz`、`gateway-image.txt`（GHCR 镜像 digest） |
+| 两者 | `SHA256SUMS`，覆盖该 Release 的文件资产 |
+
+Linux x64 Engine 是静态 musl 二进制，同一资产可用于 systemd Linux 和 x86_64 OpenWrt。macOS 使用原生 arm64 与 Intel runner，Intel runner 为 `macos-15-intel`。Gateway tarball 包含 `packages/reach-rpc/dist`、npm manifests、Compose/Dockerfile 和宿主机 helpers。Gateway 镜像发布为 `ghcr.io/<owner>/reach-gateway:<X.Y.Z>`，并附组件标签别名。
+
+发布说明来自前一个同组件标签之后的提交；没有前一个标签时包含仓库历史。生成器过滤包含 `.reach/`、env 文件名和 SSH 目标的行，发布者仍应确保提交说明不含私有库存或凭证。下载文件后，在资产目录执行 `sha256sum -c SHA256SUMS`（macOS 可用 `shasum -a 256 -c SHA256SUMS`）。
+
+## 可选自动更新
+
+自动更新默认关闭；仅 `REACH_UPDATE_ENABLED=1` 或 `true` 启用，并需设置 `REACH_UPDATE_REPO=example/reach`。配置详见 [配置](configuration.md)，宿主机 helper 安装与回滚见 [运维](operations.md)。检查使用分页 GitHub Releases，按组件选择最高稳定 `X.Y.Z`，忽略 draft、prerelease、相等或更旧版本。默认每小时检查，失败时只对更新器退避，不改变心跳或 HTTP 服务。
+
+Engine 在独立后台线程下载和校验 SHA-256、`--version`，只在没有连接中、活动或 draining 会话时替换二进制，保存同目录的 `engine.prev`，退出 0 交给 LaunchAgent/systemd/procd 重新启动。存在的 `~/.reach/versions.json` 同步记录 `engineVersion`。Compose Engine 与 Gateway 则在空闲时写入共享目录的 `request.json`，由宿主机 helper 先下载、校验并准备镜像，再通过共享目录握手等待空闲、暂缓新会话并重建容器；Gateway 要求所有注册 Engine 的会话均为 `none`。未安装 helper 时只保留更新请求与日志，当前进程继续运行。
+
+自动更新不替换独立 Node runtime，也不更新 MCP Connector。更新失败保留当前运行产物；成功更新会创建全新进程，内存会话、grant 和去重状态不会恢复，客户端需重新打开会话。

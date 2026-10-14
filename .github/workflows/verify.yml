@@ -24,6 +24,8 @@ jobs:
       - run: npm ci --ignore-scripts
       - run: npm --prefix packages/reach-rpc ci --ignore-scripts
       - run: bash scripts/verify.sh
+      - if: runner.os == 'macOS'
+        run: bash scripts/package-engine.sh
 
   packaging:
     needs: verify

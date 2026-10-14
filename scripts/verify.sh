@@ -19,6 +19,8 @@ required_openspec="$(node -p 'require("./package.json").devDependencies["@fissio
 python3 scripts/test-node-runtime.py
 python3 scripts/test-node-launcher.py
 python3 scripts/test-engine-linux-installer.py
+python3 scripts/test-release-metadata.py
+python3 scripts/test-release-helpers.py
 node --test scripts/test-grok-plugin.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked

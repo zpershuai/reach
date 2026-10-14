@@ -127,3 +127,30 @@ MCP 的全部环境变量见 [mcp.md](mcp.md)。
 Gateway 通过 HTTPS 域名提供控制接口，Engine 通过同一 origin 建立 HTTPS/WSS 连接；不需要每台 Engine 单独配置域名。
 
 源码使用独立 bearer token 与 Gateway 内存 grant，没有 Ed25519 签名授权或 Agent assertion 验证流程。与其他协议实现迁移时，应分别确认认证、客户端和配置格式的兼容性；更换代理目标不会自动迁移凭证或会话。
+
+## 可选更新环境变量
+
+以下配置供 Engine 和 Gateway 共用。全部省略时继续使用现有安装方式，不访问 GitHub；仅 enable 值为 `1` 或 `true` 时验证其余更新配置。启用后的无效配置在首次心跳或监听前退出。
+
+| 变量 | 默认值 | 说明 |
+| --- | --- | --- |
+| `REACH_UPDATE_ENABLED` | 关闭 | `1` / `true` 启用；其他值保持关闭 |
+| `REACH_UPDATE_REPO` | 无 | 启用必填，格式 `owner/repo`，例如 `example/reach` |
+| `REACH_UPDATE_INTERVAL_SECS` | `3600` | 整数秒，最小 `60`；Gateway 需在 Node timer 范围内 |
+| `REACH_UPDATE_GITHUB_TOKEN` | 无 | 可选 GitHub token，保存在私有 env |
+| `REACH_UPDATE_GITHUB_TOKEN_FILE` | 无 | 与直接 token 二选一，读取私有文件并去除首尾空白 |
+| `REACH_UPDATE_BACKEND` | `host` | `host` 或 `compose`；host Engine 替换自身二进制；Gateway 两种值都通过宿主机 helper 应用 |
+| `REACH_UPDATE_REQUEST_DIR` | 无 | Compose Engine 和所有启用更新的 Gateway 必填；进程可写且 helper 可读的共享目录 |
+
+Gateway 容器示例配置（写入本地、忽略的 `gateway.env`）：
+
+```dotenv
+REACH_UPDATE_ENABLED=true
+REACH_UPDATE_REPO=example/reach
+REACH_UPDATE_BACKEND=compose
+REACH_UPDATE_REQUEST_DIR=/run/reach/update
+```
+
+Compose 已将 `deploy/update/` 挂载到该路径；先按 [运维](operations.md) 创建目录并安装宿主机 helper。GitHub token 文件若在容器使用，需要单独以只读文件挂载，并令文件权限允许容器用户读取。宿主机 helper 的 token 也需独立配置；容器中的文件路径不能直接供宿主机读取。不要将 token、repo 私有 owner 或安装目录提交到仓库。
+
+Host Engine 仅需 enable 和 repo，安装二进制所在目录必须允许服务用户写入和原子替换。Compose Engine 设置 backend 和独立 request dir，其宿主机 helper 另外使用 `REACH_UPDATE_COMPOSE_FILE` 指定现有 Compose 文件、`REACH_UPDATE_ENGINE_SERVICE`（默认 `engine`）指定服务名、`REACH_UPDATE_ENGINE_BINARY_PATH`（默认 `/usr/local/bin/engine`）指定容器内二进制路径。环境文件、工作区挂载和 Node runtime 沿用现有配置。

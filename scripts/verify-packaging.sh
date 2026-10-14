@@ -15,18 +15,12 @@ cleanup() {
 }
 trap cleanup EXIT
 
-# The CI runner supplies the musl target and compiler.
-CC_x86_64_unknown_linux_musl=musl-gcc cargo build --release --locked -p reach-rpc --bin engine --target x86_64-unknown-linux-musl
-engine="$repo_root/target/x86_64-unknown-linux-musl/release/engine"
-file "$engine" | grep -E 'static-pie linked|statically linked'
-"$engine" --version
-
-npm --prefix packages/reach-rpc run build
+bash scripts/package-engine.sh "$work"
+engine="$work/engine-linux-x64-musl"
 image=reach-gateway:verification
-docker build --platform linux/amd64 -f deploy/Dockerfile.gateway -t "$image" .
-engine_version="$(python3 -c 'import re; print(re.search(r"version = \"([^\"]+)\"", open("crates/reach-rpc/Cargo.toml").read()).group(1))')"
-gateway_version="$(node -p 'require("./packages/reach-rpc/package.json").version')"
-[[ "$(docker run --rm "$image" node dist/gateway-main.js --version)" == "$gateway_version" ]]
+bash scripts/package-gateway.sh "$work" "$image"
+engine_version="$("$engine" --version)"
+python3 scripts/release-metadata.py checksums "$work" engine-linux-x64-musl gateway-amd64.tgz
 container="$(docker run -d --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   -e REACH_CONTROLLER_TOKEN="$(printf 'c%.0s' {1..48})" \
   -e REACH_ENGINE_TOKEN="$(printf 'e%.0s' {1..48})" -e REACH_ENGINE_ID=fixture \

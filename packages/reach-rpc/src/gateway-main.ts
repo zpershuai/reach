@@ -1,3 +1,4 @@
+import { parseUpdateConfig } from "./gateway-update.js";
 import { createGateway } from "./gateway.js";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
@@ -7,6 +8,8 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(GATEWAY_VERSION);
   process.exit(0);
 }
+
+const update = parseUpdateConfig(process.env);
 
 const port = Number(process.env.GATEWAY_PORT ?? 8787);
 if (!Number.isInteger(port) || port < 1 || port > 65_535) {
@@ -25,6 +28,7 @@ if (!["127.0.0.1", "::1", "localhost"].includes(host) && !authenticated) {
   throw new Error("Non-loopback Gateway requires authentication");
 }
 const gateway = createGateway({
+  update,
   mcp: {
     allowedOrigins: (process.env.REACH_MCP_ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean),
     sessionIdleMs: Number(process.env.REACH_MCP_SESSION_IDLE_MS ?? 300_000),

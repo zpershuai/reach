@@ -1,0 +1,137 @@
+name: Release Reach component
+
+on:
+  push:
+    tags: ['engine-v*', 'gateway-v*']
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      component: ${{ steps.tag.outputs.component }}
+      version: ${{ steps.tag.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+      - id: tag
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: python3 scripts/release-metadata.py tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+  verify:
+    needs: version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm ci --ignore-scripts
+      - run: npm --prefix packages/reach-rpc ci --ignore-scripts
+      - run: bash scripts/verify.sh
+
+  engine:
+    needs: [version, verify]
+    if: needs.version.outputs.component == 'engine'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: engine-linux-x64-musl
+          - os: macos-14
+            asset: engine-darwin-arm64
+          - os: macos-15-intel
+            asset: engine-darwin-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - if: runner.os == 'Linux'
+        run: |
+          rustup target add x86_64-unknown-linux-musl
+          sudo apt-get update && sudo apt-get install -y musl-tools
+      - run: bash scripts/package-engine.sh .reach/release
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: .reach/release/${{ matrix.asset }}
+          if-no-files-found: error
+
+  gateway:
+    needs: [version, verify]
+    if: needs.version.outputs.component == 'gateway'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+      - run: npm --prefix packages/reach-rpc ci --ignore-scripts
+      - id: image
+        env:
+          OWNER: ${{ github.repository_owner }}
+          VERSION: ${{ needs.version.outputs.version }}
+        run: echo "name=ghcr.io/${OWNER,,}/reach-gateway:$VERSION" >> "$GITHUB_OUTPUT"
+      - env:
+          IMAGE: ${{ steps.image.outputs.name }}
+        run: bash scripts/package-gateway.sh .reach/release "$IMAGE"
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - env:
+          IMAGE: ${{ steps.image.outputs.name }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          docker push "$IMAGE"
+          docker tag "$IMAGE" "${IMAGE%:*}:$RELEASE_TAG"
+          docker push "${IMAGE%:*}:$RELEASE_TAG"
+          docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' > .reach/release/gateway-image.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gateway-amd64
+          path: .reach/release/*
+          if-no-files-found: error
+
+  publish:
+    needs: [version, verify, engine, gateway]
+    if: >-
+      always() && needs.version.result == 'success' && needs.verify.result == 'success' &&
+      ((needs.version.outputs.component == 'engine' && needs.engine.result == 'success') ||
+       (needs.version.outputs.component == 'gateway' && needs.gateway.result == 'success'))
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/download-artifact@v4
+        with:
+          path: .reach/release
+          merge-multiple: true
+      - env:
+          COMPONENT: ${{ needs.version.outputs.component }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          if [[ "$COMPONENT" == engine ]]; then
+            python3 scripts/release-metadata.py checksums .reach/release engine-linux-x64-musl engine-darwin-arm64 engine-darwin-x64
+          else
+            python3 scripts/release-metadata.py checksums .reach/release gateway-amd64.tgz gateway-image.txt
+          fi
+          python3 scripts/release-metadata.py notes "$RELEASE_TAG" .reach/release-notes.md
+      - uses: softprops/action-gh-release@v2
+        with:
+          body_path: .reach/release-notes.md
+          files: .reach/release/*
+          fail_on_unmatched_files: true

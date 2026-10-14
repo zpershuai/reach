@@ -6,4 +6,5 @@ dist/
 /.reach/
 /deploy/*.env
 /deploy/engines.json
+/deploy/update/
 __pycache__/

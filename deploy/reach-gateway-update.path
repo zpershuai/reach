@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch Reach Gateway update requests
+
+[Path]
+PathExists=/opt/reach/deploy/update/request.json
+Unit=reach-gateway-update.service
+
+[Install]
+WantedBy=multi-user.target

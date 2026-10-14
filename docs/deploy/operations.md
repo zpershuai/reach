@@ -123,3 +123,55 @@ bash scripts/install-engine-macos.sh .reach/engine-upgrade.env .reach/devices-up
 - MCP：从客户端配置移除 `reach` 条目并关闭对应子进程；仅删除客户端条目不会停止 Engine。
 
 停用 Engine 不删除工作区。若后续彻底卸载，先备份业务文件，再分别处理明确的程序文件和私有配置，避免删除整个 `~/.reach`。
+
+## 安装可选 GitHub Release updater
+
+发布资产和启用条件见 [版本](versions.md) 与 [配置](configuration.md)。下述路径都是可替换的示例；在自己的私有部署记录中保存实际路径。
+
+Gateway 保持 `read_only: true`、`cap_drop: [ALL]` 和非 root 用户，Docker socket 不挂载给 Gateway。宿主机的 Python 3 helper 负责下载、验证和调用 Docker；它需要宿主机 Docker/Compose 权限。通过 systemd path unit 监听共享目录，因此不需要 socket sidecar。
+
+在 Linux 宿主机安装到既有发布目录，保留当前 env 和设备注册表：
+
+```bash
+release_root=/opt/reach
+sudo install -d -m 750 -o 1000 -g 1000 "$release_root/deploy/update"
+sudo install -m 644 deploy/reach-gateway-update.service /etc/systemd/system/reach-gateway-update.service
+sudo install -m 644 deploy/reach-gateway-update.path /etc/systemd/system/reach-gateway-update.path
+sudo install -d -m 700 /etc/reach
+if [[ ! -e /etc/reach/updater.env ]]; then
+  sudo install -m 600 /dev/null /etc/reach/updater.env
+fi
+```
+
+单位文件默认使用 `/opt/reach`；使用其他目录时，在安装副本中同步修改 service 的 helper/request/root 三个路径与 path 的 `PathExists`。不要覆盖已有 `updater.env`；上面的空文件初始化仅适用于首次安装。需要 GitHub token 时，在该私有文件设置 `REACH_UPDATE_GITHUB_TOKEN_FILE`，指向宿主机上的 600 权限 token 文件。Helper 通过 GitHub API 下载私有 Release，不把 token 转发给资产存储重定向地址。
+
+在 `gateway.env` 配置更新策略后，执行：
+
+```bash
+sudo systemctl daemon-reload
+sudo systemctl enable --now reach-gateway-update.path
+cd "$release_root/deploy"
+docker compose up -d gateway
+```
+
+先确认每个 Engine `/session/status` 都是 `none` 再启用 helper。Helper 优先拉取版本化 GHCR 镜像，校验 Release 发布的镜像 digest 和 Gateway `--version`；无法拉取时验证 tarball digest、构建并验证版本后应用。产物准备好后才写 `apply.json`；组件保持已有会话并等待自然空闲，再用匹配 nonce 的 `idle.json` 确认，期间暂缓新 REST/MCP 会话或 Engine 租约。Helper 收到确认后才标记当前镜像和重建；等待确认最多 5 分钟，完成或失败会删除握手文件，helper 崩溃时限制最多 15 分钟后失效。保留 `reach-gateway:previous`，现有 `gateway.env`、`engines.json` 和 Compose 环境/挂载策略继续使用。请求成功后写 `result.json` 并移除 `request.json`；失败保留请求重试，可查看 `journalctl -u reach-gateway-update.service`。不安装 helper 时不会重建容器。
+
+Compose Engine 使用自己的共享目录，避免与 Gateway 或其他 Engine 共用 `request.json`。复制上述 path/service 模板到独立单位名称，改为调用 `apply-engine-release.sh REQUEST_DIR RELEASE_ROOT`，将 `REACH_UPDATE_COMPOSE_FILE`、服务名与二进制路径放入对应私有 helper env。Helper 从现有 Engine 镜像构建携带新版静态 musl 二进制的镜像，准备完成后通过同一空闲握手，使用仅覆盖 `image` 的 Compose override 重建该服务，保留其 env、命令、网络及工作区挂载。独立 Node runtime 不替换。后续 Compose 运维需沿用生成的 `.reach/engine-update.override.json`，避免误用旧 image。
+
+Host Engine 无需 Docker helper；启用后只在空闲状态原子替换并退出，主管进程再启动新 inode。更新不会通过 `execve` 恢复原会话；Gateway 和 Engine 重启都会丢失内存会话，客户端重新获取租约。
+
+### 自动更新后的回滚
+
+先在私有 env 中关闭自动更新并重启组件，避免回滚后立即再次升级。关闭 Gateway path unit：`sudo systemctl disable --now reach-gateway-update.path`。
+
+Host Engine 停止对应 LaunchAgent/systemd/procd 服务后，将安装目录的 `engine.prev` 复制回 `engine`（755），然后重新启动原服务。仍可使用既有安装器的私有备份；Node 和工作区不跟随回滚。
+
+Gateway 回滚：
+
+```bash
+docker tag reach-gateway:previous reach-gateway:current
+cd /opt/reach/deploy
+docker compose up -d --no-build --force-recreate gateway
+```
+
+Docker Engine 类似地将 `reach-engine:previous` 标记为 `reach-engine:current`，并用原 Compose 文件和 `.reach/engine-update.override.json` 执行 `up -d --no-build --force-recreate engine`。容器重建失败时 helper 会尝试恢复 previous 镜像；成功重建后的业务健康检查仍按 [验证](verification.md) 执行。

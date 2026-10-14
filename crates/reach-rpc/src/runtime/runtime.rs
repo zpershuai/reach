@@ -151,6 +151,8 @@ pub struct EngineRuntime {
     backoff_secs: u64,
     process_cleanup: Option<crate::process::ProcessManager>,
     cleanup_transport: Option<Box<dyn SessionTransport>>,
+    updater: Option<Box<dyn super::update::RuntimeUpdater>>,
+    next_heartbeat_ms: i64,
 }
 
 impl EngineRuntime {
@@ -178,7 +180,48 @@ impl EngineRuntime {
             backoff_secs: 1,
             process_cleanup: None,
             cleanup_transport: None,
+            updater: None,
+            next_heartbeat_ms: 0,
         }
+    }
+
+    pub fn set_updater(&mut self, updater: Box<dyn super::update::RuntimeUpdater>) {
+        self.updater = Some(updater);
+    }
+
+    fn poll_update(&mut self) -> bool {
+        if !matches!(
+            self.state,
+            RuntimeState::Heartbeating | RuntimeState::Waiting | RuntimeState::Backoff
+        ) {
+            return false;
+        }
+        let idle = self.pending.is_none() && self.process_cleanup.is_none();
+        let result = self
+            .updater
+            .as_mut()
+            .map(|updater| updater.tick(self.clock.now_ms(), idle));
+        match result {
+            Some(Ok(true)) => {
+                self.transition(RuntimeState::Shutdown);
+                true
+            }
+            Some(Err(error)) => {
+                self.emit(RuntimeEvent::Message {
+                    line: format!("Reach update failed: {error}"),
+                });
+                false
+            }
+            _ => false,
+        }
+    }
+
+    fn idle_wait(&self, duration: Duration) -> StepOutcome {
+        StepOutcome::Wait(if self.updater.is_some() {
+            duration.min(Duration::from_millis(100))
+        } else {
+            duration
+        })
     }
 
     pub fn state(&self) -> RuntimeState {
@@ -248,6 +291,25 @@ impl EngineRuntime {
         {
             self.transition(RuntimeState::Shutdown);
         }
+        if self.poll_update() {
+            return Ok(StepOutcome::Shutdown);
+        }
+        if self.state == RuntimeState::Heartbeating
+            && self
+                .updater
+                .as_ref()
+                .is_some_and(|updater| updater.admission_paused(self.clock.now_ms()))
+        {
+            return Ok(self.idle_wait(Duration::from_millis(100)));
+        }
+        if self.updater.is_some()
+            && self.state == RuntimeState::Heartbeating
+            && self.clock.now_ms() < self.next_heartbeat_ms
+        {
+            return Ok(self.idle_wait(Duration::from_millis(
+                (self.next_heartbeat_ms - self.clock.now_ms()) as u64,
+            )));
+        }
         match self.state {
             RuntimeState::Boot => {
                 self.transition(RuntimeState::Heartbeating);
@@ -259,7 +321,11 @@ impl EngineRuntime {
                         ok: true,
                         error: None,
                     });
-                    return Ok(StepOutcome::Wait(interval));
+                    self.next_heartbeat_ms = self
+                        .clock
+                        .now_ms()
+                        .saturating_add(interval.as_millis() as i64);
+                    return Ok(self.idle_wait(interval));
                 }
                 Ok(HeartbeatOutcome::Lease(lease)) => {
                     self.emit(RuntimeEvent::Heartbeat {
@@ -1283,6 +1349,7 @@ mod tests {
             timeouts,
             workspace_roots: roots,
             processes: Default::default(),
+            update: None,
         }
     }
 
@@ -1579,5 +1646,132 @@ mod tests {
                 ..
             }
         )));
+    }
+    struct FakeUpdater {
+        calls: Arc<std::sync::Mutex<Vec<bool>>>,
+        applied: bool,
+        fail: bool,
+    }
+    impl super::super::update::RuntimeUpdater for FakeUpdater {
+        fn tick(&mut self, _now_ms: i64, idle: bool) -> Result<bool, String> {
+            self.calls.lock().unwrap().push(idle);
+            if self.fail {
+                Err("GitHub unavailable".into())
+            } else {
+                Ok(self.applied && idle)
+            }
+        }
+    }
+    #[test]
+    fn updater_skips_live_states_and_shuts_down_only_from_idle() {
+        let clock = SharedClock::new(0);
+        let (factory, _, _) = factory(vec![], None, 0);
+        let mut engine = runtime(
+            test_config(0, TimeoutPolicy::default()),
+            Box::new(FakeHeartbeat::new(vec![])),
+            Box::new(factory),
+            Box::new(clock),
+        );
+        let calls = Arc::new(std::sync::Mutex::new(Vec::new()));
+        engine.set_updater(Box::new(FakeUpdater {
+            calls: calls.clone(),
+            applied: true,
+            fail: false,
+        }));
+        for state in [
+            RuntimeState::Connecting,
+            RuntimeState::ActiveSession,
+            RuntimeState::Draining,
+        ] {
+            engine.state = state;
+            assert!(!engine.poll_update());
+        }
+        assert!(calls.lock().unwrap().is_empty());
+        engine.state = RuntimeState::Waiting;
+        engine.pending = Some((
+            "ws://127.0.0.1:8787/session".into(),
+            match lease_at("/session", 100000) {
+                HeartbeatOutcome::Lease(lease) => lease,
+                _ => unreachable!(),
+            },
+        ));
+        assert!(!engine.poll_update());
+        engine.pending = None;
+        engine.state = RuntimeState::Heartbeating;
+        assert_eq!(engine.step().unwrap(), StepOutcome::Shutdown);
+        assert_eq!(engine.state(), RuntimeState::Shutdown);
+    }
+    #[test]
+    fn updater_failure_does_not_delay_or_accelerate_heartbeat() {
+        let clock = SharedClock::new(0);
+        let heartbeat = FakeHeartbeat::new(vec![
+            Ok(HeartbeatOutcome::Idle {
+                interval: Duration::from_secs(120),
+            }),
+            Ok(HeartbeatOutcome::Idle {
+                interval: Duration::from_secs(120),
+            }),
+        ]);
+        let (factory, _, _) = factory(vec![], None, 0);
+        let mut engine = runtime(
+            test_config(0, TimeoutPolicy::default()),
+            Box::new(heartbeat),
+            Box::new(factory),
+            Box::new(clock.clone()),
+        );
+        engine.set_updater(Box::new(FakeUpdater {
+            calls: Arc::new(std::sync::Mutex::new(vec![])),
+            applied: false,
+            fail: true,
+        }));
+        engine.step().unwrap();
+        engine.step().unwrap();
+        let count = |events: Vec<RuntimeEvent>| {
+            events
+                .into_iter()
+                .filter(|e| matches!(e, RuntimeEvent::Heartbeat { .. }))
+                .count()
+        };
+        assert_eq!(count(engine.drain_events()), 1);
+        clock.advance(1000);
+        engine.step().unwrap();
+        assert_eq!(count(engine.drain_events()), 0);
+        clock.advance(119000);
+        engine.step().unwrap();
+        assert_eq!(count(engine.drain_events()), 1);
+    }
+    struct ApplyReservation;
+    impl super::super::update::RuntimeUpdater for ApplyReservation {
+        fn tick(&mut self, _now: i64, _idle: bool) -> Result<bool, String> {
+            Ok(false)
+        }
+        fn admission_paused(&self, now: i64) -> bool {
+            now < 10000
+        }
+    }
+    #[test]
+    fn prepared_compose_admission_defers_new_lease_until_expiry() {
+        let clock = SharedClock::new(0);
+        let heartbeat = FakeHeartbeat::new(vec![Ok(lease_at("/session", 100000))]);
+        let (factory, _, _) = factory(vec![], None, 0);
+        let mut engine = runtime(
+            test_config(0, TimeoutPolicy::default()),
+            Box::new(heartbeat),
+            Box::new(factory),
+            Box::new(clock.clone()),
+        );
+        engine.set_updater(Box::new(ApplyReservation));
+        engine.step().unwrap();
+        assert!(matches!(engine.step().unwrap(), StepOutcome::Wait(_)));
+        assert_eq!(engine.state(), RuntimeState::Heartbeating);
+        assert!(engine.pending.is_none());
+        assert!(!engine
+            .drain_events()
+            .iter()
+            .any(|event| matches!(event, RuntimeEvent::Heartbeat { .. })));
+        clock.advance(10000);
+        engine.step().unwrap();
+        assert_eq!(engine.state(), RuntimeState::Waiting);
+        assert!(engine.pending.is_some());
     }
 }

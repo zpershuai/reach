@@ -1,4 +1,5 @@
 export * from "./gateway-policy.js";
+import { GatewayUpdater, updateAdmissionPaused, type UpdateConfig } from "./gateway-update.js";
 import { DEFAULT_HEARTBEAT_INTERVAL_SECONDS, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, SESSION_TOKEN_TTL_MS, MAX_HTTP_BODY_BYTES, MAX_WEBSOCKET_TEXT_BYTES, SESSION_LEASE_MS, SESSION_IDLE_MS, SESSION_RPC_TIMEOUT_MS, SESSION_CONNECTING_MS, SESSION_ENDPOINT_PATH } from "./gateway-policy.js";
 import { EngineSessionState } from "./gateway-state.js";
 import { SessionRpcForwarder } from "./gateway-forwarder.js";
@@ -76,6 +77,8 @@ export interface GatewayOptions {
   authentication?: { controllerToken: string; engineToken: string; engineId: string };
   /** Additional Engines sharing the controller token; legacy requests target authentication.engineId. */
   engines?: readonly { engineId: string; engineToken: string }[];
+  update?: UpdateConfig;
+  updateFetch?: typeof fetch;
 }
 
 class PayloadTooLargeError extends Error {}
@@ -183,6 +186,13 @@ export function createGateway(options: GatewayOptions = {}): Server {
     mcp.shutdown();
     for (const target of gateways.values()) target.server.emit("close");
   });
+  if (options.update) {
+    const updater = new GatewayUpdater(options.update,
+      () => [...gateways.values()].every(engine => engine.api.status().status === "none"),
+      options.logger ?? console.log, options.updateFetch, options.now);
+    gateway.once("listening", () => updater.start());
+    gateway.once("close", () => updater.stop());
+  }
   return gateway;
 }
 
@@ -205,6 +215,10 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   const sessionRpcTimeoutMs = options.sessionRpcTimeoutMs ?? SESSION_RPC_TIMEOUT_MS;
   const sessionConnectingMs = options.sessionConnectingMs ?? SESSION_CONNECTING_MS;
   const state = new EngineSessionState(now, logger, sessionLeaseMs, sessionEndpoint);
+  const openSession = (sessionId?: string): EngineResult => {
+    if (updateAdmissionPaused(options.update, now())) return { statusCode: 503, payload: { error: "update in progress" } };
+    return state.openSession(sessionId);
+  };
   const forwarder = new SessionRpcForwarder(state, grants, now, sessionRpcTimeoutMs);
   const sessions = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_TEXT_BYTES });
 
@@ -287,7 +301,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-wanted payload" });
         return;
       }
-      const result = wanted ? state.openSession() : state.requestClose();
+      const result = wanted ? openSession() : state.requestClose();
       sendJson(response, result.statusCode, result.payload);
       return;
     }
@@ -300,7 +314,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-open payload" });
         return;
       }
-      const result = state.openSession(intent.sessionId);
+      const result = openSession(intent.sessionId);
       sendJson(response, result.statusCode, { ...result.payload, ...(result.statusCode === 200 ? { sessionId: state.wantedSessionId } : {}) });
       return;
     }
@@ -589,7 +603,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   const api: EngineApi = {
     status: state.sessionStatus,
     open: (sessionId) => {
-      const result = state.openSession(sessionId);
+      const result = openSession(sessionId);
       return { ...result, payload: { ...result.payload, ...(result.statusCode === 200 ? { sessionId: state.wantedSessionId } : {}) } };
     },
     renew: (sessionId) => binding(sessionId) ? state.renewSession() : mismatch(),
