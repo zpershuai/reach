@@ -12,11 +12,11 @@ The connector SHALL implement MCP initialization over stdio and SHALL return `ca
 - **THEN** the connector returns MCP server information and declares `capabilities.tools.listChanged` as `true`
 
 ### Requirement: Device selection gates filesystem tools
-In dynamic stdio mode, before a device has been selected, `tools/list` SHALL expose only `list_devices`, `pick_device`, and `get_versions`. `list_devices` SHALL return the connector's configured devices, and `pick_device` SHALL select one configured device, open its Reach Gateway session, wait until the session reports ready, and bind the connector to that device. A failed selection or session open MUST leave filesystem and process tools unavailable.
+In dynamic stdio mode, initial `tools/list` SHALL expose only `list_devices`, `pick_device`, `list_workspaces`, and `get_versions`. `list_devices` SHALL return configured devices. Both `pick_device` and `list_workspaces` SHALL select a configured device, open its Gateway session, wait for readiness, and bind the connector to it. Failed selection or session open MUST leave filesystem and process tools unavailable.
 
 #### Scenario: Initial tool discovery
 - **WHEN** a client calls `tools/list` before picking a device
-- **THEN** the result contains `list_devices`, `pick_device`, and `get_versions` and contains no filesystem, process, or session-close tool
+- **THEN** the result contains `list_devices`, `pick_device`, `list_workspaces`, and `get_versions` and contains no filesystem, process, or session-close tool
 
 #### Scenario: Pick a configured ready device
 - **WHEN** a client calls `pick_device` with a configured device identifier and its Gateway reports a ready session
@@ -24,7 +24,23 @@ In dynamic stdio mode, before a device has been selected, `tools/list` SHALL exp
 
 #### Scenario: Reject an unknown or unready device
 - **WHEN** a client selects a device identifier that is not configured or whose Gateway does not become ready
-- **THEN** the call fails and the connector continues to expose only device-selection and version tools
+- **THEN** the call fails and the connector continues to expose only device-discovery and version tools
+
+### Requirement: Discover advertised Engine workspaces
+Stdio and HTTP MCP SHALL expose `list_workspaces` with required `deviceId`. Ready results SHALL contain `deviceId`, `status: "ready"`, `workspaces`, and `processWorkspaces`. Names MUST come from Engine metadata without assuming `default`, exposing absolute roots, or forwarding filesystem RPC. Discovery SHALL retain existing session identity and ownership protections.
+
+#### Scenario: Discover before file access
+- **WHEN** a client calls `list_workspaces` for a ready Engine advertising `notes` and `scripts`, with execution enabled only for `scripts`
+- **THEN** the result lists both file workspace names and `processWorkspaces: ["scripts"]`, and a following file call can use a discovered name
+
+#### Scenario: Stdio discovery selects a device
+- **WHEN** a dynamic stdio client discovers workspaces before selecting a device
+- **THEN** the connector selects the requested device, waits for readiness, and announces the newly available device tools
+
+#### Scenario: Older or incomplete workspace metadata
+- **WHEN** a ready Engine reports workspace names without execution metadata
+- **THEN** discovery returns those names and an empty execution list
+- **AND** if workspace metadata itself is absent, discovery returns `WORKSPACES_UNAVAILABLE` instead of inventing names
 
 ### Requirement: Tool-list change expands a selected device's surface
 After successfully selecting a device, the connector SHALL send MCP `notifications/tools/list_changed`. A subsequent `tools/list` request SHALL expose `fs.read`, `fs.write`, `fs.edit`, `fs.list`, `fs.glob`, `fs.stat`, `fs.grep`, `process.run`, `process.status`, `process.logs`, `process.stop`, `process.list`, and `session.close`; those filesystem and process tool schemas MUST NOT require a `deviceId`, because every invocation is scoped to the selected device.
@@ -153,7 +169,7 @@ The repository SHALL distribute a plugin template using a reserved example HTTPS
 - **THEN** verification fails with a REACH_MCP_ALLOWED_ORIGINS setup hint, while unapproved requests remain rejected
 
 ### Requirement: Nonblocking remote readiness
-Remote pick_device and first filesystem calls SHALL immediately create an owned intent and report connecting with retryAfterMs when not ready. device_status SHALL observe that intent without canceling it. Independent Engine ownership SHALL coexist in one HTTP MCP session.
+Remote pick_device, list_workspaces, and first filesystem calls SHALL immediately create an owned intent and report connecting with retryAfterMs when not ready. device_status SHALL observe that intent without canceling it. Independent Engine ownership SHALL coexist in one HTTP MCP session. Once ready, list_workspaces SHALL return the Engine's advertised workspace metadata.
 
 #### Scenario: Sleeping Engine
 - **WHEN** the first remote call targets an idle Engine

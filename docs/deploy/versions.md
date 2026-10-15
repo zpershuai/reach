@@ -1,6 +1,8 @@
 # 组件版本与更新
 
-MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.1`，Gateway 为 `0.4.0`，独立 stdio MCP Connector 为 `0.3.1`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.2`，Gateway 为 `0.5.0`，独立 stdio MCP Connector 为 `0.4.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+
+Gateway `0.5.0` 和 stdio MCP `0.4.0` 新增 `list_workspaces({deviceId})`，从 Engine 就绪元数据返回文件工作区名称和 `processWorkspaces` 执行许可列表。Gateway 同时修复 OAuth 客户端在多次 MCP 初始化之间的 Engine 会话归属，支持每次工具调用创建新 MCP 会话的客户端。Engine `0.2.2` 随本次发布重建，继续使用现有工作区元数据协议，无需修改工作区配置。
 
 Gateway `0.4.0` 新增 MCP OAuth 授权，支持动态客户端注册、S256 PKCE、密码与二次验证批准、轮换刷新令牌和控制台撤销应用授权。启用控制台并完成管理员设置后即可使用；原有 Controller token 和旧 Engine 保持兼容，接入步骤见 [MCP 配置](mcp.md#chatgpt-等-oauth-客户端remote-http)。
 
@@ -36,10 +38,10 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 
 ```json
 {
-  "mcpVersion": "0.3.1",
+  "mcpVersion": "0.4.0",
   "deviceId": "engine-a",
-  "gatewayVersion": "0.4.0",
-  "engineVersion": "0.2.1"
+  "gatewayVersion": "0.5.0",
+  "engineVersion": "0.2.2"
 }
 ```
 
@@ -52,8 +54,8 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 更新 Gateway 或 MCP 的包版本，例如：
 
 ```bash
-npm --prefix packages/reach-rpc version 0.4.0 --no-git-tag-version
-npm --prefix packages/grok-bot-mcp-connector version 0.3.1 --no-git-tag-version
+npm --prefix packages/reach-rpc version 0.5.0 --no-git-tag-version
+npm --prefix packages/grok-bot-mcp-connector version 0.4.0 --no-git-tag-version
 ```
 
 仅对实际更新的组件执行相应命令。Gateway 的 npm lockfile 由 npm 同步更新。Engine 修改 Cargo manifest 后运行 `cargo check --workspace` 更新 `Cargo.lock` 中的包版本。

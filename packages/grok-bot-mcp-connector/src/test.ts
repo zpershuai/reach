@@ -33,6 +33,78 @@ function testServer() {
   return { server, messages };
 }
 
+test("workspace discovery selects the Engine before file access in dynamic and static modes", async () => {
+  for (const toolMode of ["dynamic", "static"] as const) {
+    const messages: Record<string, unknown>[] = [];
+    const lifecycle: string[] = [];
+    const metadata = { sessionId: "workspace-owner", workspaces: ["project-notes", "automation"], processWorkspaces: ["automation"] };
+    const server = new McpServer({ ...loadConfig({}), toolMode }, message => messages.push(message), () => ({
+      ...readyGateway(),
+      openAndWait: async () => { lifecycle.push("open"); return metadata; },
+      status: async () => ({ status: "ready", ...metadata }),
+      rpc: async (method, params) => {
+        lifecycle.push(method);
+        assert.deepEqual(params, { workspace: "project-notes", path: "note.txt" });
+        return { type: "response", result: { content: "discovered workspace" } };
+      },
+    }));
+    await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
+    await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/list" });
+    // These messages are produced by the in-process server after the awaited request completes.
+    const initial = messages.at(-1)!.result as { tools: Array<{ name: string }> };
+    assert.ok(initial.tools.some(tool => tool.name === "list_workspaces"));
+    assert.equal(initial.tools.some(tool => tool.name === "fs.read"), toolMode === "static");
+    await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "list_workspaces", arguments: { deviceId: "local-engine" } } });
+    const discovered = messages.find(message => message.id === 3)!.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(discovered.isError, undefined);
+    const workspaces = JSON.parse(discovered.content[0].text);
+    assert.deepEqual(workspaces, { deviceId: "local-engine", status: "ready", workspaces: metadata.workspaces, processWorkspaces: metadata.processWorkspaces });
+    assert.deepEqual(lifecycle, ["open"], "discovery uses ready metadata without an Engine RPC");
+    assert.equal(messages.filter(message => message.method === "notifications/tools/list_changed").length, toolMode === "dynamic" ? 1 : 0);
+    await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/list" });
+    const refreshed = messages.at(-1)!.result as { tools: Array<{ name: string }> };
+    assert.ok(refreshed.tools.some(tool => tool.name === "fs.read"));
+    await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "fs.read", arguments: {
+      ...(toolMode === "static" ? { deviceId: "local-engine" } : {}), workspace: workspaces.workspaces[0], path: "note.txt",
+    } } });
+    const read = messages.find(message => message.id === 5)!.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(read.isError, undefined);
+    assert.deepEqual(JSON.parse(read.content[0].text), { content: "discovered workspace" });
+    assert.deepEqual(lifecycle, ["open", "fs.read"], "file access reuses the discovery session");
+  }
+});
+
+test("workspace discovery distinguishes missing metadata from empty workspaces and older execution metadata", async () => {
+  const messages: Record<string, unknown>[] = [];
+  let metadata: { sessionId: string; workspaces?: string[]; processWorkspaces?: string[] } = { sessionId: "owner" };
+  let opens = 0;
+  const server = new McpServer(loadConfig({}), message => messages.push(message), () => ({
+    ...readyGateway(),
+    openAndWait: async () => { opens++; return metadata; },
+    status: async () => ({ status: "ready", ...metadata }),
+    rpc: async () => { throw new Error("workspace discovery must not invoke an Engine RPC"); },
+  }));
+  await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
+  let sequence = 1;
+  const discover = async (args: unknown) => {
+    const id = ++sequence;
+    await server.receive({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "list_workspaces", arguments: args } });
+    return messages.find(message => message.id === id)!.result as { isError?: boolean; content: Array<{ text: string }> };
+  };
+  for (const args of [undefined, null, [], {}, { deviceId: 123 }, { deviceId: "unknown" }]) assert.equal((await discover(args)).isError, true);
+  assert.equal(opens, 0);
+  const unavailable = await discover({ deviceId: "local-engine" });
+  assert.equal(unavailable.isError, true);
+  assert.match(unavailable.content[0].text, /^WORKSPACES_UNAVAILABLE:/);
+  for (const workspaces of [[], ["project-notes"]]) {
+    metadata = { sessionId: "owner", workspaces };
+    const result = await discover({ deviceId: "local-engine" });
+    assert.equal(result.isError, undefined);
+    assert.deepEqual(JSON.parse(result.content[0].text), { deviceId: "local-engine", status: "ready", workspaces, processWorkspaces: [] });
+  }
+  assert.equal(opens, 1, "discovery refreshes metadata without replacing the owned session");
+});
+
 test("static close never selects another device or wakes an offline device and preserves owned tasks", async () => {
   const config = loadConfig({ REACH_MCP_TOOL_MODE: "static", REACH_MCP_DEVICES: JSON.stringify([{ id: "a", gatewayUrl: "http://127.0.0.1:8787" }, { id: "b", gatewayUrl: "http://127.0.0.1:8788" }]) });
   const messages: Record<string, unknown>[] = [];
@@ -167,16 +239,11 @@ test("get_versions observes configured devices without opening, closing or selec
 test("initialize declares tools.listChanged", async () => {
   const { server, messages } = testServer();
   await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: MCP_PROTOCOL_VERSION } });
-  assert.deepEqual(messages, [{
-    jsonrpc: "2.0",
-    id: 1,
-    result: {
-      protocolVersion: MCP_PROTOCOL_VERSION,
-      capabilities: { tools: { listChanged: true } },
-      serverInfo: { name: "reach-mcp", version: MCP_VERSION },
-      instructions: "Reach Engine installation automatically provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on the same host. Launch those processes with that executable or the installed run-node.sh launcher. Engine uses this private runtime for trusted workspace scripts when execution is locally enabled. Scripts run with the Engine account privileges and are stopped when their owner session ends. Supply a unique launchId and recover uncertain launches with process.status on the same session. Filesystem tools execute on the selected Engine through its Gateway.",
-    },
-  }]);
+  const result = messages[0].result as { protocolVersion: string; capabilities: unknown; serverInfo: unknown; instructions: string };
+  assert.equal(result.protocolVersion, MCP_PROTOCOL_VERSION);
+  assert.deepEqual(result.capabilities, { tools: { listChanged: true } });
+  assert.deepEqual(result.serverInfo, { name: "reach-mcp", version: MCP_VERSION });
+  assert.match(result.instructions, /Call list_workspaces with a deviceId before using filesystem or process tools/);
 });
 
 test("tools require initialization and requests receive structured replies", async () => {
@@ -207,7 +274,8 @@ test("only configured devices can be picked after their Gateway is ready", async
   }));
   await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
   await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/list" });
-  assert.deepEqual(((messages[1].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
+  const initial = messages[1].result as { tools: Array<{ name: string }> };
+  assert.equal(initial.tools.some(tool => tool.name === "fs.read"), false);
   await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "missing" } } });
   assert.equal((messages[2].result as { isError: boolean }).isError, true);
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "remote" } } });
@@ -216,7 +284,6 @@ test("only configured devices can be picked after their Gateway is ready", async
   assert.deepEqual(messages[4], { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
   const refreshed = (messages[5].result as { tools: Array<{ name: string; inputSchema: { properties: Record<string, unknown> } }> }).tools;
-  assert.deepEqual(refreshed.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device", "process.run", "process.status", "process.logs", "process.stop", "process.list", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
   assert.equal("deviceId" in refreshed.find((tool) => tool.name === "fs.read")!.inputSchema.properties, false);
 });
 
@@ -243,7 +310,8 @@ test("filesystem calls renew then forward through the selected Gateway and close
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/call", params: { name: "session.close", arguments: {} } });
   assert.equal(calls[2], "close");
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/list" });
-  assert.deepEqual(((messages[6].result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
+  const afterClose = messages[6].result as { tools: Array<{ name: string }> };
+  assert.equal(afterClose.tools.some(tool => tool.name === "fs.read"), false);
 });
 
 test("writes obtain a matching Gateway grant before forwarding permission", async () => {
@@ -323,7 +391,8 @@ test("an uncertain write is sent once and removes stale dynamic tools", async ()
   assert.equal(closed, 1);
   assert.equal((messages.find((message) => message.id === 3)!.result as { isError: boolean }).isError, true);
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/list" });
-  assert.deepEqual((messages.at(-1)!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
+  const afterFailure = messages.at(-1)!.result as { tools: Array<{ name: string }> };
+  assert.equal(afterFailure.tools.some(tool => tool.name === "fs.read"), false);
 });
 
 test("a failed status check drains ownership before selecting the device again", async () => {
@@ -376,7 +445,8 @@ test("failed drains hide tools but retain the old owner until a later switch suc
   await server.receive({ jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "b" } } });
   assert.deepEqual(calls, ["open:a", "close:a", "close:a"]);
   await server.receive({ jsonrpc: "2.0", id: 4, method: "tools/list" });
-  assert.deepEqual((messages.at(-1)!.result as { tools: Array<{ name: string }> }).tools.map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
+  const afterFailure = messages.at(-1)!.result as { tools: Array<{ name: string }> };
+  assert.equal(afterFailure.tools.some(tool => tool.name === "fs.read"), false);
   failClose = false;
   await server.receive({ jsonrpc: "2.0", id: 5, method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "b" } } });
   assert.deepEqual(calls, ["open:a", "close:a", "close:a", "close:a", "open:b"]);

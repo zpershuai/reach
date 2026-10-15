@@ -3,7 +3,7 @@ name: reach-processes
 description: Run, inspect, read logs or stop trusted Node scripts on a Reach Engine through process_run, process_status, process_logs, process_stop and process_list.
 ---
 
-Use the requested deviceId and a workspace-relative script path. Execution occurs on the Engine using its fixed private Node runtime. It is disabled unless the operator enables the workspace. Workspace validation is not a sandbox: run only trusted scripts.
+Use the requested deviceId and a workspace-relative script path. Call `list_workspaces` first and choose a name from `processWorkspaces`; an empty list means execution is disabled or not advertised. Execution occurs on the Engine using its fixed private Node runtime. Workspace validation is not a sandbox: run only trusted scripts.
 
 Choose a unique launchId for each intended task and retain its exact parameters. process_run obtains a session-scoped execute grant; process_stop obtains a control grant for processId. Observation tools do not launch tasks. Do not supply or invent grant IDs.
 

@@ -189,6 +189,8 @@ export class HttpGatewayClient implements GatewayClient {
     return {
       status: reply.status,
       methods: Array.isArray(reply.methods) ? reply.methods.filter((v): v is string => typeof v === "string") : undefined,
+      workspaces: Array.isArray(reply.workspaces) ? reply.workspaces.filter((v): v is string => typeof v === "string") : undefined,
+      processWorkspaces: Array.isArray(reply.processWorkspaces) ? reply.processWorkspaces.filter((v): v is string => typeof v === "string") : undefined,
       sessionId: typeof reply.sessionId === "string" ? reply.sessionId : undefined,
       leaseExpiresAt: typeof reply.leaseExpiresAt === "string" ? reply.leaseExpiresAt : undefined,
       gatewayVersion: typeof reply.gatewayVersion === "string" ? reply.gatewayVersion : undefined,

@@ -22,7 +22,9 @@ REACH_MCP_DEVICES='[{"id":"workstation-a","gatewayUrl":"http://127.0.0.1:8787"}]
 
 ## Dynamic Path 2 (default)
 
-The connector declares `capabilities.tools.listChanged: true`. Initially `tools/list` contains `list_devices`, `get_versions`, and `pick_device`. A successful `pick_device` opens the selected Gateway session, waits until it is ready, then emits `notifications/tools/list_changed`. A host that re-fetches `tools/list` receives local-feel `fs.read`, `fs.write`, `fs.edit`, `fs.list`, `fs.glob`, `fs.stat`, `fs.grep`, `process.run`, `process.status`, `process.logs`, `process.stop`, `process.list`, and `session.close` tools already bound to that selected device.
+The connector declares `capabilities.tools.listChanged: true`. Initially `tools/list` contains `list_devices`, `get_versions`, `pick_device`, and `list_workspaces`. Call `list_workspaces({deviceId})` to select the device, wait for readiness, and discover its advertised workspace names before file access. Selection emits `notifications/tools/list_changed`; a host that re-fetches `tools/list` receives `fs.read`, `fs.write`, `fs.edit`, `fs.list`, `fs.glob`, `fs.stat`, `fs.grep`, `process.run`, `process.status`, `process.logs`, `process.stop`, `process.list`, and `session.close` tools bound to that selected device. `pick_device` remains available for connecting without reading workspace metadata.
+
+Workspace discovery returns `{deviceId, status: "ready", workspaces, processWorkspaces}`. Use a name from `workspaces` for file operations and from `processWorkspaces` for execution; do not assume `default` exists. Older Engines without execution metadata return an empty execution list; missing workspace metadata returns `WORKSPACES_UNAVAILABLE`. HTTP discovery may first return `connecting` and `retryAfterMs`; poll `device_status`, then repeat `list_workspaces` once ready.
 
 The connector opens and checks readiness through `/session/open` and `/session/status`, renews with `/session/renew` as a lease nears expiry, sends filesystem calls to `/session/rpc`, and closes with `/session/close`. `fs.write` and `fs.edit` first obtain a path- and method-scoped Gateway grant from `/grants`.
 

@@ -1,7 +1,7 @@
 import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { EngineApi } from "./in-process.js";
-import { RemoteMcpServer } from "./remote-server.js";
+import { closeOwnedClients, RemoteMcpServer, type OwnedClients } from "./remote-server.js";
 import type { GatewayEvents } from "../console-api/events.js";
 
 const VERSIONS = ["2025-03-26", "2025-06-18"];
@@ -22,6 +22,9 @@ interface HttpSession {
   id: string;
   /** Who created the session: "controller", "oauth:<client id>" or "loopback"; later requests must match. */
   principal: string;
+  /** Shared Engine ownership for OAuth clients, which open a new MCP session for each tool call. */
+  pool?: OwnerPool;
+  retireReason?: "delete" | "idle" | "shutdown" | "console";
   version: string;
   server: RemoteMcpServer;
   messages: Record<string, unknown>[];
@@ -30,6 +33,16 @@ interface HttpSession {
   reading: number;
   cleanupTask?: Promise<void>;
   lastUsed: number;
+}
+
+interface OwnerPool {
+  principal: string;
+  /** Latest ingress label, so console disconnects also end ownership kept through idle grace. */
+  label: string;
+  clients: OwnedClients;
+  sessions: number;
+  timer?: ReturnType<typeof setTimeout>;
+  closing?: Promise<void>;
 }
 
 class HttpError extends Error {
@@ -124,7 +137,40 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   }
   const sessions = new Map<string, HttpSession>();
   const retired = new Set<HttpSession>();
+  const pools = new Map<string, OwnerPool>();
   let stopped = false;
+
+  function attachPool(principal: string, label: string): OwnerPool {
+    let pool = pools.get(principal);
+    if (!pool) { pool = { principal, label, clients: new Map(), sessions: 0 }; pools.set(principal, pool); }
+    pool.label = label;
+    if (pool.timer) { clearTimeout(pool.timer); pool.timer = undefined; }
+    pool.sessions++;
+    return pool;
+  }
+
+  /** Closes a pool's Engine sessions once no MCP session has used it for the idle TTL. */
+  function closePool(pool: OwnerPool): Promise<void> {
+    pool.timer = undefined;
+    pool.closing ??= closeOwnedClients(pool.clients, Date.now() + budgetMs).then(() => {
+      if (!pool.sessions && !pool.clients.size && pools.get(pool.principal) === pool) pools.delete(pool.principal);
+    }, () => {
+      // Failed cleanup stays owned and is retried, as for retired sessions.
+      if (!pool.sessions && !pool.timer) pool.timer = setTimeout(() => void closePool(pool), Math.min(idleMs, 5000));
+      pool.timer?.unref();
+    }).finally(() => { pool.closing = undefined; });
+    return pool.closing;
+  }
+
+  /** Idle expiry keeps ownership for one more TTL; ChatGPT starts a fresh MCP session for later calls. */
+  function releasePool(pool: OwnerPool, graceful: boolean): Promise<void> {
+    pool.sessions--;
+    if (pool.sessions > 0) return Promise.resolve();
+    if (stopped || !graceful) return closePool(pool);
+    pool.timer = setTimeout(() => void closePool(pool), idleMs);
+    pool.timer.unref();
+    return Promise.resolve();
+  }
 
   function enqueue<T>(session: HttpSession, work: () => Promise<T>): Promise<T> {
     session.queued++;
@@ -135,7 +181,11 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
 
   async function cleanup(session: HttpSession, deadline: number): Promise<void> {
     session.server.deadlineAt = deadline;
-    await session.server.shutdown();
+    if (session.pool) {
+      const pool = session.pool;
+      session.pool = undefined;
+      await releasePool(pool, session.retireReason === "idle");
+    } else await session.server.shutdown();
     retired.delete(session);
   }
 
@@ -150,6 +200,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   function retire(session: HttpSession, deadline = Date.now() + budgetMs, reason: "delete" | "idle" | "shutdown" | "console" = "idle"): Promise<void> {
     if (sessions.has(session.id)) options.events?.emit("client.disconnected", { caller: session.server.caller, reason });
     sessions.delete(session.id);
+    session.retireReason ??= reason;
     retired.add(session);
     return scheduleCleanup(session, deadline);
   }
@@ -251,8 +302,9 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         const output: Record<string, unknown>[] = [];
         const id = randomUUID();
         const clientLabel = `${client.name} ${client.version}`.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64).trim() || "MCP client";
-        session = { id, principal, version: negotiated,
-          server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated, clientLabel, id), messages: output,
+        const pool = oauthClient ? attachPool(principal, clientLabel) : undefined;
+        session = { id, principal, pool, version: negotiated,
+          server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated, clientLabel, id, pool?.clients), messages: output,
           tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now() };
         sessions.set(session.id, session);
         options.events?.emit("client.connected", { caller: session.server.caller });
@@ -291,6 +343,8 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
     disconnect: async label => {
       await Promise.all([...sessions.values()].filter(session => session.server.caller.label === label)
         .map(session => retire(session, Date.now() + budgetMs, "console")));
+      await Promise.all([...pools.values()].filter(pool => pool.label === label && !pool.sessions)
+        .map(pool => { if (pool.timer) clearTimeout(pool.timer); return closePool(pool); }));
     },
     clients: () => {
       const counts = new Map<string, number>();
@@ -302,6 +356,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       clearInterval(sweep);
       for (const session of sessions.values()) void retire(session, Date.now() + budgetMs, "shutdown").catch(() => undefined);
       for (const session of retired) void scheduleCleanup(session, Date.now() + budgetMs).catch(() => undefined);
+      for (const pool of pools.values()) if (!pool.sessions) { if (pool.timer) clearTimeout(pool.timer); void closePool(pool); }
     },
   };
 }

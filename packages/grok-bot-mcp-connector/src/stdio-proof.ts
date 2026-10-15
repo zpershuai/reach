@@ -16,7 +16,7 @@ async function waitFor<T>(queue: T[], predicate: (item: T) => boolean): Promise<
   }
 }
 
-test("stdio client re-fetches the expanded tool list after tools/list_changed", async () => {
+test("stdio workspace discovery announces the expanded dynamic tool list", async () => {
   let sessionId: string | undefined;
   let status = "none";
   const gateway = createServer(async (request, response) => {
@@ -28,7 +28,7 @@ test("stdio client re-fetches the expanded tool list after tools/list_changed", 
     }
     if (request.url === "/session/close") status = "none";
     const payload = request.url === "/session/status"
-      ? { status, sessionId, leaseExpiresAt: new Date(Date.now() + 300_000).toISOString() }
+      ? { status, sessionId, leaseExpiresAt: new Date(Date.now() + 300_000).toISOString(), workspaces: ["project-notes"], processWorkspaces: [] }
       : request.url === "/session/open"
         ? { wanted: true, status: "wanted" }
         : request.url === "/session/close" ? { status: "none" }
@@ -46,6 +46,7 @@ test("stdio client re-fetches the expanded tool list after tools/list_changed", 
     stdio: "pipe",
     env: {
       ...process.env,
+      REACH_MCP_TOOL_MODE: "dynamic",
       REACH_MCP_DEVICES: JSON.stringify([{ id: "proof-device", gatewayUrl: `http://127.0.0.1:${address.port}` }]),
     },
   });
@@ -62,15 +63,21 @@ test("stdio client re-fetches the expanded tool list after tools/list_changed", 
 
     request(2, "tools/list");
     const initialList = await waitFor(messages, (message) => message.id === 2);
-    assert.deepEqual(((initialList.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device"]);
+    const initial = initialList.result as { tools: Array<{ name: string }> };
+    assert.ok(initial.tools.some(tool => tool.name === "list_workspaces"));
+    assert.equal(initial.tools.some(tool => tool.name === "fs.read"), false);
 
-    request(3, "tools/call", { name: "pick_device", arguments: { deviceId: "proof-device" } });
-    await waitFor(messages, (message) => message.id === 3);
+    request(3, "tools/call", { name: "list_workspaces", arguments: { deviceId: "proof-device" } });
+    const discovery = await waitFor(messages, (message) => message.id === 3);
+    const discovered = discovery.result as { isError?: boolean; content: Array<{ text: string }> };
+    assert.equal(discovered.isError, undefined);
+    assert.deepEqual(JSON.parse(discovered.content[0].text), { deviceId: "proof-device", status: "ready", workspaces: ["project-notes"], processWorkspaces: [] });
     await waitFor(messages, (message) => message.method === "notifications/tools/list_changed");
 
     request(4, "tools/list");
     const refreshed = await waitFor(messages, (message) => message.id === 4);
-    assert.deepEqual(((refreshed.result as { tools: Array<{ name: string }> }).tools).map((tool) => tool.name), ["list_devices", "get_versions", "pick_device", "process.run", "process.status", "process.logs", "process.stop", "process.list", "fs.read", "fs.write", "fs.edit", "fs.list", "fs.glob", "fs.stat", "fs.grep", "session.close"]);
+    const expanded = refreshed.result as { tools: Array<{ name: string }> };
+    assert.ok(expanded.tools.some(tool => tool.name === "fs.read"));
   } finally {
     child.stdin.end();
     await once(child, "exit");

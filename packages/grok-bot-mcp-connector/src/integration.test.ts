@@ -175,7 +175,7 @@ test("remote HTTP MCP drives a real Rust Engine through revision-safe writes and
   }
 });
 
-test("MCP drives a real Gateway and Rust Engine through mutation, renewal and close", async () => {
+for (const toolMode of ["dynamic", "static"] as const) test(`MCP discovers workspaces before mutation, renewal and close in ${toolMode} mode`, async () => {
   const repository = fileURLToPath(new URL("../../..", import.meta.url));
   const root = await fs.mkdtemp(join(tmpdir(), "reach-mcp-integration-"));
   const gateway = createGateway({ logger: () => {}, sessionDurationMs: 5_000 });
@@ -187,10 +187,10 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
   if (!address || typeof address === "string") throw new Error("Gateway did not bind");
   const gatewayUrl = `http://127.0.0.1:${address.port}`;
   const messages: Record<string, unknown>[] = [];
-  const server = new McpServer(loadConfig({ REACH_MCP_DEVICES: JSON.stringify([{ id: "engine", gatewayUrl }]), REACH_MCP_READY_TIMEOUT_MS: "5000", REACH_MCP_READY_POLL_MS: "10" }), (message) => messages.push(message));
+  const server = new McpServer(loadConfig({ REACH_MCP_TOOL_MODE: toolMode, REACH_MCP_DEVICES: JSON.stringify([{ id: "engine", gatewayUrl }]), REACH_MCP_READY_TIMEOUT_MS: "5000", REACH_MCP_READY_POLL_MS: "10" }), (message) => messages.push(message));
   let engine: ReturnType<typeof spawn> | undefined;
   const call = async (id: number, name: string, args: Record<string, unknown>) => {
-    await server.receive({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: args } });
+    await server.receive({ jsonrpc: "2.0", id, method: "tools/call", params: { name, arguments: toolMode === "static" ? { deviceId: "engine", ...args } : args } });
     return messages.find((message) => message.id === id)!.result as { isError?: boolean; content: Array<{ text: string }> };
   };
   try {
@@ -202,7 +202,11 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
     const manifest = readFileSync(join(repository, "crates/reach-rpc/Cargo.toml"), "utf8");
     assert.equal(engineVersion, manifest.match(/^version = "([^"]+)"/m)![1]);
     await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize" });
-    const selecting = call(2, "pick_device", { deviceId: "engine" });
+    await server.receive({ jsonrpc: "2.0", id: "before-discovery", method: "tools/list" });
+    const initial = messages.at(-1)!.result as { tools: Array<{ name: string }> };
+    assert.ok(initial.tools.some(tool => tool.name === "list_workspaces"));
+    assert.equal(initial.tools.some(tool => tool.name === "fs.read"), toolMode === "static");
+    const selecting = call(2, "list_workspaces", { deviceId: "engine" });
     // Start after open intent is pending, avoiding the 120-second idle interval.
     const pendingDeadline = Date.now() + 3_000;
     while ((await (await fetch(`${gatewayUrl}/session/status`)).json() as { status: string }).status !== "wanted") {
@@ -211,22 +215,27 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
     }
     engine = spawn(join(repository, "target/debug/engine"), [gatewayUrl], {
       cwd: repository,
-      env: { ...process.env, REACH_WORKSPACE_ROOTS: `default:${root}`, REACH_PROCESS_WORKSPACES: "default", REACH_PROCESS_NODE_BIN: process.env.REACH_TEST_NODE_BIN ?? process.execPath, REACH_PROCESS_STOP_GRACE_MS: "50", REACH_LEASE_SECS: "5" },
+      env: { ...process.env, REACH_WORKSPACE_ROOTS: `project-notes:${root}`, REACH_PROCESS_WORKSPACES: "project-notes", REACH_PROCESS_NODE_BIN: process.env.REACH_TEST_NODE_BIN ?? process.execPath, REACH_PROCESS_STOP_GRACE_MS: "50", REACH_LEASE_SECS: "5" },
       stdio: "ignore",
     });
-    assert.equal((await selecting).isError, undefined);
+    const discovery = await selecting;
+    assert.equal(discovery.isError, undefined);
+    const discovered = JSON.parse(discovery.content[0].text);
+    assert.deepEqual(discovered, { deviceId: "engine", status: "ready", workspaces: ["project-notes"], processWorkspaces: ["project-notes"] });
+    const workspace = discovered.workspaces[0];
+    const processWorkspace = discovered.processWorkspaces[0];
     const versions = JSON.parse((await call(7, "get_versions", {})).content[0].text);
     assert.deepEqual(versions, { deviceId: "engine", mcpVersion: MCP_VERSION, gatewayVersion: GATEWAY_VERSION, engineVersion });
     const identity = await (await fetch(`${gatewayUrl}/session/status`)).json() as { sessionId: string };
-    assert.equal((await call(6, "fs.write", { workspace: "default", path: "invalid.txt" })).isError, true);
+    assert.equal((await call(6, "fs.write", { workspace, path: "invalid.txt" })).isError, true);
     assert.equal(await fs.stat(join(root, "invalid.txt")).catch(() => undefined), undefined);
     const afterRejection = await (await fetch(`${gatewayUrl}/session/status`)).json() as { status: string; sessionId: string };
     assert.equal(afterRejection.status, "ready");
     assert.equal(afterRejection.sessionId, identity.sessionId);
-    const written = await call(3, "fs.write", { workspace: "default", path: "note.txt", content: "hello", mode: "create" });
+    const written = await call(3, "fs.write", { workspace, path: "note.txt", content: "hello", mode: "create" });
     assert.equal(written.isError, undefined);
     assert.equal(await fs.readFile(join(root, "note.txt"), "utf8"), "hello");
-    const read = await call(4, "fs.read", { workspace: "default", path: "note.txt" });
+    const read = await call(4, "fs.read", { workspace, path: "note.txt" });
     assert.equal(JSON.parse(read.content[0].text).content, "hello");
     let processSequence = 100;
     const processCall = async (name: string, args: Record<string, unknown>) => {
@@ -234,8 +243,9 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
       assert.equal(reply.isError, undefined, JSON.stringify(reply));
       return JSON.parse(reply.content[0].text);
     };
-    await processCall("fs.write", { workspace: "default", path: "task.mjs", mode: "create", content: "console.log('stdio-task');setInterval(()=>{},1000)" });
-    const task = await processCall("process.run", { workspace: "default", script: "task.mjs", launchId: "stdio-launch" });
+    // The real Engine child must stay alive until explicitly stopped; fake timers cannot control that subprocess.
+    await processCall("fs.write", { workspace: processWorkspace, path: "task.mjs", mode: "create", content: "console.log('stdio-task');setInterval(()=>{},1000)" });
+    const task = await processCall("process.run", { workspace: processWorkspace, script: "task.mjs", launchId: "stdio-launch" });
     assert.equal((await processCall("process.status", { launchId: "stdio-launch" })).processId, task.processId);
     await processCall("process.stop", { processId: task.processId });
     const stopDeadline = Date.now() + 5000;
@@ -243,7 +253,7 @@ test("MCP drives a real Gateway and Rust Engine through mutation, renewal and cl
       assert.ok(Date.now() < stopDeadline); await new Promise(resolve => setTimeout(resolve, 10));
     }
     await processCall("process.logs", { processId: task.processId });
-    await processCall("process.run", { workspace: "default", script: "task.mjs", launchId: "stdio-cleanup" });
+    await processCall("process.run", { workspace: processWorkspace, script: "task.mjs", launchId: "stdio-cleanup" });
     assert.equal((await call(5, "session.close", {})).isError, undefined);
     assert.equal((await (await fetch(`${gatewayUrl}/session/status`)).json() as { status: string }).status, "none");
   } finally {

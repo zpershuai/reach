@@ -24,11 +24,13 @@ stdio 的 Gateway URL 也必须使用 HTTPS；本地开发仅允许 `localhost`�
 
 真实凭证只存客户端私有设置。Controller token 可读写全部注册 Engine 工作区。插件 URL 使用完整字面值，只有 Authorization 头使用 token 变量，不依赖宿主支持 URL 插值。仓库内插件使用保留的示例地址，安装生成的私有副本。生成脚本不复制 token，也不覆盖已有副本；更换地址时在私有副本中修改。不要把真实 URL 或 token 提交到仓库。
 
-HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`process_run`、`process_status`、`process_logs`、`process_stop`、`process_list`、`session_close`。文件、process 工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
+HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`list_workspaces`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`process_run`、`process_status`、`process_logs`、`process_stop`、`process_list`、`session_close`。`list_workspaces`、文件、process 工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
 
-首次 `pick_device` 或文件调用立即创建连接意图；未 ready 时返回 `{"status":"connecting","retryAfterMs":1000}`，文件操作尚未执行。按返回间隔调用 `device_status`，直到 `ready` 且 `owned: true`，再执行文件工具。状态查询不会重新打开或取消意图。默认空闲心跳仍是 120 秒；可将 Gateway 的 `REACH_HEARTBEAT_INTERVAL_SECS` 设置为 `15`，代价是更多网络流量和设备耗电。
+调用 `list_devices` 确定目标，再调用 `list_workspaces({"deviceId":"engine-a"})`。首次工作区发现、`pick_device` 或文件调用立即创建连接意图；未 ready 时返回 `{"status":"connecting","retryAfterMs":1000}`，文件操作尚未执行。按返回间隔调用 `device_status`，直到 `ready` 且 `owned: true`，再调用 `list_workspaces` 取得名称。状态查询不会重新打开或取消意图。默认空闲心跳仍是 120 秒；可将 Gateway 的 `REACH_HEARTBEAT_INTERVAL_SECS` 设置为 `15`，代价是更多网络流量和设备耗电。
 
-一个 HTTP MCP 会话可以分别持有多个 Engine。竞争同一个 Engine 返回 `ENGINE_BUSY`，不会自动抢占。完成后逐个调用 `session_close`；客户端 `DELETE /mcp`、MCP 空闲过期也会关闭其持有的 Engine 会话。清理只针对绑定的会话身份，失败会保留待清理记录并重试。
+就绪结果例如 `{"deviceId":"engine-a","status":"ready","workspaces":["notes","scripts"],"processWorkspaces":["scripts"]}`。文件工具使用 `workspaces` 中的名称；启动脚本必须选择 `processWorkspaces` 中的名称。它们来自 Engine 的实际配置，不包含宿主机绝对路径，不能假定存在 `default`。旧 Engine 未报告执行许可列表时返回 `[]`；未报告工作区名称时返回 `WORKSPACES_UNAVAILABLE`，请升级相应组件。
+
+一个 HTTP MCP 会话可以分别持有多个 Engine。竞争同一个 Engine 返回 `ENGINE_BUSY`，不会自动抢占。完成后逐个调用 `session_close`。Controller token 客户端的 `DELETE /mcp` 和空闲过期会关闭该 MCP 会话持有的 Engine。OAuth 客户端按已授权应用身份共享 Engine 归属，因此后续新建的 MCP 会话可以继续工作；最后一个 MCP 会话空闲过期后，再保留一个空闲 TTL（默认 5 分钟）供重连，之后关闭 Engine。最后一个会话显式 DELETE、控制台断开或 Gateway 关闭时不保留这段宽限期。清理只针对绑定的会话身份，失败会保留待清理记录并重试。
 
 `session_close` 不会关闭其他调用者持有的 Engine；当前 MCP 会话没有持有该设备而设备仍被占用时，返回 `ENGINE_BUSY`。会话退役后立即安排清理，读取请求体期间的 POST 和仍在排队的请求不得再启动工具，返回 404；已经执行的操作结束后再清理，超时不表示写入已取消。
 
@@ -181,19 +183,19 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 
 ## 首次使用与工具列表
 
-动态模式初始化展示 `list_devices`、`get_versions`、`pick_device`：
+动态模式初始化展示 `list_devices`、`get_versions`、`pick_device`、`list_workspaces`：
 
 1. 调用 `list_devices` 查看配置条目。
-2. 调用 `pick_device`，参数为 `{"deviceId":"engine-a"}`。
-3. Connector 打开会话并等待 Engine ready，发出工具列表变化通知。
-4. 客户端刷新列表后获得 `fs.read`、`fs.write`、`fs.edit`、`fs.list`、`fs.glob`、`fs.stat`、`fs.grep`、`process.run`、`process.status`、`process.logs`、`process.stop`、`process.list` 与 `session.close`。
+2. 调用 `list_workspaces`，参数为 `{"deviceId":"engine-a"}`；Connector 选择设备、打开会话并等待 Engine ready，然后返回工作区名称和执行许可列表。
+3. Connector 发出工具列表变化通知；客户端刷新后获得 `fs.read`、`fs.write`、`fs.edit`、`fs.list`、`fs.glob`、`fs.stat`、`fs.grep`、`process.run`、`process.status`、`process.logs`、`process.stop`、`process.list` 与 `session.close`。
+4. 将发现的名称传给文件或进程工具。也可先用 `pick_device` 连接，再调用 `list_workspaces`。
 5. 完成操作后调用 `session.close`，回到设备选择状态。
 
-文件工具示例参数：
+假设发现的文件工作区包含 `notes`，文件工具示例参数：
 
 ```json
 {
-  "workspace": "default",
+  "workspace": "notes",
   "path": "notes/example.txt",
   "content": "Reach MCP example",
   "mode": "create"
@@ -207,7 +209,7 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 ```json
 {
   "deviceId": "engine-a",
-  "workspace": "default",
+  "workspace": "notes",
   "path": "notes/example.txt"
 }
 ```

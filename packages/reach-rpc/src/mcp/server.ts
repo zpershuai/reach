@@ -68,6 +68,8 @@ export class McpServer {
         return toolText({ devices: this.config.devices.map(({ id }) => ({ id })) });
       case "get_versions":
         return this.getVersions(call.arguments);
+      case "list_workspaces":
+        return this.listWorkspaces(call.arguments);
       case "pick_device":
         return this.pickDevice(call.arguments);
       case "process.run":
@@ -96,6 +98,21 @@ export class McpServer {
     }
     const selected = await this.selectDevice((argumentsValue as Record<string, unknown>).deviceId as string, this.config.toolMode === "dynamic");
     return selected instanceof Error ? toolError(selected.message) : toolText({ selectedDeviceId: selected.device.id, status: "ready" });
+  }
+
+  private async listWorkspaces(argumentsValue: unknown): Promise<Record<string, unknown>> {
+    if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue) || !("deviceId" in argumentsValue) || typeof argumentsValue.deviceId !== "string") {
+      return toolError("list_workspaces requires a string deviceId");
+    }
+    const selected = await this.selectDevice(argumentsValue.deviceId, this.config.toolMode === "dynamic");
+    if (selected instanceof Error) return toolError(selected.message);
+    if (selected.session.workspaces === undefined) return toolError("WORKSPACES_UNAVAILABLE: This Engine did not advertise workspace names");
+    return toolText({
+      deviceId: selected.device.id,
+      status: "ready",
+      workspaces: selected.session.workspaces,
+      processWorkspaces: selected.session.processWorkspaces ?? [],
+    });
   }
 
   private async getVersions(argumentsValue: unknown): Promise<Record<string, unknown>> {

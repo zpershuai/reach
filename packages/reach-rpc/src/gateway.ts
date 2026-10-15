@@ -158,7 +158,7 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
   const auth = store && options.console && events ? new ConsoleAuth(store, options.console, events, options.now, options.logger) : undefined;
   const gateway = Object.assign(createServer(), { registry, events, audit });
   const oauth = store && options.console && auth ? new OAuthServer(store, options.console, auth, options.now) : undefined;
-  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events, oauth }, () => {
+  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events, oauth: oauth ?? options.mcp?.oauth }, () => {
     const address = gateway.address();
     return typeof address === "object" && address !== null && ["127.0.0.1", "::1"].includes(address.address);
   });

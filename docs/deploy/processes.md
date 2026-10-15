@@ -29,7 +29,7 @@ REACH_PROCESS_NODE_BIN=/absolute/path/to/home/.reach/runtime/node/bin/node
 
 ## 调用流程
 
-先通过文件接口创建脚本，然后启动：
+先调用 `list_workspaces({deviceId})`，从 `processWorkspaces` 选择允许执行的名称。列表为空时不能启动脚本。下面假设实际返回的执行工作区包含 `default`；先通过文件接口在该工作区创建脚本，然后启动：
 
 ```json
 {

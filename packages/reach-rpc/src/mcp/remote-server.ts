@@ -29,8 +29,24 @@ const EXPLANATIONS: Record<string, string> = {
   PROCESS_CLEANUP_FAILED: "Process cleanup is incomplete; session ownership is retained.",
 };
 
+/** Engine ownership keyed by deviceId; one MCP session's own, or shared by every session of one OAuth client. */
+export type OwnedClients = Map<string, InProcessGatewayClient>;
+
+/** Closes every owned Engine session, keeping failed ones for a later retry. */
+export async function closeOwnedClients(clients: OwnedClients, deadlineAt: number): Promise<void> {
+  const failures: unknown[] = [];
+  for (const [id, client] of clients) {
+    client.deadlineAt = deadlineAt;
+    try { await client.close(); clients.delete(id); }
+    catch (cause) {
+      if (cause instanceof SessionReplacedError) clients.delete(id);
+      else failures.push(cause);
+    }
+  }
+  if (failures.length) throw new AggregateError(failures, "Owned Engine sessions are still closing");
+}
+
 export class RemoteMcpServer {
-  private readonly clients = new Map<string, InProcessGatewayClient>();
   private selectedId: string | undefined;
   public deadlineAt = 0;
   private readonly protocol: McpProtocol;
@@ -39,11 +55,12 @@ export class RemoteMcpServer {
   public get initialized(): boolean { return this.protocol.acknowledged; }
   public receive(value: unknown): Promise<void> { return this.protocol.receive(value); }
 
-  public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, protocolVersion: string, clientLabel = "MCP client", mcpSessionId?: string) {
+  public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, protocolVersion: string, clientLabel = "MCP client", mcpSessionId?: string,
+    private readonly clients: OwnedClients = new Map()) {
     this.caller = { type: "mcp-http", label: clientLabel, verified: false, mcpSessionId };
     this.protocol = new McpProtocol(send, () => this.listTools(), params => this.callTool(params), undefined, {
       protocolVersion, listChanged: false, http: true,
-      instructionsPrefix: "Use list_devices, then pick_device or a device tool with deviceId. If connecting, poll device_status after retryAfterMs. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Use process_status with the same launchId and owned session after an uncertain launch. Close owned sessions when finished. ",
+      instructionsPrefix: "Use list_devices, then list_workspaces with deviceId to discover workspace names before file or process operations. If connecting, poll device_status after retryAfterMs, then call list_workspaces again. Use workspaces for file operations and processWorkspaces for process execution. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Use process_status with the same launchId and owned session after an uncertain launch. Close owned sessions when finished. ",
     });
   }
 
@@ -76,7 +93,7 @@ export class RemoteMcpServer {
       const status = this.selectedId ? this.engines.get(this.selectedId)?.status() : undefined;
       return toolText({ mcpVersion: MCP_VERSION, ...(this.selectedId ? { deviceId: this.selectedId } : {}), gatewayVersion: status?.gatewayVersion ?? null, engineVersion: status?.engineVersion ?? null });
     }
-    if (!method && !["pick_device", "device_status", "session_close", "get_versions"].includes(call.name)) return toolError(`INVALID_PARAMS: Unknown tool: ${call.name}`);
+    if (!method && !["pick_device", "list_workspaces", "device_status", "session_close", "get_versions"].includes(call.name)) return toolError(`INVALID_PARAMS: Unknown tool: ${call.name}`);
     if (typeof deviceId !== "string" || !deviceId) return toolError("INVALID_PARAMS: A non-empty deviceId is required.");
     const api = this.engines.get(deviceId);
     if (!api) return toolError(`INVALID_PARAMS: Unknown device: ${deviceId}`);
@@ -105,6 +122,10 @@ export class RemoteMcpServer {
       if (call.name === "pick_device") this.selectedId = deviceId;
       if (status.status !== "ready") return toolText({ deviceId, status: "connecting", retryAfterMs: 1000 });
       if (call.name === "pick_device") return toolText({ selectedDeviceId: deviceId, status: "ready" });
+      if (call.name === "list_workspaces") {
+        if (status.workspaces === undefined) return toolError("WORKSPACES_UNAVAILABLE: This Engine did not advertise workspace names.");
+        return toolText({ deviceId, status: "ready", workspaces: status.workspaces, processWorkspaces: status.processWorkspaces ?? [] });
+      }
       if (status.leaseExpiresAt && Date.parse(status.leaseExpiresAt) <= Date.now() + 60_000) await client.renew();
       const result = await this.invoker.call(client, method!, parameters);
       if (result.isError) {
@@ -126,16 +147,7 @@ export class RemoteMcpServer {
     }
   }
 
-  public async shutdown(): Promise<void> {
-    const failures: unknown[] = [];
-    for (const [id, client] of this.clients) {
-      client.deadlineAt = this.deadlineAt;
-      try { await client.close(); this.clients.delete(id); }
-      catch (cause) {
-        if (cause instanceof SessionReplacedError) this.clients.delete(id);
-        else failures.push(cause);
-      }
-    }
-    if (failures.length) throw new AggregateError(failures, "Owned Engine sessions are still closing");
+  public shutdown(): Promise<void> {
+    return closeOwnedClients(this.clients, this.deadlineAt);
   }
 }

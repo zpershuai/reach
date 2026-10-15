@@ -35,13 +35,20 @@ function unwrap(path: string, result: EngineResult): Record<string, unknown> {
 /** Identity-bound calls directly into the same Engine state machine as HTTP. */
 export class InProcessGatewayClient implements GatewayClient {
   private sessionId: string | undefined;
+  private beginning: Promise<SessionStatus> | undefined;
   public deadlineAt = 0;
 
   public constructor(private readonly api: EngineApi, private readonly caller?: CallerContext) {}
 
   public usesApi(api: EngineApi): boolean { return this.api === api; }
 
-  public async begin(): Promise<SessionStatus> {
+  /** Concurrent callers sharing this client join one open attempt instead of racing to open two intents. */
+  public begin(): Promise<SessionStatus> {
+    this.beginning ??= this.openOrJoin().finally(() => { this.beginning = undefined; });
+    return this.beginning;
+  }
+
+  private async openOrJoin(): Promise<SessionStatus> {
     const status = await this.status();
     if (this.sessionId && status.status !== "none") {
       this.checkBinding(status);

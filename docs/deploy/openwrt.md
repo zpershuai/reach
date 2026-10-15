@@ -61,4 +61,4 @@ sh install-engine-openwrt.sh ./engine ./engine.env ./node-v24.21.0-openwrt-x64.t
 ]
 ```
 
-`id` 是 MCP 展示的设备名称，`engineId` 是 Gateway 注册的真实身份。省略 `engineId` 时沿用旧版默认设备路由。调用 `list_devices` 查看设备，通过 `pick_device` 选择目标；`get_versions` 查询所选设备的 Engine 版本和共享 Gateway 版本。
+`id` 是 MCP 展示的设备名称，`engineId` 是 Gateway 注册的真实身份。省略 `engineId` 时沿用旧版默认设备路由。调用 `list_devices` 查看设备，再用 `list_workspaces({deviceId})` 连接目标并发现实际工作区名称；也可先通过 `pick_device` 连接。`get_versions` 查询所选设备的 Engine 版本和共享 Gateway 版本。

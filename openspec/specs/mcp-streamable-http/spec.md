@@ -21,7 +21,7 @@ The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method 
 - **THEN** it receives a secure Mcp-Session-Id; later missing ids receive 400 and unknown or expired ids receive 404
 
 ### Requirement: Bounded owned sessions
-HTTP sessions SHALL serialize work with bounded queues, expire after configurable inactivity, and close only Engine sessions they own on DELETE, expiry, or shutdown.
+HTTP sessions SHALL serialize work with bounded queues and expire after configurable inactivity. Engine cleanup on DELETE, expiry, or shutdown SHALL affect only owned sessions; OAuth ownership MAY span multiple HTTP MCP sessions as defined below.
 
 #### Scenario: Required bounded owned sessions behavior
 - **WHEN** a client uses an HTTP MCP session
@@ -54,6 +54,19 @@ HTTP sessions SHALL serialize work with bounded queues, expire after configurabl
 #### Scenario: Near-limit write
 - **WHEN** a valid MCP write fits within the 64 KiB received body limit but added internal metadata expands its RPC envelope
 - **THEN** the Gateway accepts it while retaining RPC validation and the WebSocket envelope limit
+
+### Requirement: OAuth Engine ownership spans MCP sessions
+HTTP MCP sessions for one OAuth client SHALL share Engine ownership, including after token refresh. Different clients and Controller-token callers MUST remain isolated. After the last session expires, ownership SHALL survive one additional idle TTL for reconnection, then be cleaned up. Explicit deletion of the last session, console disconnection, and shutdown SHALL clean up without grace. Each transport session SHALL emit exactly one connection and one disconnection event.
+
+#### Scenario: Workspace discovery and file read use separate MCP sessions
+- **WHEN** one OAuth client's MCP session discovers an Engine's workspaces and a newly initialized session for that same client reads a file in a discovered workspace
+- **THEN** the file call reuses the owned Engine session without `ENGINE_BUSY`
+- **AND** an unrelated OAuth client attempting the same Engine receives `ENGINE_BUSY`
+
+#### Scenario: Idle grace and explicit closure
+- **WHEN** the last MCP session for an OAuth client expires from inactivity
+- **THEN** a new session for that client can reuse the Engine during one idle TTL, after which unused ownership is cleaned up
+- **AND** explicit deletion of the last MCP session closes ownership without waiting for that grace period
 
 ### Requirement: HTTP MCP sessions are attributed
 Each HTTP MCP session SHALL keep the `clientInfo` name and version from its `initialize` request as its ingress label. Every RPC, denial and Engine-session action it causes MUST be attributed to that label. Session creation and retirement MUST be published as `client.connected` and `client.disconnected` events when the console is enabled.

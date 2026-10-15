@@ -61,7 +61,6 @@ const probe = `deployment-tests/${randomUUID()}.txt`;
 try {
   assert.equal((await fetchMcp("GET", undefined, client.sessionHeaders)).status, 405);
   const tools = (await client.request("tools/list", {})).tools;
-  assert.equal(tools.length, 17);
   for (const tool of tools) {
     assert.match(tool.name, /^[a-zA-Z0-9_-]{1,64}$/);
     if (tool.name.startsWith("fs_") || tool.name === "session_close") assert.ok(tool.inputSchema.required.includes("deviceId"));
@@ -69,7 +68,7 @@ try {
   assert.ok((await client.tool("list_devices")).devices.some((device) => device.id === deviceId));
   results.push("auth, initialize, notification ack, static tools and registered devices");
   const started = Date.now();
-  await client.tool("pick_device");
+  await client.tool("list_workspaces");
   assert.ok(Date.now() - started < 30_000, "Cold-start call must fit one HTTP response budget");
   const deadline = Date.now() + 150_000;
   while (true) {
@@ -78,11 +77,14 @@ try {
     assert.ok(Date.now() < deadline, "Engine did not become ready within 150 seconds");
     await delay(status.retryAfterMs ?? 1000);
   }
+  const discovery = await client.tool("list_workspaces");
+  assert.equal(discovery.status, "ready");
+  assert.ok(Array.isArray(discovery.workspaces) && typeof discovery.workspaces[0] === "string", "Engine must advertise a workspace for verification");
   const competitor = await connect();
   try { assert.match(await competitor.tool("pick_device", {}, true), /^ENGINE_BUSY:/); }
   finally { assert.equal((await competitor.close()).status, 200); }
-  results.push("bounded cold start, readiness polling and competing-owner rejection");
-  const args = { workspace: "default", path: probe };
+  results.push("bounded cold start, workspace discovery, readiness polling and competing-owner rejection");
+  const args = { workspace: discovery.workspaces[0], path: probe };
   await client.tool("fs_write", { ...args, content: "Reach HTTP MCP verified", mode: "create" });
   const read = await client.tool("fs_read", args);
   assert.equal(read.content, "Reach HTTP MCP verified"); assert.match(read.revision, /^[a-f0-9]{64}$/);

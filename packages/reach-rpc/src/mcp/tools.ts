@@ -16,6 +16,7 @@ export function deviceTools(): readonly Record<string, unknown>[] {
     tool("list_devices", "List configured Reach Engine devices. Each Engine installation provisions a private Node.js runtime at ~/.reach/runtime/node/bin/node for Gateway and MCP processes on that host. Engine uses this runtime for trusted workspace scripts when process execution is explicitly enabled.", object({})),
     tool("get_versions", "Inspect MCP, Gateway and the last reported Engine release versions without opening a session. Omit deviceId to inspect the selected device, or only MCP when none is selected. Unknown versions are null.", object({ deviceId: string("Optional configured Reach device identifier.") })),
     tool("pick_device", "Open and select a ready Reach Engine device. Multiple Engines can share one Gateway; the selected device determines where filesystem tools execute.", object({ deviceId: string("Configured Reach device identifier.") }, ["deviceId"])),
+    tool("list_workspaces", "Discover the Engine's advertised workspace names before file or process operations. processWorkspaces lists the subset enabled for process execution. Opens the device session when needed.", object({ deviceId: string("Configured Reach device identifier.") }, ["deviceId"])),
   ];
 }
 

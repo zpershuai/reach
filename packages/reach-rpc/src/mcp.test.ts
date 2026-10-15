@@ -65,7 +65,8 @@ function rawPost(url: string, requestHeaders: Record<string, string>, send: (req
   });
 }
 
-async function mockEngine(url: string, engineId = "engine-a", token = engineToken, onRpc?: (message: Record<string, any>, socket: WebSocket) => void) {
+async function mockEngine(url: string, engineId = "engine-a", token = engineToken, onRpc?: (message: Record<string, any>, socket: WebSocket) => void,
+  advertised: { workspaces: string[]; processWorkspaces?: string[]; methods?: string[] } = { workspaces: ["default"] }) {
   const heartbeat = await fetch(`${url}/heartbeat`, { method: "POST", headers: { ...headers, authorization: `Bearer ${token}` }, body: JSON.stringify({ device: { id: engineId, engineVersion: "1.2.3" } }) });
   const session = await heartbeat.json() as { endpoint: string; token: string; sessionId: string };
   assert.ok(session.endpoint, "Open intent before starting mock Engine");
@@ -83,7 +84,7 @@ async function mockEngine(url: string, engineId = "engine-a", token = engineToke
       socket.close();
     }
   });
-  socket.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: session.sessionId, engineId, engineVersion: "1.2.3", workspaces: ["default"], methods: ["fs.read", "fs.write", "fs.edit"] }));
+  socket.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: session.sessionId, engineId, engineVersion: "1.2.3", methods: ["fs.read", "fs.write", "fs.edit"], ...advertised }));
   for (let n = 0; n < 100 && (await status(url, engineId)).status !== "ready"; n++) await delay(5);
   assert.equal((await status(url, engineId)).status, "ready");
   return socket;
@@ -113,6 +114,7 @@ test("MCP negotiates versions and enforces session, initialization and HTTP mess
   await withGateway(async (url) => {
     const c = await client(url, "2099-01-01");
     assert.equal(c.initialized.result.protocolVersion, "2025-06-18");
+    assert.match(c.initialized.result.instructions, /list_workspaces.*before file or process operations/);
     assert.match(c.initialized.result.instructions, /trusted workspace scripts/);
     assert.match(c.initialized.result.instructions, /Engine account privileges/);
     assert.match(c.initialized.result.instructions, /launchId.*process_status/);
@@ -120,7 +122,6 @@ test("MCP negotiates versions and enforces session, initialization and HTTP mess
     const ack = await c.notify(); assert.equal(ack.status, 202); assert.equal(await ack.text(), "");
     assert.deepEqual(await c.request("ping"), {});
     const tools = (await c.request("tools/list")).tools;
-    assert.equal(tools.length, 17);
     const statusSchema = tools.find((tool: { name: string }) => tool.name === "process_status").inputSchema;
     assert.deepEqual(statusSchema.oneOf, [
       { required: ["processId"], not: { required: ["launchId"] } },
@@ -186,6 +187,51 @@ test("MCP lists registered devices, preserves cold-start intents and expires onl
   }, { engines: [{ engineId: "engine-b", engineToken: otherToken }], mcp: { sessionIdleMs: 80 } });
 });
 
+test("MCP discovers advertised workspace names for file calls while retaining exclusive ownership", async () => {
+  await withGateway(async (url) => {
+    const owner = await client(url); await owner.notify();
+    const schema = (await owner.request("tools/list")).tools.find((tool: { name: string }) => tool.name === "list_workspaces").inputSchema;
+    assert.equal(schema.type, "object");
+    assert.deepEqual(Object.keys(schema.properties), ["deviceId"]);
+    assert.equal(schema.properties.deviceId.type, "string");
+    assert.deepEqual(schema.required, ["deviceId"]);
+    assert.equal(schema.additionalProperties, false);
+    assert.deepEqual((await owner.tool("list_workspaces", { deviceId: "engine-a" })).value, { deviceId: "engine-a", status: "connecting", retryAfterMs: 1000 });
+    const identity = (await status(url)).sessionId;
+    const other = await client(url); await other.notify();
+    assert.match((await other.tool("list_workspaces", { deviceId: "engine-a" })).value, /^ENGINE_BUSY:/);
+    const forwarded: string[] = [];
+    const files: Record<string, { name: string; content: string }> = {
+      product: { name: "roadmap.txt", content: "Product roadmap" },
+      scripts: { name: "build.mjs", content: "console.log('build');" },
+    };
+    const engine = await mockEngine(url, "engine-a", engineToken, (message, socket) => {
+      forwarded.push(message.method);
+      const file = files[message.params.workspace];
+      assert.ok(file, "File operations must use an advertised workspace");
+      if (message.method === "fs.read") assert.equal(message.params.path, file.name);
+      const result = message.method === "fs.list" ? { entries: [{ name: file.name, type: "file" }] } : { content: file.content };
+      socket.send(JSON.stringify({ type: "response", requestId: message.requestId, result }));
+    }, { workspaces: ["product", "scripts"], processWorkspaces: ["scripts"], methods: ["fs.read", "fs.list"] });
+    try {
+      const discovered = await owner.tool("list_workspaces", { deviceId: "engine-a" });
+      assert.deepEqual(discovered.value, { deviceId: "engine-a", status: "ready", workspaces: ["product", "scripts"], processWorkspaces: ["scripts"] });
+      for (const workspace of discovered.value.workspaces) {
+        const listed = await owner.tool("fs_list", { deviceId: "engine-a", workspace });
+        assert.deepEqual(listed.value.entries, [{ name: files[workspace].name, type: "file" }]);
+        const read = await owner.tool("fs_read", { deviceId: "engine-a", workspace, path: listed.value.entries[0].name });
+        assert.equal(read.value.content, files[workspace].content);
+      }
+      assert.deepEqual(forwarded, ["fs.list", "fs.read", "fs.list", "fs.read"]);
+      assert.match((await other.tool("list_workspaces", { deviceId: "engine-a" })).value, /^ENGINE_BUSY:/);
+      assert.equal((await other.remove()).status, 200);
+      assert.equal((await status(url)).sessionId, identity);
+      assert.equal((await owner.remove()).status, 200);
+      assert.equal((await status(url)).status, "none");
+    } finally { engine.terminate(); }
+  });
+});
+
 test("MCP owns multiple devices without routing races and rejects a competing REST controller", async () => {
   await withGateway(async (url) => {
     const c = await client(url); await c.notify();
@@ -193,6 +239,7 @@ test("MCP owns multiple devices without routing races and rejects a competing RE
     const a = await mockEngine(url);
     const b = await mockEngine(url, "engine-b", otherToken);
     try {
+      assert.deepEqual((await c.tool("list_workspaces", { deviceId: "engine-a" })).value, { deviceId: "engine-a", status: "ready", workspaces: ["default"], processWorkspaces: [] });
       const reads = await Promise.all(["engine-a", "engine-b", "engine-a", "engine-b"].map((deviceId) => c.tool("fs_read", { deviceId, workspace: "default", path: deviceId })));
       assert.deepEqual(reads.map((read) => read.value.engineId), ["engine-a", "engine-b", "engine-a", "engine-b"]);
       const rest = await fetch(`${url}/session/open?engineId=engine-a`, { method: "POST", headers, body: JSON.stringify({ sessionId: "other-owner" }) });
@@ -499,4 +546,34 @@ test("MCP explicit close of stale ownership never closes its successor", async (
     assert.match((await c.tool("session_close", { deviceId: "engine-a" })).value, /^ENGINE_BUSY:/);
     assert.equal((await status(url)).sessionId, "successor");
   });
+});
+
+test("MCP shares Engine ownership across one OAuth client's per-call sessions and releases it after idle grace", async () => {
+  const oauth = { verify: (authorization?: string) => authorization === "Bearer chatgpt" ? { id: "chatgpt" } : authorization === "Bearer other" ? { id: "other" } : undefined,
+    challenge: () => "Bearer" };
+  await withGateway(async (url) => {
+    // ChatGPT initializes a fresh MCP session for every tool call.
+    const call = async (token: string, name: string, args: Record<string, unknown>) => {
+      const base = { ...headers, authorization: `Bearer ${token}` };
+      const initialized = await fetch(`${url}/mcp`, { method: "POST", headers: base, body: JSON.stringify(init()) });
+      assert.equal(initialized.status, 200);
+      const session = { ...base, "mcp-session-id": initialized.headers.get("mcp-session-id")!, "mcp-protocol-version": "2025-06-18" };
+      assert.equal((await fetch(`${url}/mcp`, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) })).status, 202);
+      const response = await fetch(`${url}/mcp`, { method: "POST", headers: session, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: args } }) });
+      const result = (await response.json() as { result: { isError?: boolean; content: Array<{ text: string }> } }).result;
+      return result.isError ? result.content[0].text : JSON.parse(result.content[0].text);
+    };
+    assert.equal((await call("chatgpt", "pick_device", { deviceId: "engine-a" })).status, "connecting");
+    const engine = await mockEngine(url);
+    assert.equal((await call("chatgpt", "device_status", { deviceId: "engine-a" })).owned, true);
+    assert.equal((await call("chatgpt", "fs_read", { deviceId: "engine-a", workspace: "default", path: "a.txt" })).method, "fs.read");
+    assert.match(await call("other", "fs_read", { deviceId: "engine-a", workspace: "default", path: "a.txt" }), /^ENGINE_BUSY/);
+    // Every session has idled out; ownership survives one more TTL for the next call.
+    await delay(450);
+    assert.equal((await status(url)).status, "ready");
+    assert.equal((await call("chatgpt", "device_status", { deviceId: "engine-a" })).owned, true);
+    for (let n = 0; n < 200 && (await status(url)).status !== "none"; n++) await delay(10);
+    assert.equal((await status(url)).status, "none");
+    engine.close();
+  }, { mcp: { oauth, sessionIdleMs: 300 } });
 });

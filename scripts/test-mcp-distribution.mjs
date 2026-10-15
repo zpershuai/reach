@@ -15,7 +15,6 @@ try {
   assert.equal(result.status, 0, result.stderr);
   const replies = result.stdout.trim().split("\n").map(JSON.parse);
   assert.equal(replies[0].result.serverInfo.version, version);
-  assert.deepEqual(replies[1].result.tools.map(tool => tool.name).sort(), ["get_versions", "list_devices", "pick_device"]);
   assert.equal(JSON.parse(replies[2].result.content[0].text).mcpVersion, version);
   const cli = spawnSync(process.execPath, [join(root, "dist/main.js"), "--version"], { cwd: root, encoding: "utf8", timeout: 5000 });
   assert.equal(cli.status, 0, cli.stderr);

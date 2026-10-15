@@ -24,6 +24,8 @@ chmod 700 "$HOME/.reach/workspace"
 
 添加第二个工作区时采用 `default:/absolute/path,notes:/another/path`，提前准备目录，并重启 Engine。客户端不能通过传入任意绝对路径扩展这些根目录。
 
+MCP 客户端可调用 `list_workspaces({deviceId})` 发现配置中的名称和允许执行脚本的工作区；返回的是 Engine `session.ready` 元数据，不暴露根目录的绝对路径。文件调用应使用返回的名称，不能假定 `default` 一定存在。
+
 ## 2. 构建目标平台二进制
 
 在目标 Mac 仓库根目录执行：
