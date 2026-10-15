@@ -1,6 +1,8 @@
 # 组件版本与更新
 
-MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.1`，Gateway 与 MCP 为 `0.3.1`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.1`，Gateway 为 `0.4.0`，独立 stdio MCP Connector 为 `0.3.1`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+
+Gateway `0.4.0` 新增 MCP OAuth 授权，支持动态客户端注册、S256 PKCE、密码与二次验证批准、轮换刷新令牌和控制台撤销应用授权。启用控制台并完成管理员设置后即可使用；原有 Controller token 和旧 Engine 保持兼容，接入步骤见 [MCP 配置](mcp.md#chatgpt-等-oauth-客户端remote-http)。
 
 | 组件 | 版本的唯一维护位置 | 产物中的版本 |
 | --- | --- | --- |
@@ -36,7 +38,7 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 {
   "mcpVersion": "0.3.1",
   "deviceId": "engine-a",
-  "gatewayVersion": "0.3.1",
+  "gatewayVersion": "0.4.0",
   "engineVersion": "0.2.1"
 }
 ```
@@ -50,7 +52,7 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 更新 Gateway 或 MCP 的包版本，例如：
 
 ```bash
-npm --prefix packages/reach-rpc version 0.3.1 --no-git-tag-version
+npm --prefix packages/reach-rpc version 0.4.0 --no-git-tag-version
 npm --prefix packages/grok-bot-mcp-connector version 0.3.1 --no-git-tag-version
 ```
 

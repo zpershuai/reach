@@ -14,11 +14,22 @@ When the console is enabled, the Gateway SHALL publish protected resource metada
 - **THEN** it receives 401 with `resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"`, and that document lists the Gateway origin as authorization server
 
 ### Requirement: Dynamic client registration
-The Gateway SHALL accept anonymous registration (RFC 7591) of clients using the authorization code grant, with redirect URIs that are HTTPS or loopback HTTP and carry no fragment. Public clients (`none`) and secret-based clients (`client_secret_post`, `client_secret_basic`) MUST be supported; secrets are stored only as hashes. Registration MUST be rate limited per client address; unapproved registrations expire after 1 hour idle, and when 256 are pending new registrations are refused rather than evicting live ones. Pending approvals MUST NOT consume server capacity, so anonymous requests cannot invalidate an approval in progress.
+The Gateway SHALL accept anonymous registration (RFC 7591) of clients using the authorization code grant, with redirect URIs that are HTTPS or loopback HTTP and carry no fragment. Public clients (`none`) and secret-based clients (`client_secret_post`, `client_secret_basic`) MUST be supported; secrets are stored only as hashes.
 
 #### Scenario: Unsafe redirect
 - **WHEN** a registration lists `http://example.com/cb`
 - **THEN** the Gateway returns 400 `invalid_redirect_uri` and stores nothing
+
+### Requirement: Anonymous traffic preserves pending approvals
+Registration MUST be rate limited per client address. Unapproved registrations SHALL expire after 1 hour idle. When 256 registrations are pending, the Gateway MUST refuse new registrations rather than evict live ones. Pending approvals MUST NOT consume server capacity, so anonymous requests cannot invalidate an approval in progress.
+
+#### Scenario: Registration capacity is reached
+- **WHEN** 256 unapproved registrations remain live and another client attempts to register
+- **THEN** the new registration is refused and the existing registrations remain available for approval
+
+#### Scenario: Authorization traffic during owner approval
+- **WHEN** anonymous clients request more authorization pages while the owner has an approval page open
+- **THEN** those requests do not invalidate the owner's pending approval
 
 ### Requirement: Owner approval with second factor
 Authorization SHALL use the code flow with S256 PKCE and exact redirect URI matching. The approval page MUST require the administrator password and a fresh TOTP or recovery code, share sign-in rate limits and audit, accept submissions only from the Gateway origin, and record approvals as admin actions. Denial MUST redirect with `access_denied`.
