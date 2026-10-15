@@ -151,7 +151,7 @@ New Agents must use explicit session control (`/session/open`, `/session/renew`,
 
 ## Gateway hardening
 
-HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. Every RPC request must be a complete `reach-rpc/1.0` envelope; controllers may omit `sessionId` on `POST /session/rpc` and the Gateway binds the live session id. Write grants are validated before forward (issuance, path scope, method scope, expiry) and cannot be bypassed by nesting `tool.call`.
+HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. On `POST /session/rpc`, controllers may omit `type`, `protocol`, `version`, and `sessionId`; the Gateway fills `request`, `reach-rpc`, `1.0`, and the live session id before validating the request. Explicitly supplied fields must still be valid, and a supplied `sessionId` must match the live session. Every request forwarded to the Engine is a complete `reach-rpc/1.0` envelope. Write grants are validated before forward (issuance, path scope, method scope, expiry) and cannot be bypassed by nesting `tool.call`.
 
 The Engine bounds serialized responses to the same 1 MiB, including JSON escaping and the request-id envelope. An oversized result returns `RESPONSE_TOO_LARGE` and keeps the session usable; reduce `fs.read` line ranges when possible. A single oversized line requires another means of retrieval. Edits check their final UTF-8 size before allocation. Atomic overwrite/edit preserves ordinary file permission bits; new files default to 0600, and special permission bits are cleared. Grant paths preserve filename whitespace exactly.
 

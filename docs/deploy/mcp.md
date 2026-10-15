@@ -193,9 +193,11 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 }
 ```
 
+静态模式的文件工具和 `process.run` 会按 `deviceId` 选择设备并建立或复用会话。`process.status/logs/stop/list` 仅访问当前已选设备会话拥有的任务，不会自动连接其他设备；没有匹配的自有会话时返回 `PROCESS_NOT_FOUND`。`session.close` 只关闭已选设备的自有会话，对其他已配置设备返回 `closed: false`、`owned: false`，不会为关闭操作新建连接。
+
 ## 生命周期与检查
 
-Connector 在使用工具前检查会话、按需重建或续租。切换设备会先关闭旧会话。客户端关闭 stdin 后，Connector 等待已收到的请求处理完毕，再关闭自己持有的会话。
+Connector 在调用文件工具和 `process.run` 前检查会话、按需重建或续租；进程观察和控制工具保持已有任务的会话归属。切换设备会先关闭旧会话。客户端关闭 stdin 后，Connector 等待已收到的请求处理完毕，再关闭自己持有的会话。
 
 状态观察可在总预算内重试临时网络中断；文件 RPC、grant 和会话变更不会自动重放。写入丢失响应时先确认文件结果。不要同时让多个客户端抢占同一个 Engine 的会话；不同 Engine 的会话互相隔离。
 

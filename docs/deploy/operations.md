@@ -130,17 +130,35 @@ bash scripts/install-engine-macos.sh .reach/engine-upgrade.env .reach/devices-up
 
 Gateway 保持 `read_only: true`、`cap_drop: [ALL]` 和非 root 用户，Docker socket 不挂载给 Gateway。宿主机的 Python 3 helper 负责下载、验证和调用 Docker；它需要宿主机 Docker/Compose 权限。通过 systemd path unit 监听共享目录，因此不需要 socket sidecar。
 
-在 Linux 宿主机安装到既有发布目录，保留当前 env 和设备注册表：
+先在本地仓库中切换到与目标发布相同的源码版本，准备 helper 和 systemd 模板。以下上传步骤也适用于只有 GitHub Release tarball、尚未安装 updater 的宿主机；Release tarball 未携带单元模板。已按 [Gateway 手工打包流程](gateway.md#1-准备配置和构建产物) 上传完整文件的部署也可使用本步骤重新准备安装源。
+
+在本地仓库根目录执行，SSH 目标替换为自己的配置：
+
+```bash
+tar -czf /tmp/reach-updater-install.tgz \
+  scripts/apply-gateway-release.sh scripts/apply-engine-release.sh scripts/apply-release.py \
+  deploy/reach-gateway-update.service deploy/reach-gateway-update.path
+scp /tmp/reach-updater-install.tgz deploy@gateway.example.com:/tmp/reach-updater-install.tgz
+```
+
+然后在 Linux 宿主机执行。`release_root` 必须指向既有发布根目录（包含 `deploy/compose.yaml`），下例使用单元模板默认的 `/opt/reach`；保留当前 env 和设备注册表：
 
 ```bash
 release_root=/opt/reach
+updater_source="$(mktemp -d)"
+tar -xzf /tmp/reach-updater-install.tgz -C "$updater_source"
+sudo install -d -m 755 "$release_root/scripts"
+sudo install -m 755 "$updater_source/scripts/apply-gateway-release.sh" "$release_root/scripts/apply-gateway-release.sh"
+sudo install -m 755 "$updater_source/scripts/apply-engine-release.sh" "$release_root/scripts/apply-engine-release.sh"
+sudo install -m 644 "$updater_source/scripts/apply-release.py" "$release_root/scripts/apply-release.py"
 sudo install -d -m 750 -o 1000 -g 1000 "$release_root/deploy/update"
-sudo install -m 644 deploy/reach-gateway-update.service /etc/systemd/system/reach-gateway-update.service
-sudo install -m 644 deploy/reach-gateway-update.path /etc/systemd/system/reach-gateway-update.path
+sudo install -m 644 "$updater_source/deploy/reach-gateway-update.service" /etc/systemd/system/reach-gateway-update.service
+sudo install -m 644 "$updater_source/deploy/reach-gateway-update.path" /etc/systemd/system/reach-gateway-update.path
 sudo install -d -m 700 /etc/reach
 if [[ ! -e /etc/reach/updater.env ]]; then
   sudo install -m 600 /dev/null /etc/reach/updater.env
 fi
+rm -r "$updater_source"
 ```
 
 单位文件默认使用 `/opt/reach`；使用其他目录时，在安装副本中同步修改 service 的 helper/request/root 三个路径与 path 的 `PathExists`。不要覆盖已有 `updater.env`；上面的空文件初始化仅适用于首次安装。需要 GitHub token 时，在该私有文件设置 `REACH_UPDATE_GITHUB_TOKEN_FILE`，指向宿主机上的 600 权限 token 文件。Helper 通过 GitHub API 下载私有 Release，不把 token 转发给资产存储重定向地址。

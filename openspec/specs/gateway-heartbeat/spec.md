@@ -10,7 +10,7 @@ The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` 
 #### Scenario: Required device heartbeat endpoint behavior
 - **WHEN** an Agent changes session intent or an Engine sends a heartbeat
 - **THEN** The gateway SHALL return a JSON response containing an integer `intervalSeconds` that tells the Engine when to send its next device heartbeat.
-- **AND** The response MUST be 120 when no Agent-controlled session is open or wanted and 5 while an Agent-controlled session is wanted and no WebSocket is live.
+- **AND** When no session is wanted or a WebSocket is live, `intervalSeconds` MUST use the configured positive idle heartbeat interval (`REACH_HEARTBEAT_INTERVAL_SECS`, default 120); while a session is wanted and no WebSocket is live, it MUST be 5.
 - **AND** When a session is wanted and no WebSocket is live, the response MUST also contain a non-empty one-time `token`, non-empty `sessionId`, a session endpoint whose origin is the configured Gateway origin, and an absolute `leaseExpiresAt` timestamp.
 - **AND** The token MUST expire 30 seconds after issuance.
 - **AND** Repeated heartbeats while a token is pending MUST return the same token, session id, endpoint, and lease expiry without extending token expiry.
@@ -19,22 +19,26 @@ The gateway SHALL accept a JSON HTTP POST at `/heartbeat` containing a `device` 
 
 #### Scenario: Idle device heartbeat
 - **WHEN** the engine POSTs device information while no session is wanted
-- **THEN** the gateway returns HTTP 200 with `intervalSeconds` set to 120 and no session connection details
+- **THEN** the gateway returns HTTP 200 with `intervalSeconds` set to the configured idle interval (120 by default) and no session connection details
+
+#### Scenario: Configured idle heartbeat
+- **WHEN** the Gateway starts with `REACH_HEARTBEAT_INTERVAL_SECS=15` and the Engine heartbeats while no session is wanted
+- **THEN** the gateway returns `intervalSeconds` 15 without session credentials
 
 #### Scenario: Agent-controlled session lease
 - **WHEN** an Agent has requested a session and the Engine posts valid device information while no socket is live
 - **THEN** the gateway returns `intervalSeconds` 5, a one-time token, session id, Gateway-bound endpoint, and lease expiry
 
 #### Scenario: Live or consumed session does not mint credentials
-- **WHEN** the token has been consumed or a session WebSocket is live without a new session-wanted request
+- **WHEN** the token has been consumed or a session WebSocket is live without a new session-open intent
 - **THEN** a heartbeat returns no session token
 
 #### Scenario: Invalid heartbeat payload
 - **WHEN** a client POSTs a heartbeat body that is not a JSON object containing a `device` object
 - **THEN** the gateway returns HTTP 400
 
-### Requirement: Session-wanted gateway control
-The gateway SHALL provide a local JSON HTTP POST at `/session-wanted` that accepts a boolean `wanted` value and changes the session-wanted state used by subsequent heartbeat responses from the resident Engine. A successful authenticated session upgrade MUST set this state to false. A new token can be issued only after this endpoint has set the state to true after the prior session has ended.
+### Requirement: Legacy session-wanted gateway control
+The gateway SHALL retain `/session-wanted` as a compatibility alias accepting a boolean `wanted`: `true` uses the session-open intent flow and `false` uses the session-close flow. New clients SHOULD use `/session/open` and `/session/close`. A successful authenticated session upgrade MUST set the wanted state to false. A new session after the prior session has ended MUST require a new open intent, requested through `/session/open` or the legacy alias; use of the alias MUST NOT be required.
 
 #### Scenario: Request a session
 - **WHEN** a client POSTs `{ "wanted": true }` to `/session-wanted` after no session is live
@@ -42,14 +46,18 @@ The gateway SHALL provide a local JSON HTTP POST at `/session-wanted` that accep
 
 #### Scenario: Clear a session request
 - **WHEN** a client POSTs `{ "wanted": false }` to `/session-wanted`
-- **THEN** subsequent valid device heartbeats return `intervalSeconds` set to 120 without session credentials
+- **THEN** subsequent valid device heartbeats return the configured idle interval without session credentials
 
 #### Scenario: Invalid session-wanted payload
 - **WHEN** a client POSTs a body without a boolean `wanted` value
 - **THEN** the gateway returns HTTP 400
 
 ### Requirement: Agent session intent control
-The gateway SHALL provide Agent-facing local control for opening, renewing, querying, and closing the one Engine session.
+The gateway SHALL provide Agent-facing control through `/session/open`, `/session/renew`, `/session/status`, and `/session/close` for the selected Engine session.
+
+#### Scenario: Open without the legacy alias
+- **WHEN** a client POSTs `{}` to `/session/open` after no session is live
+- **THEN** the gateway returns the new intent's `sessionId`, and a subsequent valid Engine heartbeat returns `intervalSeconds` 5 and session credentials bound to that id without any `/session-wanted` request
 
 #### Scenario: Required agent session intent control behavior
 - **WHEN** an Agent changes session intent or an Engine sends a heartbeat

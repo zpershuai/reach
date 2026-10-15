@@ -34,7 +34,9 @@ Some MCP hosts ignore `notifications/tools/list_changed`. Set `REACH_MCP_TOOL_MO
 REACH_MCP_TOOL_MODE=static node packages/grok-bot-mcp-connector/dist/main.js
 ```
 
-Static mode advertises the filesystem, process and `session.close` tools from startup. Each requires a `deviceId` argument, then opens and binds that configured device for the call. It is less convenient than Path 2, but remains fully Gateway-mediated and works without tool-list refresh support.
+Static mode advertises the filesystem, process and `session.close` tools from startup. Each requires a `deviceId` argument and works without tool-list refresh support. Filesystem tools and `process.run` select that configured device and open or reuse its session before the call.
+
+`process.status`, `process.logs`, `process.stop`, and `process.list` only access tasks owned by the currently selected device's session; they do not select another device or open a session. Without a matching owned session they return `PROCESS_NOT_FOUND`. `session.close` only closes the selected device's owned session; for another configured device it returns `closed: false` and `owned: false` without opening a connection.
 
 
 ## Session recovery and time budgets

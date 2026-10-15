@@ -70,7 +70,7 @@ npm --prefix packages/grok-bot-mcp-connector version 0.3.1 --no-git-tag-version
 | Gateway | `gateway-amd64.tgz`、`gateway-image.txt`（GHCR 镜像 digest） |
 | 两者 | `SHA256SUMS`，覆盖该 Release 的文件资产 |
 
-Linux x64 Engine 是静态 musl 二进制，同一资产可用于 systemd Linux 和 x86_64 OpenWrt。macOS 使用原生 arm64 与 Intel runner，Intel runner 为 `macos-15-intel`。Gateway tarball 包含 `packages/reach-rpc/dist`、npm manifests、Compose/Dockerfile 和宿主机 helpers。Gateway 镜像发布为 `ghcr.io/<owner>/reach-gateway:<X.Y.Z>`，并附组件标签别名。
+Linux x64 Engine 是静态 musl 二进制，同一资产可用于 systemd Linux 和 x86_64 OpenWrt。macOS 使用原生 arm64 与 Intel runner，Intel runner 为 `macos-15-intel`。Gateway tarball 包含 `packages/reach-rpc/dist`、npm manifests、Compose/Dockerfile 和宿主机 helpers，不包含 systemd service/path 模板；首次安装 updater 需按 [运维步骤](operations.md#安装可选-github-release-updater) 从同一发布标签的源码取得模板并安装 helper。Gateway 镜像发布为 `ghcr.io/<owner>/reach-gateway:<X.Y.Z>`，并附组件标签别名。
 
 发布说明来自前一个同组件标签之后的提交；没有前一个标签时包含仓库历史。生成器过滤包含 `.reach/`、env 文件名和 SSH 目标的行，发布者仍应确保提交说明不含私有库存或凭证。下载文件后，在资产目录执行 `sha256sum -c SHA256SUMS`（macOS 可用 `shasum -a 256 -c SHA256SUMS`）。
 

@@ -64,7 +64,7 @@ The gateway SHALL reject WebSocket text messages larger than 1 MiB and SHALL clo
 - **THEN** the gateway does not execute filesystem operations against a gateway-local workspace
 
 ### Requirement: Local session RPC proxy
-While a ready Engine session is live and not draining, the gateway SHALL accept a local JSON `POST /session/rpc` body that is a complete `reach-rpc/1.0` request envelope (or sufficient fields for the gateway to fill the bound `sessionId`) and forward it to the Engine over the WebSocket.
+While a ready Engine session is live and not draining, the gateway SHALL accept JSON `POST /session/rpc` bodies with `requestId`, `method`, object `params`, and any required permission. Callers MAY omit `type`, `protocol`, `version`, and `sessionId`; the gateway MUST fill and validate them before forwarding a complete `reach-rpc/1.0` envelope to the bound Engine.
 
 #### Scenario: Required local session rpc proxy behavior
 - **WHEN** the Gateway accepts or uses an Engine WebSocket
@@ -79,6 +79,14 @@ While a ready Engine session is live and not draining, the gateway SHALL accept 
 #### Scenario: Forward a read through the gateway
 - **WHEN** an engine session is live and a caller POSTs a valid `fs.read` envelope to `/session/rpc`
 - **THEN** the gateway forwards the request, waits for the engine reply, and returns that result to the caller
+
+#### Scenario: Fill omitted HTTP envelope fields
+- **WHEN** a ready Engine session is live and a caller POSTs a valid read body with `requestId`, `method`, and `params` but without `type`, `protocol`, `version`, or `sessionId`
+- **THEN** the gateway fills `type: request`, `protocol: reach-rpc`, `version: 1.0`, and the live session id, validates the complete envelope, and forwards it to the bound Engine
+
+#### Scenario: Reject explicit invalid HTTP envelope fields
+- **WHEN** a ready Engine session is live and a caller explicitly supplies an invalid `type`, protocol, or version, or a different `sessionId`
+- **THEN** the gateway returns HTTP 400 with `INVALID_PARAMS` without forwarding the request
 
 #### Scenario: Reject RPC without a live session
 - **WHEN** a caller POSTs to `/session/rpc` while no engine WebSocket is live

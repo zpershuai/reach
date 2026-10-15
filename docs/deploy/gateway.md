@@ -24,9 +24,13 @@ npm --prefix packages/reach-rpc run build
 ```bash
 tar -czf /tmp/reach-gateway-release.tgz \
   deploy/compose.yaml deploy/Dockerfile.gateway \
+  deploy/reach-gateway-update.service deploy/reach-gateway-update.path \
+  scripts/apply-gateway-release.sh scripts/apply-engine-release.sh scripts/apply-release.py \
   packages/reach-rpc/package.json packages/reach-rpc/package-lock.json \
   packages/reach-rpc/dist
 ```
+
+此手工发布包同时携带可选 updater 的 helper 和 systemd 模板；上传包不会自动启用更新。GitHub Release 的 `gateway-amd64.tgz` 包含 helper，但不包含 systemd 模板；使用 Release 包时，需从同一发布标签的源码取得模板。两种部署方式均按 [updater 安装步骤](operations.md#安装可选-github-release-updater) 显式安装并启用。
 
 镜像运行时安装 `ws`、`zod` 等生产依赖，因此 VPS 的 Docker 构建需要能够拉取 Node 基础镜像并访问 npm。共享 MCP 核心和 HTTP `/mcp` 随 `reach-rpc/dist` 一起进入镜像；独立 stdio Connector 入口和 Rust Engine 不在这个镜像中。
 
@@ -52,8 +56,14 @@ ssh deploy@gateway.example.com 'cat > /srv/reach/deploy/engines.json; chmod 644 
 ├── deploy/
 │   ├── compose.yaml
 │   ├── Dockerfile.gateway
+│   ├── reach-gateway-update.service
+│   ├── reach-gateway-update.path
 │   ├── gateway.env             # 600，不进入镜像
-│   └── engines.json             # 私有注册表，仅挂载给容器读取
+│   └── engines.json           # 私有注册表，仅挂载给容器读取
+├── scripts/
+│   ├── apply-gateway-release.sh
+│   ├── apply-engine-release.sh
+│   └── apply-release.py
 └── packages/reach-rpc/
     ├── package.json
     ├── package-lock.json

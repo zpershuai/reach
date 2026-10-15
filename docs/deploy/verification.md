@@ -7,6 +7,7 @@
 ## 源码与入口
 
 ```bash
+npm ci --ignore-scripts
 npm --prefix packages/reach-rpc ci --ignore-scripts
 bash scripts/verify.sh
 curl --fail --silent --show-error https://reach.example.com/healthz
@@ -15,6 +16,8 @@ curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
 ```
 
 示例域名需替换为自己的 Gateway URL。健康响应应包含 `reach-rpc/1.0`，未认证状态查询应返回 `401`。源码测试与 HTTP 健康检查均不能代替实际文件 RPC。
+
+以上命令从仓库根目录执行。根目录的 `npm ci` 安装 `package.json` 固定版本的 OpenSpec；`scripts/verify.sh` 会核对版本，不能用任意全局 OpenSpec 版本代替。
 
 ## 公网文件 RPC
 
