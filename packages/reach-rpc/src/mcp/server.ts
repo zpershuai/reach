@@ -35,6 +35,12 @@ export class McpServer {
 
   protected selected: SelectedDevice | undefined;
 
+  private gatewayFor(device: DeviceConfig): GatewayClient {
+    const gateway = this.gateways(device, this.config);
+    gateway.setClientLabel?.(`${this.protocol.clientLabel} (stdio)`);
+    return gateway;
+  }
+
   public async shutdown(): Promise<void> {
     const selected = this.selected;
     if (!selected) return;
@@ -100,7 +106,7 @@ export class McpServer {
     const device = deviceId === undefined ? this.selected?.device : this.config.devices.find((candidate) => candidate.id === deviceId);
     if (deviceId !== undefined && !device) return toolError(`Unknown device: ${deviceId}`);
     try {
-      const status = device ? await this.gateways(device, this.config).status() : undefined;
+      const status = device ? await this.gatewayFor(device).status() : undefined;
       return toolText({
         mcpVersion: MCP_VERSION,
         ...(device ? { deviceId: device.id } : {}),
@@ -161,7 +167,7 @@ export class McpServer {
       }
       if (previous) await previous.gateway.close();
       this.clearSelection();
-      const gateway = this.gateways(device, this.config);
+      const gateway = this.gatewayFor(device);
       // Keep the client reachable even if opening or its cleanup fails.
       this.selected = { device, gateway, session: {}, uncertain: true };
       const session = await gateway.openAndWait();

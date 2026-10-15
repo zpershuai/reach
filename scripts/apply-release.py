@@ -241,6 +241,7 @@ def apply_gateway(request, root, downloads, request_dir):
 
 
 def copy_gateway_payload(extracted, root):
+    # Keep operator-owned deploy/data/ (including SQLite WAL files) outside this allow-list.
     # Copy only release payloads. Existing local Compose policy and secrets survive.
     for payload in ["packages/reach-rpc/dist", "packages/reach-rpc/package.json", "packages/reach-rpc/package-lock.json", "deploy/Dockerfile.gateway", "scripts"]:
         source, target = extracted / payload, root / payload

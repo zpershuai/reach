@@ -50,6 +50,13 @@ class Downloads:
 
 
 class HelperTests(unittest.TestCase):
+    def test_gateway_compose_keeps_hardening_and_mounts_persistent_data(self):
+        repo = Path(__file__).resolve().parent.parent
+        compose = (repo/'deploy/compose.yaml').read_text()
+        for required in ['read_only: true', 'cap_drop: [ALL]', 'no-new-privileges:true', './data:/var/lib/reach:rw', 'REACH_DATA_DIR: /var/lib/reach']:
+            self.assertIn(required, compose)
+        self.assertIn('chown node:node /var/lib/reach', (repo/'deploy/Dockerfile.gateway').read_text())
+
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
@@ -59,6 +66,9 @@ class HelperTests(unittest.TestCase):
         (self.root/'deploy/gateway.env').write_text('local fixture credentials')
         (self.root/'deploy/engines.json').write_text('local registry')
         (self.root/'deploy/engine.env').write_text('engine credentials')
+        (self.root/'deploy/data').mkdir(mode=0o700)
+        for name in ['reach.db', 'reach.db-wal', 'reach.db-shm']:
+            (self.root/'deploy/data'/name).write_bytes(b'local persistent state')
         self.original_compose = (self.root/'deploy/compose.yaml').read_bytes()
         (self.root/'docker').write_text(FAKE_DOCKER)
         (self.root/'docker').chmod(0o755)
@@ -100,6 +110,7 @@ class HelperTests(unittest.TestCase):
     def archive(self, files=None):
         output = io.BytesIO()
         payload = files or {'packages/reach-rpc/dist/gateway-main.js':b'fixture', 'packages/reach-rpc/package.json':b'{}', 'packages/reach-rpc/package-lock.json':b'{}', 'deploy/Dockerfile.gateway':b'FROM fixture', 'deploy/compose.yaml':b'NEW DEFAULT', 'deploy/gateway.env':b'overwrite', 'deploy/engines.json':b'overwrite'}
+        payload.setdefault('deploy/data/reach.db', b'archive must not replace local state')
         with tarfile.open(fileobj=output,mode='w:gz') as archive:
             for name,data in payload.items():
                 member=tarfile.TarInfo(name); member.size=len(data); archive.addfile(member,io.BytesIO(data))
@@ -109,6 +120,9 @@ class HelperTests(unittest.TestCase):
         self.assertEqual((self.root/'deploy/gateway.env').read_text(), 'local fixture credentials')
         self.assertEqual((self.root/'deploy/engines.json').read_text(), 'local registry')
         self.assertEqual((self.root/'deploy/compose.yaml').read_bytes(), self.original_compose)
+        for name in ['reach.db', 'reach.db-wal', 'reach.db-shm']:
+            self.assertEqual((self.root/'deploy/data'/name).read_bytes(), b'local persistent state')
+        self.assertEqual((self.root/'deploy/data').stat().st_mode & 0o777, 0o700)
 
     def test_pull_verifies_digest_version_and_keeps_previous(self):
         helper.apply_gateway(self.request,self.root,self.image_assets(),self.requests)

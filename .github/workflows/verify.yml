@@ -21,6 +21,7 @@ jobs:
           cache-dependency-path: |
             package-lock.json
             packages/reach-rpc/package-lock.json
+            packages/gateway-console/package-lock.json
       - run: npm ci --ignore-scripts
       - run: npm --prefix packages/reach-rpc ci --ignore-scripts
       - run: bash scripts/verify.sh
@@ -40,7 +41,9 @@ jobs:
         with:
           node-version: 24
           cache: npm
-          cache-dependency-path: packages/reach-rpc/package-lock.json
+          cache-dependency-path: |
+            packages/reach-rpc/package-lock.json
+            packages/gateway-console/package-lock.json
       - run: sudo apt-get update && sudo apt-get install -y musl-tools
       - run: npm --prefix packages/reach-rpc ci --ignore-scripts
       - run: bash scripts/verify-packaging.sh

@@ -8,6 +8,19 @@ import type { Socket } from "node:net";
 import test from "node:test";
 import { HttpGatewayClient } from "./gateway.js";
 import { loadConfig } from "./config.js";
+import { McpServer } from "./server.js";
+
+test("stdio clientInfo is attributed in Gateway headers after initialize", async () => {
+  const config = loadConfig({ REACH_MCP_DEVICES: JSON.stringify([{ id: "fixture", gatewayUrl: "http://127.0.0.1:8787" }]) });
+  let label: string | undefined;
+  const server = new McpServer(config, () => {}, device => new HttpGatewayClient(device, 1000, 1, async (_url, init) => {
+    label = (init!.headers as Record<string, string>)["x-reach-client"];
+    return new Response('{"status":"none"}');
+  }));
+  await server.receive({ jsonrpc: "2.0", id: 1, method: "initialize", params: { clientInfo: { name: "Hermes Agent", version: "1.2" } } });
+  await server.receive({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "get_versions", arguments: { deviceId: "fixture" } } });
+  assert.equal(label, "Hermes Agent 1.2 (stdio)");
+});
 
 async function withHttp(handler: RequestListener, check: (url: string) => Promise<void>): Promise<void> {
   const sockets = new Set<Socket>();

@@ -6,9 +6,12 @@ services:
     image: reach-gateway:current
     restart: unless-stopped
     env_file: gateway.env
+    environment:
+      REACH_DATA_DIR: /var/lib/reach
     volumes:
       - ./engines.json:/run/reach/engines.json:ro
       - ./update:/run/reach/update:rw
+      - ./data:/var/lib/reach:rw
     ports:
       - "127.0.0.1:28787:8787"
     read_only: true

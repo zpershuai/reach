@@ -24,6 +24,9 @@ python3 scripts/test-release-helpers.py
 node --test scripts/test-grok-plugin.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked
+npm --prefix packages/gateway-console ci --ignore-scripts
+npm --prefix packages/gateway-console test
+npm --prefix packages/gateway-console run build
 npm --prefix packages/reach-rpc test
 npm --prefix packages/grok-bot-mcp-connector test
 bash scripts/validate-round1.sh

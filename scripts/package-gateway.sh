@@ -9,6 +9,8 @@ cd "$repo_root"
 work="$(mktemp -d)"
 trap 'rm -rf "$work"' EXIT
 npm --prefix packages/reach-rpc run build
+npm --prefix packages/gateway-console ci --ignore-scripts
+npm --prefix packages/gateway-console run build
 version="$(node -p 'require("./packages/reach-rpc/package.json").version')"
 docker build --platform linux/amd64 -f deploy/Dockerfile.gateway -t "$image" .
 [[ "$(docker run --rm --platform linux/amd64 "$image" node dist/gateway-main.js --version)" == "$version" ]]

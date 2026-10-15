@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { WebSocket } from "ws";
 import { CLOSURE_AGENT_REQUESTED, CLOSURE_DISCONNECTED, MESSAGE_CLOSE, MESSAGE_RENEW } from "./index.js";
 import { GATEWAY_VERSION } from "./version.js";
+import type { CallerContext } from "./console-api/events.js";
 export interface PendingSession {
   token: string;
   /** Token expiry (epoch ms). The token is single-use and short-lived. */
@@ -17,6 +18,8 @@ export interface LiveSession {
   /** True once the Engine has sent a valid `session.ready`. */
   ready: boolean;
   methods?: string[];
+  workspaces?: string[];
+  processWorkspaces?: string[];
   /** True while draining after close/expiry: no new data-plane requests. */
   closed: boolean;
   leaseExpiresAt: number;
@@ -32,6 +35,9 @@ export class EngineSessionState {
   // Last version advertised by the configured Engine; not an online-status indicator.
   public engineVersion: string | undefined;
   public lastSeenAt: string | undefined;
+  public ownerLabel: string | undefined;
+  public ownerCaller: CallerContext | undefined;
+  private previousStatus = "none";
   /** Last Engine-reported or observed closure reason, kept for session status. */
   public lastClosureReason: string | undefined;
   public leaseTimer: ReturnType<typeof setTimeout> | undefined;
@@ -43,17 +49,25 @@ export class EngineSessionState {
     private readonly logger: (message: string) => void,
     private readonly sessionLeaseMs: number,
     private readonly sessionEndpoint: string,
+    private readonly onStatusChange?: (status: ReturnType<EngineSessionState["sessionStatus"]>) => void,
   ) {}
+  public notify = (): void => {
+    const status = this.sessionStatus();
+    if (status.status === this.previousStatus) return;
+    this.previousStatus = status.status;
+    this.onStatusChange?.(status);
+  };
   public closeLiveSession = (code: number, reason: string) => {
     const session = this.liveSession;
     if (session && (session.socket.readyState === WebSocket.OPEN || session.socket.readyState === WebSocket.CONNECTING)) {
       // Reject new data-plane requests immediately rather than waiting for the close event.
       session.closed = true;
       session.socket.close(code, reason);
+      this.notify();
     }
   };
 
-  public openSession = (sessionId?: string) => {
+  public openSession = (sessionId?: string, caller?: CallerContext) => {
     if (this.liveSession) {
       return { statusCode: 409 as const, payload: { error: "session already active" } };
     }
@@ -68,6 +82,9 @@ export class EngineSessionState {
     this.wantedSessionId = sessionId ?? randomUUID();
     this.pendingSession = undefined;
     this.lastClosureReason = undefined;
+    this.ownerLabel = caller?.label;
+    this.ownerCaller = caller;
+    this.notify();
     return { statusCode: 200 as const, payload: { wanted: true, status: "wanted" } };
   };
 
@@ -79,6 +96,7 @@ export class EngineSessionState {
     if (session) {
       session.closed = true;
       this.sessionWanted = false;
+      this.notify();
       try {
         session.socket.send(JSON.stringify({
           type: MESSAGE_CLOSE,
@@ -99,6 +117,7 @@ export class EngineSessionState {
     this.sessionWanted = false;
     this.wantedSessionId = undefined;
     this.pendingSession = undefined;
+    this.notify();
     return { statusCode: 200 as const, payload: { status: "none" } };
   };
 
@@ -148,12 +167,15 @@ export class EngineSessionState {
       lastSeenAt: this.lastSeenAt,
       engineVersion: this.engineVersion ?? null,
       methods: session?.methods,
+      workspaces: session?.workspaces,
+      processWorkspaces: session?.processWorkspaces,
       wanted: this.sessionWanted,
       status,
       sessionId: session?.sessionId ?? this.pendingSession?.sessionId ?? this.wantedSessionId,
       endpoint: this.pendingSession && !session ? this.sessionEndpoint : undefined,
       leaseExpiresAt: (session ?? this.pendingSession) ? isoDate((session ?? this.pendingSession)!.leaseExpiresAt) : undefined,
       closureReason: this.lastClosureReason,
+      ...(status !== "none" && this.ownerLabel ? { ownerLabel: this.ownerLabel } : {}),
     };
   };
 

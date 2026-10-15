@@ -10,3 +10,4 @@ target
 deploy/*.env
 deploy/engines.json
 deploy/update
+deploy/data

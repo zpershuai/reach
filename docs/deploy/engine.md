@@ -134,3 +134,11 @@ launchctl bootstrap "gui/$(id -u)" \
 - Linux 与 OpenWrt 分别使用 [systemd](linux.md) 和 [procd](openwrt.md) 安装器。
 
 完整参数表见 [configuration.md](configuration.md)，真实文件链路检查见 [verification.md](verification.md)。
+
+## 7. 硬件类型与控制台显示
+
+Engine 在启动时检测一次硬件，在每次心跳的 `device.hardware` 中报告五项：`kind`（设备类型）、`model`（型号）、`os`（操作系统）、`osVersion`（系统版本）和 `arch`（架构）。每项最多 64 个可打印字符。检测使用本地 macOS 系统信息、OpenWrt 板卡型号、Raspberry Pi 设备树、Synology/QNAP 系统文件或 Linux DMI；子进程共享三秒检测预算。检测失败仍正常发送心跳，类型为 `unknown`。
+
+报告不包含序列号、主机名、MAC 地址、用户名或其他网络标识。Gateway 忽略格式错误或过大的硬件描述，并保留上次有效值；旧 Engine 不发送该对象时仍可正常连接，控制台使用通用服务器图形。
+
+管理员可在控制台为设备设置或清除类型与型号覆盖。覆盖优先于自动报告，只影响显示，不更改设备权限或 Engine 本地配置。

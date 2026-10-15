@@ -4,6 +4,8 @@ Gateway, device Engine, and a generic MCP connector. Protocol: reach-rpc/1.0.
 
 Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clients: [installation instructions](docs/deploy/mcp.md). Validation: [deployment checklist](docs/deploy/deployment-checklist.md).
 
+The optional [Gateway console](docs/deploy/console.md) provides owner administration, device enrollment, live routing topology and metadata-only activity audit at `/console/`. Enable persistent storage with `REACH_DATA_DIR` and configure `REACH_PUBLIC_ORIGIN` before public binding.
+
 MCP, Engine and Gateway have independent release versions, exposed through `--version`, Gateway health/session status and the MCP `get_versions` tool. See [component versions and upgrades](docs/deploy/versions.md).
 
 Each Engine installation automatically installs a pinned, checksum-verified Node.js runtime under `~/.reach/runtime/node` for Gateway and MCP processes on that host. The Rust Engine uses this runtime for trusted workspace scripts when process execution is explicitly enabled; filesystem-only operation remains independent of Node. The generated MCP configuration uses its stable `bin/node` path. After building, `sh scripts/start-gateway.sh` starts a local Gateway with this runtime. It can also be installed independently with `python3 scripts/install-node-runtime.py`. See [runtime installation and execution boundaries](docs/deploy/node-runtime.md).

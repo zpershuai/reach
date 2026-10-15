@@ -486,7 +486,10 @@ impl EngineRuntime {
 
         // Announce readiness before reading any data-plane request. The Gateway
         // gates forwarding on this message.
-        let ready = session_ready(&lease.session_id, &engine_id, workspaces, methods);
+        let mut ready = session_ready(&lease.session_id, &engine_id, workspaces, methods);
+        let mut process_workspaces = self.config.processes.workspaces.clone();
+        process_workspaces.sort();
+        ready.process_workspaces = Some(process_workspaces);
         let ready_text = match serialize_session_message(&SessionMessage::Ready(ready)) {
             Ok(text) => text,
             Err(_) => return SessionClosureReason::Disconnected,

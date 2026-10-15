@@ -37,6 +37,8 @@ pub struct SessionReady {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub engine_version: Option<String>,
     pub workspaces: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub process_workspaces: Option<Vec<String>>,
     pub methods: Vec<String>,
 }
 
@@ -115,6 +117,10 @@ fn validate_ready(ready: &SessionReady) -> Result<(), ContractError> {
         || ready.methods.is_empty()
         || ready.workspaces.iter().any(|name| !is_non_empty(name))
         || ready.methods.iter().any(|name| !is_non_empty(name))
+        || ready
+            .process_workspaces
+            .as_ref()
+            .is_some_and(|names| names.iter().any(|name| !ready.workspaces.contains(name)))
     {
         return Err(ContractError);
     }
@@ -242,6 +248,7 @@ pub fn session_ready(
         engine_id: engine_id.to_owned(),
         engine_version: Some(ENGINE_VERSION.to_owned()),
         workspaces,
+        process_workspaces: None,
         methods,
     }
 }
@@ -267,6 +274,23 @@ pub fn session_close(session_id: &str, reason: &str) -> SessionClose {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_accepts_enabled_disabled_and_unreported_process_workspaces() {
+        let legacy = include_str!("../../../fixtures/session.ready.json");
+        let mut value: Value = serde_json::from_str(legacy).unwrap();
+        assert!(parse_session_ready(legacy)
+            .unwrap()
+            .process_workspaces
+            .is_none());
+        for names in [vec![], vec!["default"]] {
+            value["processWorkspaces"] = serde_json::json!(names);
+            let ready = parse_session_ready(&value.to_string()).unwrap();
+            assert_eq!(ready.process_workspaces.unwrap(), names);
+        }
+        value["processWorkspaces"] = serde_json::json!(["not-a-workspace"]);
+        assert!(parse_session_ready(&value.to_string()).is_err());
+    }
     use crate::INVALID_PARAMS;
 
     #[test]

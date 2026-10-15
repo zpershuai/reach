@@ -7,6 +7,8 @@ export interface ReadySession {
   gatewayVersion?: string;
   engineVersion?: string;
   methods?: string[];
+  workspaces?: string[];
+  processWorkspaces?: string[];
 }
 
 export interface SessionStatus extends ReadySession {
@@ -14,6 +16,7 @@ export interface SessionStatus extends ReadySession {
 }
 
 export interface GatewayClient {
+  setClientLabel?(label: string): void;
   status(): Promise<SessionStatus>;
   openAndWait(): Promise<ReadySession>;
   renew(): Promise<ReadySession>;
@@ -56,6 +59,11 @@ function isTransientTransportError(error: unknown): boolean {
 
 export class HttpGatewayClient implements GatewayClient {
   private sessionId: string | undefined;
+  private clientLabel: string | undefined;
+
+  public setClientLabel(label: string): void {
+    this.clientLabel = label.replace(/[^\x20-\x7e]/g, "").slice(0, 64);
+  }
 
   public constructor(
     private readonly device: DeviceConfig,
@@ -191,6 +199,7 @@ export class HttpGatewayClient implements GatewayClient {
   private async post(path: string, body?: unknown, timeoutMs = this.requestTimeoutMs): Promise<Record<string, unknown>> {
     const gatewayUrl = validateGatewayUrl(this.device.gatewayUrl).toString().replace(/\/$/, "");
     const headers: Record<string, string> = {};
+    if (this.clientLabel) headers["x-reach-client"] = this.clientLabel;
     if (body !== undefined) headers["content-type"] = "application/json";
     if (this.device.controllerToken) headers.authorization = `Bearer ${this.device.controllerToken}`;
     const target = this.device.engineId ? `${path}?engineId=${encodeURIComponent(this.device.engineId)}` : path;

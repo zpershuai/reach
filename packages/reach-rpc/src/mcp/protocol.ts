@@ -29,6 +29,7 @@ interface ProtocolOptions {
 export class McpProtocol {
   private initialized = false;
   public acknowledged = false;
+  public clientLabel = "MCP client";
   constructor(
     private readonly send: Send,
     private readonly tools: () => readonly Record<string, unknown>[],
@@ -62,6 +63,12 @@ export class McpProtocol {
   protected async dispatch(request: JsonRpcRequest): Promise<Record<string, unknown>> {
     switch (request.method) {
       case "initialize":
+        if (request.params && typeof request.params === "object" && "clientInfo" in request.params) {
+          const client = request.params.clientInfo as { name?: unknown; version?: unknown } | undefined;
+          if (client && typeof client.name === "string" && typeof client.version === "string") {
+            this.clientLabel = `${client.name} ${client.version}`.replace(/[^\x20-\x7e]/g, "").slice(0, 56).trim() || "MCP client";
+          }
+        }
         this.initialized = true;
         return {
           protocolVersion: this.options.protocolVersion ?? MCP_PROTOCOL_VERSION,

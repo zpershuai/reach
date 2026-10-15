@@ -3,6 +3,7 @@ WORKDIR /app
 COPY packages/reach-rpc/package.json packages/reach-rpc/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts
 COPY packages/reach-rpc/dist ./dist
+RUN mkdir -p /var/lib/reach && chown node:node /var/lib/reach && chmod 700 /var/lib/reach
 USER node
 ENV GATEWAY_HOST=0.0.0.0 GATEWAY_PORT=8787
 EXPOSE 8787

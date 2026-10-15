@@ -34,11 +34,13 @@ fn main() {
     }
 
     let workspace = WorkspaceFilesystem::new(config.workspace_roots.clone());
+    let hardware = reach_rpc::runtime::hardware::detect_hardware();
     let heartbeat = LocalHttpHeartbeatTransport::new(
         config.gateway.clone(),
         &config.engine_id,
         config.timeouts.connection_timeout,
-    );
+    )
+    .with_hardware(hardware);
     let registry = default_registry();
     reach_rpc::process::install_shutdown_handlers();
     let mut runtime = EngineRuntime::new(

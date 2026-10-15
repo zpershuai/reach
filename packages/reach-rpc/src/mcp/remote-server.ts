@@ -5,6 +5,7 @@ import { GrantAwareInvoker } from "./invoker.js";
 import { toolError, toolText } from "./result.js";
 import { deviceTools, staticDeviceScopedTools } from "./tools.js";
 import { MCP_VERSION } from "./version.js";
+import type { CallerContext } from "../console-api/events.js";
 
 const METHODS: Record<string, string> = {
   process_run: "process.run", process_status: "process.status", process_logs: "process.logs", process_stop: "process.stop", process_list: "process.list",
@@ -34,10 +35,12 @@ export class RemoteMcpServer {
   public deadlineAt = 0;
   private readonly protocol: McpProtocol;
   private readonly invoker = new GrantAwareInvoker(async () => {}, () => false);
+  public readonly caller: CallerContext;
   public get initialized(): boolean { return this.protocol.acknowledged; }
   public receive(value: unknown): Promise<void> { return this.protocol.receive(value); }
 
-  public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, protocolVersion: string) {
+  public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, protocolVersion: string, clientLabel = "MCP client", mcpSessionId?: string) {
+    this.caller = { type: "mcp-http", label: clientLabel, verified: false, mcpSessionId };
     this.protocol = new McpProtocol(send, () => this.listTools(), params => this.callTool(params), undefined, {
       protocolVersion, listChanged: false, http: true,
       instructionsPrefix: "Use list_devices, then pick_device or a device tool with deviceId. If connecting, poll device_status after retryAfterMs. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Use process_status with the same launchId and owned session after an uncertain launch. Close owned sessions when finished. ",
@@ -77,6 +80,7 @@ export class RemoteMcpServer {
     if (typeof deviceId !== "string" || !deviceId) return toolError("INVALID_PARAMS: A non-empty deviceId is required.");
     const api = this.engines.get(deviceId);
     if (!api) return toolError(`INVALID_PARAMS: Unknown device: ${deviceId}`);
+    if (this.clients.has(deviceId) && !this.clients.get(deviceId)!.usesApi(api)) this.clients.delete(deviceId);
     if (call.name === "get_versions") return toolText({ deviceId, mcpVersion: MCP_VERSION, gatewayVersion: api.status().gatewayVersion ?? null, engineVersion: api.status().engineVersion ?? null });
     if (call.name === "device_status") {
       const status = api.status();
@@ -93,7 +97,7 @@ export class RemoteMcpServer {
         return toolText({ closedDeviceId: deviceId, closed: owned, owned });
       }
       if (!client && method?.startsWith("process.") && method !== "process.run") return toolError("PROCESS_NOT_FOUND: No owned session for this task.");
-      if (!client) { client = new InProcessGatewayClient(api); this.clients.set(deviceId, client); }
+      if (!client) { client = new InProcessGatewayClient(api, this.caller); this.clients.set(deviceId, client); }
       client.deadlineAt = this.deadlineAt;
       const observing = method?.startsWith("process.") && method !== "process.run";
       if (observing && !client.owns(api.status().sessionId)) return toolError("PROCESS_NOT_FOUND: Owner session ended.");

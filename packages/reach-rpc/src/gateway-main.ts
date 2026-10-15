@@ -3,6 +3,7 @@ import { createGateway } from "./gateway.js";
 import { readFileSync } from "node:fs";
 import { z } from "zod";
 import { GATEWAY_VERSION } from "./version.js";
+import { parseConsoleConfig } from "./console-api/config.js";
 
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(GATEWAY_VERSION);
@@ -28,6 +29,7 @@ if (!["127.0.0.1", "::1", "localhost"].includes(host) && !authenticated) {
   throw new Error("Non-loopback Gateway requires authentication");
 }
 const gateway = createGateway({
+  console: parseConsoleConfig(process.env, host, port),
   update,
   mcp: {
     allowedOrigins: (process.env.REACH_MCP_ALLOWED_ORIGINS ?? "").split(",").map((value) => value.trim()).filter(Boolean),

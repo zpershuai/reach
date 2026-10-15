@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { GatewayHttpError, SessionReplacedError, type GatewayClient, type ReadySession, type SessionStatus } from "./gateway.js";
+import type { CallerContext } from "../console-api/events.js";
 
 export interface EngineResult {
   statusCode: number;
@@ -14,12 +15,12 @@ export interface EngineStatus extends Omit<SessionStatus, "engineVersion"> {
 
 export interface EngineApi {
   status(): EngineStatus;
-  open(sessionId: string): EngineResult;
+  open(sessionId: string, caller?: CallerContext): EngineResult;
   renew(sessionId: string): EngineResult;
   close(sessionId: string): EngineResult;
   grant(sessionId: string, workspace: string, path: string, method: "fs.write" | "fs.edit"): EngineResult;
   processGrant?(sessionId: string, scope: Record<string, unknown>): EngineResult;
-  rpc(body: Record<string, unknown>): Promise<EngineResult>;
+  rpc(body: Record<string, unknown>, caller?: CallerContext): Promise<EngineResult>;
 }
 
 function unwrap(path: string, result: EngineResult): Record<string, unknown> {
@@ -36,7 +37,9 @@ export class InProcessGatewayClient implements GatewayClient {
   private sessionId: string | undefined;
   public deadlineAt = 0;
 
-  public constructor(private readonly api: EngineApi) {}
+  public constructor(private readonly api: EngineApi, private readonly caller?: CallerContext) {}
+
+  public usesApi(api: EngineApi): boolean { return this.api === api; }
 
   public async begin(): Promise<SessionStatus> {
     const status = await this.status();
@@ -45,7 +48,7 @@ export class InProcessGatewayClient implements GatewayClient {
       return status;
     }
     const intent = randomUUID();
-    unwrap("/session/open", this.api.open(intent));
+    unwrap("/session/open", this.api.open(intent, this.caller));
     this.sessionId = intent;
     return this.status();
   }
@@ -71,7 +74,7 @@ export class InProcessGatewayClient implements GatewayClient {
       sessionId: this.boundId(), requestId: randomUUID(), method, params,
       deadlineAt: new Date(this.deadlineAt).toISOString(),
       ...(permission ? { permission } : {}),
-    }));
+    }, this.caller));
   }
 
   public async grant(workspace: string, path: string, method: "fs.write" | "fs.edit"): Promise<{ grantId: string }> {

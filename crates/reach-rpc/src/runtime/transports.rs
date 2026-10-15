@@ -211,6 +211,7 @@ use serde::Deserialize;
 pub struct LocalHttpHeartbeatTransport {
     config: GatewayConfig,
     device_id: String,
+    hardware: Option<super::hardware::HardwareDescriptor>,
     /// Upper bound on connect, write, and the whole response read of one
     /// heartbeat. A stalled or hostile Gateway cannot park the resident Engine
     /// on a single heartbeat.
@@ -226,19 +227,29 @@ impl LocalHttpHeartbeatTransport {
         LocalHttpHeartbeatTransport {
             config,
             device_id: device_id.to_owned(),
+            hardware: None,
             io_timeout,
         }
+    }
+
+    pub fn with_hardware(mut self, hardware: super::hardware::HardwareDescriptor) -> Self {
+        self.hardware = Some(hardware);
+        self
     }
 }
 
 impl HeartbeatTransport for LocalHttpHeartbeatTransport {
     fn heartbeat(&mut self) -> Result<HeartbeatOutcome, String> {
-        let request_body = serde_json::json!({"device": {
+        let mut request = serde_json::json!({"device": {
             "id": self.device_id,
             "platform": "rust",
             "engineVersion": crate::ENGINE_VERSION,
-        }})
-        .to_string();
+        }});
+        if let Some(hardware) = &self.hardware {
+            request["device"]["hardware"] =
+                serde_json::to_value(hardware).map_err(|error| error.to_string())?;
+        }
+        let request_body = request.to_string();
         if self.config.origin.scheme == "https" {
             let agent = ureq::Agent::config_builder()
                 .timeout_global(Some(self.io_timeout))
@@ -498,7 +509,15 @@ mod tests {
         config: GatewayConfig,
         io_timeout: Duration,
     ) -> LocalHttpHeartbeatTransport {
-        LocalHttpHeartbeatTransport::new(config, "test-device", io_timeout)
+        LocalHttpHeartbeatTransport::new(config, "test-device", io_timeout).with_hardware(
+            super::super::hardware::HardwareDescriptor {
+                kind: "server".into(),
+                model: "Example server".into(),
+                os: "Linux".into(),
+                os_version: "1.0".into(),
+                arch: "aarch64".into(),
+            },
+        )
     }
 
     fn loopback_gateway_config(address: std::net::SocketAddr) -> GatewayConfig {
@@ -536,6 +555,10 @@ mod tests {
             let payload: serde_json::Value =
                 serde_json::from_str(request.split("\r\n\r\n").nth(1).unwrap()).unwrap();
             assert_eq!(payload["device"]["engineVersion"], crate::ENGINE_VERSION);
+            assert_eq!(
+                payload["device"]["hardware"],
+                serde_json::json!({"kind":"server","model":"Example server","os":"Linux","osVersion":"1.0","arch":"aarch64"})
+            );
             let body = r#"{"intervalSeconds":30}"#;
             let response = format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",

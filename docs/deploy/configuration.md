@@ -55,6 +55,7 @@ deployment = dict(gatewayUrl=gateway_url, engineId=engine_id,
                   controllerToken=controller, engineToken=engine,
                   workspaceRoot=workspace)
 gateway_env = dict(REACH_CONTROLLER_TOKEN=controller,
+                   REACH_PUBLIC_ORIGIN=gateway_url,
                    REACH_ENGINE_TOKEN=engine, REACH_ENGINE_ID=engine_id,
                    REACH_HEARTBEAT_INTERVAL_SECS='15',
                    REACH_ENGINES_FILE='/run/reach/engines.json')
@@ -94,6 +95,11 @@ PY
 | `REACH_ENGINES_FILE` | 无 | 额外 Engine 的私有注册表；Compose 示例挂载到 `/run/reach/engines.json` |
 | `REACH_HEARTBEAT_INTERVAL_SECS` | `120` | 单位秒，正整数；可按需设置为 `15` |
 | `REACH_HTTP_LOG` | 关闭 | `1` 启用请求路径、状态与耗时日志 |
+| `REACH_DATA_DIR` | 无；控制台关闭 | 可写的持久化目录，保存 `reach.db`、WAL 及管理员、设备和审计数据；目录建议权限 `0700`，数据库权限 `0600`；不可写时启动失败 |
+| `REACH_PUBLIC_ORIGIN` | 回环监听的 HTTP origin | 控制台的完整外部 origin，例如 `https://gateway.example.com`，不带尾部斜线或路径；启用控制台且非回环监听时必填 |
+| `REACH_ADMIN_SETUP_TOKEN` | 首次启动随机生成并记录一次 | 仅无管理员时有效的首次设置凭证；保存于私有环境文件，管理员创建后失效 |
+| `REACH_TRUSTED_PROXIES` | 空 | 逗号分隔的受信代理 IP 或 CIDR，例如 `192.0.2.10,198.51.100.0/24`；仅 socket 对端受信时使用 `X-Forwarded-For` 解析限流地址；应按实际代理设置最小范围 |
+| `REACH_AUDIT_RETENTION_DAYS` | `30` | 审计保留天数，整数 `1`–`365`；非法值在监听前报错；管理员也可在控制台修改 |
 | `REACH_MCP_ALLOWED_ORIGINS` | 空 | HTTP MCP 允许的完整 Origin，逗号分隔；默认拒绝带 Origin 的请求，无该头的云端客户端正常使用 |
 | `REACH_MCP_SESSION_IDLE_MS` | `300000` | HTTP MCP 空闲过期时间；过期关闭所持有的 Engine 会话 |
 | `REACH_MCP_RESPONSE_TIMEOUT_MS` | `25000` | HTTP MCP 响应预算，覆盖请求体读取、排队和执行 |

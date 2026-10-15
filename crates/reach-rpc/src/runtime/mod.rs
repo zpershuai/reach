@@ -7,6 +7,7 @@
 
 pub mod config;
 pub mod endpoint;
+pub mod hardware;
 pub mod runtime;
 pub mod session;
 pub mod state;

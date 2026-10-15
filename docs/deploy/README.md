@@ -8,6 +8,7 @@
 | --- | --- |
 | [配置与凭证](configuration.md) | 部署参数、生成私有配置、域名、认证与签名的版本边界 |
 | [Gateway 部署](gateway.md) | 构建、上传、Compose、Caddy、HTTPS 检查 |
+| [Gateway 控制台](console.md) | Owner 设置、设备注册、审计、代理限流与数据备份恢复 |
 | [Engine 部署](engine.md) | Mac 构建、工作区、后台安装、启动与停止 |
 | [Linux Engine](linux.md) | VPS 和家庭 server 安装、systemd 系统与用户服务 |
 | [OpenWrt 与多设备](openwrt.md) | 路由器安装、私有 Node 库、一个 Gateway 管理多个 Engine |
@@ -35,7 +36,7 @@ flowchart LR
 
 | 组件 | 职责 | 常驻方式 | 保存的数据 |
 | --- | --- | --- | --- |
-| Gateway | 认证、会话租约、文件写入与进程 grant、转发 RPC | VPS Docker Compose | 会话和 grant 在内存，无文件业务数据库 |
+| Gateway | 认证、会话租约、grant、转发 RPC 与可选管理控制台 | VPS Docker Compose | 会话和 grant 在内存；可选 SQLite 保存管理、注册和元数据审计 |
 | Engine | 执行工作区内的 `fs.*` 请求及显式启用的 `process.*` 任务 | LaunchAgent / systemd / procd | 文件保存在设备工作区 |
 | MCP Connector | 将 MCP 工具调用转换为 Gateway 请求 | MCP 客户端启动本地 Node 进程 | 私有设备配置；不存放远程工作区文件 |
 

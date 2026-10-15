@@ -6,8 +6,10 @@ import { ContractError, parseFsEditParams, parseFsWriteParams, parseRequestEnvel
 import type { EngineResult } from "./mcp/in-process.js";
 import { EngineSessionState } from "./gateway-state.js";
 import { MAX_PENDING_RPCS, MAX_TIMED_OUT_REQUEST_IDS, MAX_SEEN_REQUEST_IDS, MAX_WEBSOCKET_TEXT_BYTES } from "./gateway-policy.js";
+import { type CallerContext, type GatewayEvents, type GatewayEventFields } from "./console-api/events.js";
+import { auditInvocation } from "./console-api/audit.js";
 export interface PendingRpc {
-  resolve: (payload: Record<string, unknown>) => void;
+  resolve: (payload: Record<string, unknown>, bytes?: number) => void;
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
 }
@@ -40,6 +42,8 @@ export class SessionRpcForwarder {
     private readonly grants: GrantStore,
     private readonly now: () => number,
     private readonly sessionRpcTimeoutMs: number,
+    private readonly events?: GatewayEvents,
+    private readonly engineId?: string,
   ) {}
   public noteTimedOutRequest = (requestId: string) => {
     this.timedOutRequestIds.add(requestId);
@@ -64,7 +68,7 @@ export class SessionRpcForwarder {
     }
   };
 
-  public forwardToEngine = (envelope: Record<string, unknown>, closeOnTimeout: boolean): Promise<Record<string, unknown>> => {
+  public forwardToEngine = (envelope: Record<string, unknown>, closeOnTimeout: boolean, onResponseBytes?: (bytes: number) => void): Promise<Record<string, unknown>> => {
     const session = this.state.liveSession;
     if (!session || session.socket.readyState !== WebSocket.OPEN || session.closed) {
       return Promise.reject(new Error("no ready session"));
@@ -95,7 +99,7 @@ export class SessionRpcForwarder {
         // Stop forwarding; a mutation already past its commit boundary may finish.
         this.state.closeLiveSession(1011, "session rpc timeout");
       }, Math.max(1, Date.parse(envelope.deadlineAt as string) - this.now()));
-      this.pendingRpcs.set(requestId, { resolve, reject, timer });
+      this.pendingRpcs.set(requestId, { resolve: (reply, bytes = 0) => { onResponseBytes?.(bytes); resolve(reply); }, reject, timer });
       this.state.resetIdleTimer?.();
       try {
         const text = JSON.stringify(payload);
@@ -116,17 +120,29 @@ export class SessionRpcForwarder {
     });
   };
 
-  public executeRpc = async (body: unknown, receivedAt: number): Promise<EngineResult> => {
+  public executeRpc = async (body: unknown, receivedAt: number, caller?: CallerContext): Promise<EngineResult> => {
     // HTTP ingress limits received bytes; expanded internal envelopes use the
     // WebSocket bound in this.forwardToEngine so metadata does not shrink that limit.
     const session = this.state.liveSession;
+    const input = body && typeof body === "object" ? body as Record<string, unknown> : {};
+    const fields: GatewayEventFields = {
+      engineId: this.engineId, caller, sessionId: session?.sessionId,
+      requestId: typeof input.requestId === "string" ? input.requestId : undefined,
+      method: typeof input.method === "string" ? input.method : undefined,
+    };
+    const denied = (stage: "route" | "policy", code: string): void => {
+      this.events?.emit("rpc.denied", { ...fields, stage, code, outcome: "denied" });
+    };
     if (!session) {
+      denied("route", "SESSION_CLOSED");
       return { statusCode: 409, payload: { error: "no live session" } };
     }
     if (!session.ready) {
+      denied("route", "SESSION_CLOSED");
       return { statusCode: 409, payload: { error: "no ready session" } };
     }
     if (session.closed) {
+      denied("route", "SESSION_CLOSED");
       return { statusCode: 409, payload: { error: "session closed" } };
     }
 
@@ -144,6 +160,7 @@ export class SessionRpcForwarder {
     let invocation: ReturnType<typeof canonicalizeInvocation>;
     try {
       invocation = canonicalizeInvocation(envelope.method, envelope.params);
+      Object.assign(fields, auditInvocation(envelope.method, envelope.params));
     } catch {
       return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
     }
@@ -153,7 +170,10 @@ export class SessionRpcForwarder {
       if (!schema?.safeParse(invocation.params).success) return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
       if (invocation.method === "process.run" || invocation.method === "process.stop") {
         processKind = envelope.permission ? this.grants.matchesProcess(envelope.permission.grantId, session.sessionId, invocation.method, invocation.params) : undefined;
-        if (!processKind) return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };
+        if (!processKind) {
+          denied("policy", "PERMISSION_DENIED");
+          return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };
+        }
       }
     }
     try {
@@ -168,6 +188,7 @@ export class SessionRpcForwarder {
           !permission.success
           || !this.grants.matches(permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path)
         ) {
+          denied("policy", "PERMISSION_DENIED");
           return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };
         }
       }
@@ -179,6 +200,8 @@ export class SessionRpcForwarder {
     if (deadlineMs <= this.now()) {
       return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "DEADLINE_EXCEEDED" } } };
     }
+    let responseBytes = 0;
+    this.events?.emit("rpc.started", fields);
     try {
       const reply = await this.forwardToEngine({
         deadlineAt: isoDate(deadlineMs),
@@ -190,11 +213,17 @@ export class SessionRpcForwarder {
         method: envelope.method,
         params: envelope.params,
         ...(envelope.permission ? { permission: processKind ? { grantId: envelope.permission.grantId, kind: processKind } : { grantId: envelope.permission.grantId } } : {}),
-      }, deadlineMs === receivedAt + this.sessionRpcTimeoutMs);
+      }, deadlineMs === receivedAt + this.sessionRpcTimeoutMs, bytes => { responseBytes = bytes; });
+      const error = reply.error as { code?: string } | undefined;
+      if (invocation.method === "process.run" && reply.result && typeof reply.result === "object" && "processId" in reply.result && typeof reply.result.processId === "string") {
+        fields.processId = reply.result.processId;
+      }
+      this.events?.emit("rpc.finished", { ...fields, outcome: reply.type === "error" ? "error" : "ok", code: error?.code, latencyMs: this.now() - receivedAt, responseBytes });
       return { statusCode: 200, payload: reply };
     } catch (error) {
       const message = error instanceof Error ? error.message : "session rpc failed";
       const status = message === "no ready session" || message === "duplicate requestId" ? 409 : 503;
+      this.events?.emit("rpc.finished", { ...fields, outcome: "error", code: message === "session rpc timeout" ? "DEADLINE_EXCEEDED" : "SESSION_CLOSED", latencyMs: this.now() - receivedAt, responseBytes });
       return { statusCode: status, payload: { error: message } };
     }
   };

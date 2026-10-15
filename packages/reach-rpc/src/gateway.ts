@@ -1,3 +1,4 @@
+import { PayloadTooLargeError, readJsonBody, sendJson } from "./console-api/http.js";
 export * from "./gateway-policy.js";
 import { GatewayUpdater, updateAdmissionPaused, type UpdateConfig } from "./gateway-update.js";
 import { DEFAULT_HEARTBEAT_INTERVAL_SECONDS, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, SESSION_TOKEN_TTL_MS, MAX_HTTP_BODY_BYTES, MAX_WEBSOCKET_TEXT_BYTES, SESSION_LEASE_MS, SESSION_IDLE_MS, SESSION_RPC_TIMEOUT_MS, SESSION_CONNECTING_MS, SESSION_ENDPOINT_PATH } from "./gateway-policy.js";
@@ -14,6 +15,16 @@ export { normalizeWorkspacePath } from "./grants.js";
 import { WebSocket, WebSocketServer } from "ws";
 import { createMcpHttpHandler, type McpHttpOptions } from "./mcp/http.js";
 import type { EngineApi, EngineResult } from "./mcp/in-process.js";
+import { ConsoleStore } from "./console-api/store.js";
+import type { ConsoleConfig } from "./console-api/config.js";
+import { EngineRegistry, type EngineRuntime } from "./console-api/registry.js";
+import { controllerCaller, GatewayEvents, type CallerContext } from "./console-api/events.js";
+import { AuditWriter } from "./console-api/audit.js";
+import { ActivityLog } from "./console-api/activity.js";
+import { ConsoleAuth } from "./console-api/auth.js";
+import { ConsoleServer } from "./console-api/server.js";
+import { securityHeaders, serveConsole } from "./console-api/static.js";
+import { fileURLToPath } from "node:url";
 import {
   CLOSURE_AGENT_REQUESTED,
   CLOSURE_DISCONNECTED,
@@ -66,6 +77,9 @@ const grantRequestSchema = z.object({
 const sessionControlSchema = z.object({ sessionId: z.string().min(1).optional() });
 
 export interface GatewayOptions {
+  console?: ConsoleConfig;
+  events?: GatewayEvents;
+  consoleAssetsDir?: string;
   logger?: (message: string) => void;
   mcp?: McpHttpOptions;
   now?: () => number;
@@ -81,35 +95,6 @@ export interface GatewayOptions {
   updateFetch?: typeof fetch;
 }
 
-class PayloadTooLargeError extends Error {}
-
-async function readJsonBody(request: IncomingMessage): Promise<unknown> {
-  if (Number(request.headers["content-length"] ?? 0) > MAX_HTTP_BODY_BYTES) throw new PayloadTooLargeError();
-  const chunks: Buffer[] = [];
-  let size = 0;
-  for await (const chunk of request) {
-    const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
-    size += buffer.length;
-    if (size > MAX_HTTP_BODY_BYTES) throw new PayloadTooLargeError();
-    chunks.push(buffer);
-  }
-
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new Error("invalid JSON");
-  }
-}
-
-function sendJson(response: ServerResponse, statusCode: number, payload: unknown): void {
-  const body = JSON.stringify(payload);
-  response.writeHead(statusCode, {
-    "content-type": "application/json",
-    "content-length": Buffer.byteLength(body),
-  });
-  response.end(body);
-}
-
 function rejectUpgrade(socket: Duplex, status: "400 Bad Request" | "401 Unauthorized" = "401 Unauthorized"): void {
   socket.end("HTTP/1.1 " + status + "\r\nConnection: close\r\nContent-Length: 0\r\n\r\n", () => socket.destroy());
 }
@@ -118,7 +103,9 @@ function isoDate(epochMs: number): string {
   return new Date(epochMs).toISOString();
 }
 
-export function createGateway(options: GatewayOptions = {}): Server {
+export interface GatewayServer extends Server { readonly registry: EngineRegistry; readonly events?: GatewayEvents; readonly audit?: AuditWriter }
+
+export function createGateway(options: GatewayOptions = {}): GatewayServer {
   const authentication = options.authentication;
   if (options.engines !== undefined && !authentication) throw new Error("Multiple Engines require Gateway authentication");
   const engines = authentication ? [authentication, ...(options.engines ?? [])] : [];
@@ -126,39 +113,87 @@ export function createGateway(options: GatewayOptions = {}): Server {
     || new Set(engines.map((engine) => engine.engineToken)).size !== engines.length) {
     throw new Error("Engine ids and Engine tokens must be unique");
   }
-  const gateways = new Map<string, ReturnType<typeof createEngineGateway>>();
-  const defaultId = authentication?.engineId ?? "local-engine";
-  if (!authentication) gateways.set(defaultId, createEngineGateway(options));
   for (const engine of engines) {
-    gateways.set(engine.engineId, createEngineGateway({
-      ...options,
-      authentication: { ...engine, controllerToken: authentication!.controllerToken },
-    }, options.engines === undefined ? SESSION_ENDPOINT_PATH : `${SESSION_ENDPOINT_PATH}?engineId=${encodeURIComponent(engine.engineId)}`));
+    if (authentication!.controllerToken.length < 32 || engine.engineToken.length < 32
+      || authentication!.controllerToken === engine.engineToken || !engine.engineId.trim()) {
+      throw new Error("Gateway authentication requires distinct tokens of at least 32 characters and an engine id");
+    }
   }
-  const gateway = createServer();
-  const mcp = createMcpHttpHandler(new Map([...gateways].map(([id, engine]) => [id, engine.api])), authentication?.controllerToken, options.mcp, () => {
+  const defaultId = authentication?.engineId ?? "local-engine";
+  const events = options.events ?? (options.console ? new GatewayEvents(options.now, options.logger) : undefined);
+  let store: ConsoleStore | undefined;
+  if (options.console) {
+    try {
+      store = new ConsoleStore(options.console.dataDir);
+    } catch (error) {
+      throw new Error(`Cannot open console data directory ${options.console.dataDir}`, { cause: error });
+    }
+  }
+  const registry = new EngineRegistry((registration, verifyEngineToken) => createEngineGateway({
+    ...options,
+    events,
+    authentication: authentication ? { controllerToken: authentication.controllerToken, engineId: registration.id } : undefined,
+  }, verifyEngineToken,
+  registration.id === defaultId && options.engines === undefined ? SESSION_ENDPOINT_PATH : `${SESSION_ENDPOINT_PATH}?engineId=${encodeURIComponent(registration.id)}`,
+  (version, intervalSeconds, hardware) => {
+    registry.heartbeat(registration.id, version, hardware);
+    events?.emit("engine.heartbeat", {
+      engineId: registration.id, engineVersion: version, intervalSeconds,
+      caller: { type: "engine", label: registration.id, verified: false }, enrollmentStatus: registry.enrollmentStatus(registration.id),
+      hardware: registry.engines.get(registration.id)?.hardware,
+    });
+  }), store, Boolean(authentication), options.now, options.logger);
+  const gateways = registry.engines;
+  if (!authentication) registry.seed(defaultId, undefined);
+  for (const engine of engines) {
+    registry.seed(engine.engineId, engine.engineToken);
+  }
+  registry.retainSeeds(new Set(authentication ? engines.map((engine) => engine.engineId) : [defaultId]));
+  const audit = store && events ? new AuditWriter(store, events, options.logger) : undefined;
+  const activity = store && options.console ? new ActivityLog(store, () => {
+    const setting = store.db.prepare("SELECT value FROM settings WHERE key='retentionDays'").get();
+    return setting ? Number(setting.value) : options.console!.retentionDays;
+  }, options.now, options.logger) : undefined;
+  const auth = store && options.console && events ? new ConsoleAuth(store, options.console, events, options.now, options.logger) : undefined;
+  const gateway = Object.assign(createServer(), { registry, events, audit });
+  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events }, () => {
     const address = gateway.address();
     return typeof address === "object" && address !== null && ["127.0.0.1", "::1"].includes(address.address);
   });
+  const consoleServer = store && options.console && events && audit && activity && auth
+    ? new ConsoleServer(store, options.console, registry, events, audit, activity, auth, mcp, options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS, Boolean(options.update), options.now)
+    : undefined;
   const selectGateway = (request: IncomingMessage, url: URL): Server | undefined => {
     const selected = url.searchParams.get("engineId");
     if (url.pathname === "/heartbeat" && authentication) {
-      const provided = Buffer.from(request.headers.authorization ?? "");
-      const engine = engines.find(({ engineToken }) => {
-        const required = Buffer.from(`Bearer ${engineToken}`);
-        return provided.length === required.length && timingSafeEqual(provided, required);
-      });
-      if (!engine || (selected !== null && selected !== engine.engineId)) return undefined;
-      return gateways.get(engine.engineId)?.server;
+      const engine = registry.authenticate(bearerToken(request));
+      if (!engine || (selected !== null && selected !== engine.id)) return undefined;
+      return engine.server;
     }
     return gateways.get(selected ?? defaultId)?.server;
   };
   gateway.on("request", (request: IncomingMessage, response: ServerResponse) => {
+    const rawPath = (request.url ?? "").split("?")[0];
+    if (options.console && (rawPath === "/console" || rawPath.startsWith("/console/"))) {
+      if (rawPath === "/console") { securityHeaders(response); response.writeHead(302, { location: "/console/" }); response.end(); return; }
+      void serveConsole(request, response, options.consoleAssetsDir ?? fileURLToPath(new URL("./console", import.meta.url)));
+      return;
+    }
     const url = requestUrl(request);
     if (!url) {
       sendJson(response, 400, { error: "invalid request target" });
       return;
     }
+    if (url.pathname.startsWith("/api/console/")) {
+      // Console authentication records its own failures with the proxy-aware peer address.
+      securityHeaders(response);
+      if (!consoleServer) { sendJson(response, 404, { error: "not found" }); return; }
+      void consoleServer.handle(url, request, response);
+      return;
+    }
+    response.once("finish", () => {
+      if (response.statusCode === 401) events?.authFailed(url.pathname, request.socket.remoteAddress ?? "unknown");
+    });
     if (url.pathname === "/mcp") {
       void mcp.handle(request, response);
       return;
@@ -179,12 +214,18 @@ export function createGateway(options: GatewayOptions = {}): Server {
       return;
     }
     const target = selectGateway(request, url);
-    if (!target) return rejectUpgrade(socket);
+    if (!target) {
+      events?.authFailed(url.pathname, request.socket.remoteAddress ?? "unknown");
+      return rejectUpgrade(socket);
+    }
     target.emit("upgrade", request, socket, head);
   });
   gateway.on("close", () => {
     mcp.shutdown();
     for (const target of gateways.values()) target.server.emit("close");
+    audit?.close();
+    activity?.close();
+    store?.close();
   });
   if (options.update) {
     const updater = new GatewayUpdater(options.update,
@@ -197,12 +238,17 @@ export function createGateway(options: GatewayOptions = {}): Server {
 }
 
 /** One isolated state machine per Engine, owned by the listening Gateway. */
-function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_ENDPOINT_PATH): { server: Server; api: EngineApi } {
+function bearerToken(request: IncomingMessage): string {
+  const authorization = request.headers.authorization ?? "";
+  return authorization.startsWith("Bearer ") ? authorization.slice(7) : "";
+}
+
+type EngineGatewayOptions = Omit<GatewayOptions, "authentication"> & {
+  authentication?: { controllerToken: string; engineId: string };
+};
+
+function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (token: string) => boolean, sessionEndpoint = SESSION_ENDPOINT_PATH, onHeartbeat?: (version: string | undefined, intervalSeconds: number, hardware?: unknown) => void): EngineRuntime {
   const authentication = options.authentication;
-  if (authentication && (authentication.controllerToken.length < 32 || authentication.engineToken.length < 32
-    || authentication.controllerToken === authentication.engineToken || !authentication.engineId.trim())) {
-    throw new Error("Gateway authentication requires distinct tokens of at least 32 characters and an engine id");
-  }
   const heartbeatIntervalSeconds = options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS;
   if (!Number.isInteger(heartbeatIntervalSeconds) || heartbeatIntervalSeconds <= 0) {
     throw new Error("heartbeat interval must be a positive integer");
@@ -214,12 +260,15 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   const sessionIdleMs = options.sessionIdleMs ?? SESSION_IDLE_MS;
   const sessionRpcTimeoutMs = options.sessionRpcTimeoutMs ?? SESSION_RPC_TIMEOUT_MS;
   const sessionConnectingMs = options.sessionConnectingMs ?? SESSION_CONNECTING_MS;
-  const state = new EngineSessionState(now, logger, sessionLeaseMs, sessionEndpoint);
-  const openSession = (sessionId?: string): EngineResult => {
+  const engineId = authentication?.engineId ?? "local-engine";
+  const state = new EngineSessionState(now, logger, sessionLeaseMs, sessionEndpoint, status => {
+    options.events?.emit("session.state", { engineId, sessionId: status.sessionId, status: status.status, ownerLabel: state.ownerLabel, caller: state.ownerCaller, workspaces: status.workspaces, processWorkspaces: status.processWorkspaces });
+  });
+  const openSession = (sessionId?: string, caller?: CallerContext): EngineResult => {
     if (updateAdmissionPaused(options.update, now())) return { statusCode: 503, payload: { error: "update in progress" } };
-    return state.openSession(sessionId);
+    return state.openSession(sessionId, caller);
   };
-  const forwarder = new SessionRpcForwarder(state, grants, now, sessionRpcTimeoutMs);
+  const forwarder = new SessionRpcForwarder(state, grants, now, sessionRpcTimeoutMs, options.events, engineId);
   const sessions = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_TEXT_BYTES });
 
   const validateControlBinding = async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
@@ -244,10 +293,11 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
       return;
     }
     if (authentication) {
-      const expected = request.url === "/heartbeat" ? authentication.engineToken : authentication.controllerToken;
-      const provided = Buffer.from(request.headers.authorization ?? "");
-      const required = Buffer.from(`Bearer ${expected}`);
-      if (provided.length !== required.length || !timingSafeEqual(provided, required)) {
+      const provided = Buffer.from(bearerToken(request));
+      const required = Buffer.from(authentication.controllerToken);
+      const authorized = request.url === "/heartbeat" ? verifyEngineToken(bearerToken(request))
+        : provided.length === required.length && timingSafeEqual(provided, required);
+      if (!authorized) {
         sendJson(response, 401, { error: "unauthorized" });
         return;
       }
@@ -266,6 +316,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         }
         state.engineVersion = heartbeat.device.engineVersion;
         state.lastSeenAt = isoDate(now());
+        onHeartbeat?.(heartbeat.device.engineVersion, !state.sessionWanted || state.liveSession ? heartbeatIntervalSeconds : SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, heartbeat.device.hardware);
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
         return;
@@ -283,6 +334,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         sessionId: state.wantedSessionId ?? randomUUID(),
         leaseExpiresAt: now() + sessionLeaseMs,
       };
+      state.notify();
       sendJson(response, 200, {
         intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
         endpoint: sessionEndpoint,
@@ -301,7 +353,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-wanted payload" });
         return;
       }
-      const result = wanted ? openSession() : state.requestClose();
+      const result = wanted ? openSession(undefined, controllerCaller(request.headers["x-reach-client"])) : state.requestClose();
       sendJson(response, result.statusCode, result.payload);
       return;
     }
@@ -314,7 +366,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-open payload" });
         return;
       }
-      const result = openSession(intent.sessionId);
+      const result = openSession(intent.sessionId, controllerCaller(request.headers["x-reach-client"]));
       sendJson(response, result.statusCode, { ...result.payload, ...(result.statusCode === 200 ? { sessionId: state.wantedSessionId } : {}) });
       return;
     }
@@ -368,7 +420,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
 
     if (request.url === "/session/rpc") {
       try {
-        const result = await forwarder.executeRpc(await readJsonBody(request), receivedAt);
+        const result = await forwarder.executeRpc(await readJsonBody(request), receivedAt, controllerCaller(request.headers["x-reach-client"]));
         sendJson(response, result.statusCode, result.payload);
       } catch (error) {
         sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid rpc payload" });
@@ -390,6 +442,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
       || token !== state.pendingSession.token
       || state.liveSession
     ) {
+      options.events?.authFailed(SESSION_ENDPOINT_PATH, request.socket.remoteAddress ?? "unknown");
       rejectUpgrade(socket);
       return;
     }
@@ -404,6 +457,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
     let upgraded = false;
     const failHandshake = () => {
       if (upgraded || state.liveSession) return;
+      state.notify();
       logger("Reach session upgrade failed");
     };
     socket.once("close", failHandshake);
@@ -420,6 +474,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         closed: false,
         leaseExpiresAt: issued.leaseExpiresAt,
       };
+      state.notify();
       sessions.emit("connection", webSocket, request);
     });
   });
@@ -496,7 +551,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         if (message.type === "error" && (message.error?.code === "DEADLINE_EXCEEDED" || message.error?.code === "SESSION_CLOSED")) {
           forwarder.noteTimedOutRequest(requestId);
         }
-        pending.resolve(message as Record<string, unknown>);
+        pending.resolve(message as Record<string, unknown>, text.length);
         return;
       }
 
@@ -512,7 +567,10 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
           }
           session.ready = true;
           session.methods = ready.methods;
+          session.workspaces = ready.workspaces;
+          session.processWorkspaces = ready.processWorkspaces;
           state.engineVersion = ready.engineVersion;
+          state.notify();
           if (state.connectingTimer) {
             clearTimeout(state.connectingTimer);
             state.connectingTimer = undefined;
@@ -539,6 +597,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         session.closed = true;
         state.sessionWanted = false;
         state.lastClosureReason = reason;
+        state.notify();
         logger(`Reach session closed by engine: ${reason}`);
         if (state.leaseTimer) clearTimeout(state.leaseTimer);
         return;
@@ -549,6 +608,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
         session.closed = true;
         state.sessionWanted = false;
         state.lastClosureReason = CLOSURE_SESSION_COMPLETE;
+        state.notify();
         logger("Reach session job done");
         if (state.leaseTimer) clearTimeout(state.leaseTimer);
         if (state.idleTimer) clearTimeout(state.idleTimer);
@@ -584,6 +644,7 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
           }
         }
         state.liveSession = undefined;
+        state.notify();
       }
       forwarder.seenRequestIds.clear();
       forwarder.clearPendingRpcs("session closed");
@@ -602,8 +663,8 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
   const mismatch = (): EngineResult => ({ statusCode: 409, payload: { error: "session binding mismatch" } });
   const api: EngineApi = {
     status: state.sessionStatus,
-    open: (sessionId) => {
-      const result = openSession(sessionId);
+    open: (sessionId, caller) => {
+      const result = openSession(sessionId, caller);
       return { ...result, payload: { ...result.payload, ...(result.statusCode === 200 ? { sessionId: state.wantedSessionId } : {}) } };
     },
     renew: (sessionId) => binding(sessionId) ? state.renewSession() : mismatch(),
@@ -620,9 +681,18 @@ function createEngineGateway(options: GatewayOptions, sessionEndpoint = SESSION_
       try { return { statusCode: 200, payload: grants.issueProcess({ ...scope, sessionId }) }; }
       catch { return { statusCode: 400, payload: { error: "invalid process grant payload" } }; }
     },
-    rpc: (body) => forwarder.executeRpc(body, now()),
+    rpc: (body, caller) => forwarder.executeRpc(body, now(), caller),
   };
-  return { server: gateway, api };
+  const retire = (): void => {
+    state.requestClose();
+    grants.clear();
+    if (state.leaseTimer) clearTimeout(state.leaseTimer);
+    if (state.idleTimer) clearTimeout(state.idleTimer);
+    if (state.connectingTimer) clearTimeout(state.connectingTimer);
+    forwarder.clearPendingRpcs("engine removed");
+    state.closeLiveSession(1000, CLOSURE_AGENT_REQUESTED);
+  };
+  return { server: gateway, api, retire };
 }
 
 async function readOptionalJsonBody(request: IncomingMessage): Promise<unknown> {

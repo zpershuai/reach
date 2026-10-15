@@ -2,11 +2,13 @@ import { randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { EngineApi } from "./in-process.js";
 import { RemoteMcpServer } from "./remote-server.js";
+import type { GatewayEvents } from "../console-api/events.js";
 
 const VERSIONS = ["2025-03-26", "2025-06-18"];
 const MAX_BODY = 64 * 1024;
 
 export interface McpHttpOptions {
+  events?: GatewayEvents;
   allowedOrigins?: readonly string[];
   sessionIdleMs?: number;
   responseTimeoutMs?: number;
@@ -106,6 +108,8 @@ function bounded<T>(work: Promise<T>, deadline: number): Promise<T> {
 export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, controllerToken?: string, options: McpHttpOptions = {}, isLoopback: () => boolean = () => false): {
   handle(request: IncomingMessage, response: ServerResponse): Promise<void>;
   shutdown(): void;
+  disconnect(label: string): Promise<void>;
+  clients(): Array<{ label: string; activeSessions: number }>;
 } {
   const idleMs = options.sessionIdleMs ?? 300_000;
   const budgetMs = options.responseTimeoutMs ?? 25_000;
@@ -139,7 +143,8 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
     return task;
   }
 
-  function retire(session: HttpSession, deadline = Date.now() + budgetMs): Promise<void> {
+  function retire(session: HttpSession, deadline = Date.now() + budgetMs, reason: "delete" | "idle" | "shutdown" | "console" = "idle"): Promise<void> {
+    if (sessions.has(session.id)) options.events?.emit("client.disconnected", { caller: session.server.caller, reason });
     sessions.delete(session.id);
     retired.add(session);
     return scheduleCleanup(session, deadline);
@@ -194,7 +199,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       if (request.method === "GET") { response.setHeader("allow", "POST, DELETE"); json(response, 405); return; }
       if (request.method === "DELETE") {
         if (!session) throw new HttpError(400, "Mcp-Session-Id is required");
-        await bounded(retire(session, deadline), deadline);
+        await bounded(retire(session, deadline, "delete"), deadline);
         json(response, 200);
         return;
       }
@@ -231,10 +236,13 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         if (sessions.size + retired.size >= maxSessions) throw new HttpError(503, "MCP session limit reached");
         const negotiated = VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : VERSIONS.at(-1)!;
         const output: Record<string, unknown>[] = [];
-        session = { id: randomUUID(), version: negotiated,
-          server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated), messages: output,
+        const id = randomUUID();
+        const clientLabel = `${client.name} ${client.version}`.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64).trim() || "MCP client";
+        session = { id, version: negotiated,
+          server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated, clientLabel, id), messages: output,
           tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now() };
         sessions.set(session.id, session);
+        options.events?.emit("client.connected", { caller: session.server.caller });
         response.setHeader("mcp-session-id", session.id);
       } else {
         if (requests.some((message) => message.method === "initialize")) throw new HttpError(400, "MCP session is already initialized");
@@ -267,10 +275,19 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
 
   return {
     handle,
+    disconnect: async label => {
+      await Promise.all([...sessions.values()].filter(session => session.server.caller.label === label)
+        .map(session => retire(session, Date.now() + budgetMs, "console")));
+    },
+    clients: () => {
+      const counts = new Map<string, number>();
+      for (const session of sessions.values()) counts.set(session.server.caller.label, (counts.get(session.server.caller.label) ?? 0) + 1);
+      return [...counts].map(([label, activeSessions]) => ({ label, activeSessions }));
+    },
     shutdown: () => {
       stopped = true;
       clearInterval(sweep);
-      for (const session of sessions.values()) void retire(session).catch(() => undefined);
+      for (const session of sessions.values()) void retire(session, Date.now() + budgetMs, "shutdown").catch(() => undefined);
       for (const session of retired) void scheduleCleanup(session, Date.now() + budgetMs).catch(() => undefined);
     },
   };

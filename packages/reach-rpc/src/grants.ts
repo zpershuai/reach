@@ -30,6 +30,11 @@ export class GrantStore {
 
   public constructor(private readonly now: () => number) {}
 
+  public clear(): void {
+    this.grants.clear();
+    this.processGrants.clear();
+  }
+
   public issue(workspace: string, path: string, methods: readonly MutationMethod[]): { grantId: string; expiresAt: string } {
     const normalizedPath = normalizeWorkspacePath(path);
     if (!normalizedPath) throw new Error("invalid grant path");

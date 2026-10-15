@@ -54,6 +54,7 @@ export const sessionReadySchema = z.object({
   engineId: nonEmptyString,
   engineVersion: nonEmptyString.optional(),
   workspaces: z.array(nonEmptyString).min(1),
+  processWorkspaces: z.array(nonEmptyString).optional(),
   methods: z.array(nonEmptyString).min(1),
 });
 

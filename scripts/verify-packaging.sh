@@ -24,13 +24,24 @@ python3 scripts/release-metadata.py checksums "$work" engine-linux-x64-musl gate
 container="$(docker run -d --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   -e REACH_CONTROLLER_TOKEN="$(printf 'c%.0s' {1..48})" \
   -e REACH_ENGINE_TOKEN="$(printf 'e%.0s' {1..48})" -e REACH_ENGINE_ID=fixture \
+  -e REACH_DATA_DIR=/var/lib/reach -e REACH_PUBLIC_ORIGIN=http://127.0.0.1:8787 \
+  --tmpfs /var/lib/reach:uid=1000,gid=1000,mode=700 \
   "$image")"
 docker exec "$container" node --input-type=module -e '
+  import { accessSync } from "node:fs";
+  accessSync("dist/console/index.html");
+  accessSync("dist/console-api/server.js");
   async function check() {
     for (let i = 0; i < 50; i++) {
       try {
         const response = await fetch("http://127.0.0.1:8787/healthz");
-        if (response.ok) return;
+        if (response.ok) {
+          const consolePage = await fetch("http://127.0.0.1:8787/console/");
+          if (!consolePage.ok || !(await consolePage.text()).includes("/console/assets/")) process.exit(1);
+          const identity = await fetch("http://127.0.0.1:8787/api/console/me");
+          if (!identity.ok || !(await identity.json()).setupRequired) process.exit(1);
+          return;
+        }
       } catch {}
       await new Promise(resolve => setTimeout(resolve, 100));
     }
