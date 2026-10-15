@@ -1,4 +1,4 @@
-import { useState, type FormEvent } from "react";
+import { useEffect, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { ActivityTable } from "./Activity";
 import { DeviceGlyph } from "./Glyph";
@@ -195,6 +195,13 @@ export function ClientsView({
           They attribute activity; they do not prove identity or grant access.
         </div>
       </section>
+      <AuthorizedApps
+        sensitive={sensitive}
+        revision={
+          snapshot.activity.find((row) => row.action?.startsWith("oauth."))
+            ?.id ?? 0
+        }
+      />
       {confirm && (
         <Modal title={`Disconnect ${confirm}?`}>
           <p>
@@ -224,6 +231,113 @@ export function ClientsView({
         </Modal>
       )}
     </>
+  );
+}
+
+interface OAuthApp {
+  id: string;
+  name: string;
+  redirectUris: string[];
+  approvedAt: number;
+  lastUsedAt: number | null;
+  activeTokens: number;
+}
+
+function AuthorizedApps({
+  sensitive,
+  revision,
+}: {
+  sensitive: SensitiveAction;
+  /** Id of the latest oauth.* admin action; approvals in other tabs reload the list. */
+  revision: number;
+}) {
+  const [apps, setApps] = useState<OAuthApp[] | undefined>();
+  const [confirm, setConfirm] = useState<OAuthApp | undefined>();
+  const load = () =>
+    api<{ clients: OAuthApp[] }>("oauth")
+      .then((data) => setApps(data.clients))
+      .catch(() => setApps([]));
+  useEffect(() => {
+    void load();
+  }, [revision]);
+  return (
+    <section className="panel">
+      <div className="panel-head">
+        <h2>Authorized apps</h2>
+        <span className="pill">OAuth · approved by you</span>
+      </div>
+      <div className="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>App</th>
+              <th>Returns to</th>
+              <th>Approved</th>
+              <th>Last used</th>
+              <th className="num">Live tokens</th>
+              <th />
+            </tr>
+          </thead>
+          <tbody>
+            {apps?.map((app) => (
+              <tr key={app.id}>
+                <td>
+                  <strong>{app.name}</strong>
+                </td>
+                <td className="mono">
+                  {app.redirectUris.map((uri) => new URL(uri).host).join(", ")}
+                </td>
+                <td>{formatAgo(app.approvedAt)}</td>
+                <td>{app.lastUsedAt ? formatAgo(app.lastUsedAt) : "—"}</td>
+                <td className="num">{app.activeTokens}</td>
+                <td>
+                  <button className="btn small" onClick={() => setConfirm(app)}>
+                    Revoke
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+        {apps && !apps.length && (
+          <div className="empty">No apps authorized through OAuth.</div>
+        )}
+      </div>
+      <div className="note">
+        Remote MCP clients such as ChatGPT connectors sign in through
+        /oauth/authorize. Each approval needs your password and authentication
+        code.
+      </div>
+      {confirm && (
+        <Modal title={`Revoke ${confirm.name}?`}>
+          <p>
+            Its tokens stop working at once. It must be approved again before it
+            can reconnect.
+          </p>
+          <div className="actions">
+            <button className="btn" onClick={() => setConfirm(undefined)}>
+              Cancel
+            </button>
+            <button
+              className="btn danger"
+              onClick={() =>
+                void sensitive(async () => {
+                  await api(
+                    `oauth/${encodeURIComponent(confirm.id)}`,
+                    undefined,
+                    "DELETE",
+                  );
+                  await load();
+                  setConfirm(undefined);
+                })
+              }
+            >
+              Revoke access
+            </button>
+          </div>
+        </Modal>
+      )}
+    </section>
   );
 }
 

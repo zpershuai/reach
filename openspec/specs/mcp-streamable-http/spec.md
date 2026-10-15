@@ -5,7 +5,7 @@ Provides hosted, authenticated MCP access to registered Reach Engines.
 ## Requirements
 
 ### Requirement: Authenticated Streamable HTTP transport
-The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method with the Controller token, reject unapproved supplied Origins, and permit unauthenticated use only on loopback.
+The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method with the Controller token or an OAuth access token (see mcp-oauth), reject unapproved supplied Origins, and permit unauthenticated use only on loopback.
 
 #### Scenario: Required authenticated streamable http transport behavior
 - **WHEN** a client uses an HTTP MCP session

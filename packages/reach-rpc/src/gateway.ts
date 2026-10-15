@@ -23,6 +23,7 @@ import { AuditWriter } from "./console-api/audit.js";
 import { ActivityLog } from "./console-api/activity.js";
 import { ConsoleAuth } from "./console-api/auth.js";
 import { ConsoleServer } from "./console-api/server.js";
+import { OAuthServer } from "./console-api/oauth.js";
 import { securityHeaders, serveConsole } from "./console-api/static.js";
 import { fileURLToPath } from "node:url";
 import {
@@ -156,12 +157,13 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
   }, options.now, options.logger) : undefined;
   const auth = store && options.console && events ? new ConsoleAuth(store, options.console, events, options.now, options.logger) : undefined;
   const gateway = Object.assign(createServer(), { registry, events, audit });
-  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events }, () => {
+  const oauth = store && options.console && auth ? new OAuthServer(store, options.console, auth, options.now) : undefined;
+  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events, oauth }, () => {
     const address = gateway.address();
     return typeof address === "object" && address !== null && ["127.0.0.1", "::1"].includes(address.address);
   });
   const consoleServer = store && options.console && events && audit && activity && auth
-    ? new ConsoleServer(store, options.console, registry, events, audit, activity, auth, mcp, options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS, Boolean(options.update), options.now)
+    ? new ConsoleServer(store, options.console, registry, events, audit, activity, auth, mcp, oauth!, options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS, Boolean(options.update), options.now)
     : undefined;
   const selectGateway = (request: IncomingMessage, url: URL): Server | undefined => {
     const selected = url.searchParams.get("engineId");
@@ -189,6 +191,11 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
       securityHeaders(response);
       if (!consoleServer) { sendJson(response, 404, { error: "not found" }); return; }
       void consoleServer.handle(url, request, response);
+      return;
+    }
+    if (oauth && (url.pathname.startsWith("/.well-known/oauth-") || url.pathname.startsWith("/oauth/"))) {
+      // The approval page records its own failures with the proxy-aware peer address.
+      void oauth.handle(url, request, response);
       return;
     }
     response.once("finish", () => {

@@ -64,6 +64,26 @@ const migrations = [
   CREATE INDEX activity_engine_ts ON activity(engine_id, ts);
   CREATE INDEX activity_client_ts ON activity(client_label, ts);
   CREATE TABLE settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);`,
+  `CREATE TABLE oauth_clients (
+    id TEXT PRIMARY KEY,
+    name TEXT NOT NULL,
+    redirect_uris TEXT NOT NULL,
+    auth_method TEXT NOT NULL CHECK (auth_method IN ('none', 'client_secret_post', 'client_secret_basic')),
+    secret_digest TEXT,
+    created_at INTEGER NOT NULL,
+    approved_at INTEGER,
+    last_used_at INTEGER
+  );
+  CREATE TABLE oauth_tokens (
+    digest TEXT PRIMARY KEY,
+    kind TEXT NOT NULL CHECK (kind IN ('access', 'refresh')),
+    client_id TEXT NOT NULL REFERENCES oauth_clients(id) ON DELETE CASCADE,
+    family TEXT NOT NULL,
+    expires_at INTEGER NOT NULL,
+    used_at INTEGER
+  );
+  CREATE INDEX oauth_tokens_family ON oauth_tokens(family);
+  CREATE INDEX oauth_tokens_client ON oauth_tokens(client_id);`,
 ];
 
 /** Owns the database connection; callers close it after draining audit writes. */

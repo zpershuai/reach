@@ -12,6 +12,7 @@ import { InvalidJsonError, readJsonBody, PayloadTooLargeError, sendJson } from "
 import { EngineRegistry, RegistryError, deviceKinds, type RegisteredEngine } from "./registry.js";
 import type { ConsoleStore } from "./store.js";
 import { serveEvents } from "./sse.js";
+import type { OAuthServer } from "./oauth.js";
 
 const name = z.string().trim().min(1).max(64).regex(/^[^\x00-\x1f\x7f]+$/);
 const override = z.object({ kind: z.enum(deviceKinds), model: z.string().max(64).regex(/^[^\x00-\x1f\x7f]*$/) }).strict();
@@ -41,6 +42,7 @@ export class ConsoleServer {
     private readonly registry: EngineRegistry, private readonly events: GatewayEvents,
     private readonly audit: AuditWriter, private readonly activity: ActivityLog,
     private readonly auth: ConsoleAuth, private readonly mcp: ReturnType<typeof createMcpHttpHandler>,
+    private readonly oauth: OAuthServer,
     private readonly heartbeatInterval: number, private readonly updateEnabled: boolean,
     private readonly now = Date.now,
   ) {}
@@ -97,7 +99,7 @@ export class ConsoleServer {
     try {
       const mutation = !["GET", "HEAD"].includes(request.method ?? "");
       const recent = request.method === "DELETE" && path.startsWith("engines/")
-        || request.method === "POST" && (path === "engines" || /^engines\/[^/]+\/rotate$/.test(path) || /^clients\/[^/]+\/disconnect$/.test(path));
+        || request.method === "POST" && (path === "engines" || /^engines\/[^/]+\/rotate$/.test(path) || /^clients\/[^/]+\/disconnect$/.test(path)) || request.method === "DELETE" && path.startsWith("oauth/");
       this.auth.require(request, mutation, recent);
       const method = request.method;
       if (method === "GET" && path === "events") { serveEvents(this.events, request, response, () => Boolean(this.auth.session(request))); return; }
@@ -139,6 +141,13 @@ export class ConsoleServer {
       if (method === "POST" && disconnect) {
         const label = decodeURIComponent(disconnect[1]);
         await this.mcp.disconnect(label); this.auth.action(`client.disconnect:${label}`); sendJson(response, 200, { disconnected: label }); return;
+      }
+      if (method === "GET" && path === "oauth") { sendJson(response, 200, { clients: this.oauth.clients() }); return; }
+      const oauthClient = /^oauth\/([^/]+)$/.exec(path);
+      if (method === "DELETE" && oauthClient) {
+        const id = decodeURIComponent(oauthClient[1]);
+        if (!this.oauth.revoke(id)) { sendJson(response, 404, { error: "Unknown OAuth application" }); return; }
+        this.auth.action(`oauth.revoke:${id}`); sendJson(response, 200, { revoked: id }); return;
       }
       if (method === "GET" && path === "settings") { sendJson(response, 200, this.settings()); return; }
       if (method === "PATCH" && path === "settings") {

@@ -177,6 +177,20 @@ export class ConsoleAuth {
     sendJson(response, 200, { authenticated: true, admin: { id: 1 }, csrfToken, ...(recoveryCodes ? { recoveryCodes } : {}) });
   }
 
+  /** Verifies password and second factor for a non-console flow, sharing sign-in rate limits and audit. */
+  async verifyOwner(request: IncomingMessage, route: string, password: unknown, code: unknown): Promise<boolean> {
+    const peer = this.peers.resolve(request);
+    this.limiter.check(peer);
+    const admin = this.store.db.prepare("SELECT password_hash FROM admin WHERE id=1").get();
+    const ok = Boolean(admin) && typeof password === "string" && password.length <= 1024 && await verifyPassword(password, String(admin!.password_hash))
+      && typeof code === "string" && this.credentials.acceptFactor(code.trim().replace(/\s+/g, "").toUpperCase(), this.now());
+    if (!ok) {
+      this.limiter.failed(peer);
+      this.events.authFailed(route, peer);
+    }
+    return ok;
+  }
+
   action(action: string): void {
     this.events.emit("admin.action", { caller: { type: "console", label: "Administrator", verified: false }, action, outcome: "ok" });
   }

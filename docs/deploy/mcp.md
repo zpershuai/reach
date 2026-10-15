@@ -38,7 +38,26 @@ HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`device_stat
 
 64 KiB 按收到的 HTTP 请求体计算，Gateway 添加的内部会话、权限和截止时间字段不会减少这份额度。读取请求体、排队和正在执行的请求共同计入每会话请求上限；读取请求体期间不会触发空闲过期，但仍受响应预算约束。
 
-所有方法都检查 Controller token；无认证只允许回环监听。默认拒绝带有 `Origin` 的请求，无该头的客户端可正常连接。接入时必须在实际宿主核对该请求头；若发送，在 Gateway 配置 `REACH_MCP_ALLOWED_ORIGINS` 为观察到并批准的完整 Origin，多个值用逗号分隔；若不发送，保留空配置。不要使用通配符或关闭检查，核对时不要记录 Authorization。HTTP 参数见 [configuration.md](configuration.md)，完整验证见 [verification.md](verification.md)。以下方式 A–C 专用于 stdio。
+所有方法都检查 Controller token 或 OAuth access token（见下节）；无认证只允许回环监听。默认拒绝带有 `Origin` 的请求，无该头的客户端可正常连接。接入时必须在实际宿主核对该请求头；若发送，在 Gateway 配置 `REACH_MCP_ALLOWED_ORIGINS` 为观察到并批准的完整 Origin，多个值用逗号分隔；若不发送，保留空配置。不要使用通配符或关闭检查，核对时不要记录 Authorization。HTTP 参数见 [configuration.md](configuration.md)，完整验证见 [verification.md](verification.md)。以下方式 A–C 专用于 stdio。
+
+## ChatGPT 等 OAuth 客户端（remote HTTP）
+
+ChatGPT 自定义连接器（Developer mode / Apps）不能填写静态 `Authorization` 头，只支持“无认证”或 OAuth。启用控制台（`REACH_DATA_DIR` + HTTPS `REACH_PUBLIC_ORIGIN`）并完成管理员设置后，Gateway 自动作为 MCP 授权服务器，Controller token 仍可同时使用：
+
+- 未认证的 `/mcp` 请求返回 401 和 `WWW-Authenticate: Bearer resource_metadata="<origin>/.well-known/oauth-protected-resource/mcp"`。
+- 元数据：`/.well-known/oauth-protected-resource`（RFC 9728）、`/.well-known/oauth-authorization-server`（RFC 8414）。
+- 动态客户端注册 `POST /oauth/register`（RFC 7591）；回调地址必须是 HTTPS，或回环地址的 HTTP。
+- 授权码 + PKCE（仅 `S256`），`GET /oauth/authorize` 显示批准页；`POST /oauth/token` 发放 1 小时 access token 和 30 天轮换 refresh token；`POST /oauth/revoke`（RFC 7009）。
+
+注意：ChatGPT 使用的是浏览器授权码流程，不是 RFC 8628 设备码流程。
+
+接入步骤：
+
+1. 在 ChatGPT 中新建连接器，MCP 服务器 URL 填 `https://reach.example.com/mcp`，认证方式选 **OAuth**，客户端 ID/密钥留空（由动态注册生成）。
+2. ChatGPT 打开 Gateway 的批准页，显示应用名称和回调域名。输入管理员密码和当前 TOTP 验证码（或一次性恢复码）后点 **Approve**；**Deny** 返回 `access_denied`。每个 TOTP 码只能用一次，刚登录过控制台时请等待下一个验证码。
+3. 之后 ChatGPT 自动用 refresh token 续期。控制台“Clients → Authorized apps”列出已批准的应用，**Revoke** 立即删除其全部令牌（需近期重新验证密码）。
+
+批准页与控制台登录共享失败限流和审计；批准、撤销分别记录为 `oauth.authorize:<name>`、`oauth.revoke:<id>`。令牌仅以 SHA-256 摘要存于 `reach.db`。匿名注册按客户端地址限流（每小时 20 次）；未批准的注册闲置 1 小时后过期，最多保留 256 个，满额时拒绝新注册而不淘汰正在批准的记录。批准页的待处理请求由 Gateway 签名并随表单提交，不占服务端容量，10 分钟后失效。每个 MCP 会话绑定创建它的身份（Controller token 或某个 OAuth 客户端），换用其他凭证访问该会话返回 404；同一客户端刷新令牌后会话仍可继续使用。若 ChatGPT 访问 `/mcp` 时带有 `Origin`，仍需按下文配置 `REACH_MCP_ALLOWED_ORIGINS`。反向代理需将 `/.well-known/oauth-*` 与 `/oauth/*` 转发到 Gateway（仓库的 Caddy 配置已整站转发）。
 
 ## 方式 A：使用已安装的产物
 

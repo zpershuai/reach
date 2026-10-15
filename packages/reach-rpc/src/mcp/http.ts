@@ -14,10 +14,14 @@ export interface McpHttpOptions {
   responseTimeoutMs?: number;
   maxSessions?: number;
   maxQueue?: number;
+  /** Accepts OAuth access tokens alongside the Controller token. */
+  oauth?: { verify(authorization: string | undefined): { id: string } | undefined; challenge(invalidToken: boolean): string };
 }
 
 interface HttpSession {
   id: string;
+  /** Who created the session: "controller", "oauth:<client id>" or "loopback"; later requests must match. */
+  principal: string;
   version: string;
   server: RemoteMcpServer;
   messages: Record<string, unknown>[];
@@ -179,16 +183,25 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
 
     try {
       if (stopped) throw new HttpError(503, "Gateway is shutting down");
-      if (controllerToken) {
-        const actual = Buffer.from(request.headers.authorization ?? "");
-        const expected = Buffer.from(`Bearer ${controllerToken}`);
-        if (actual.length !== expected.length || !timingSafeEqual(actual, expected)) throw new HttpError(401, "unauthorized");
-      } else if (!isLoopback()) throw new HttpError(401, "MCP requires authentication on non-loopback listeners");
+      const authorization = request.headers.authorization;
+      const actual = Buffer.from(authorization ?? "");
+      const expected = controllerToken ? Buffer.from(`Bearer ${controllerToken}`) : undefined;
+      const controller = expected !== undefined && actual.length === expected.length && timingSafeEqual(actual, expected);
+      const oauthClient = controller ? undefined : options.oauth?.verify(authorization);
+      if (!controller && !oauthClient && (controllerToken || !isLoopback())) {
+        // The challenge lets OAuth clients such as ChatGPT discover the authorization server.
+        if (options.oauth) response.setHeader("www-authenticate", options.oauth.challenge(authorization !== undefined));
+        throw new HttpError(401, controllerToken ? "unauthorized" : "MCP requires authentication on non-loopback listeners");
+      }
+      // Refreshed OAuth tokens keep the client id, so a session survives token rotation but not another client.
+      const principal = controller ? "controller" : oauthClient ? `oauth:${oauthClient.id}` : "loopback";
       const origin = request.headers.origin;
       if (origin !== undefined && !options.allowedOrigins?.includes(origin)) throw new HttpError(403, "Origin is not allowed");
       if (!["POST", "GET", "DELETE"].includes(request.method ?? "")) { response.setHeader("allow", "POST, DELETE"); json(response, 405); return; }
       const sessionId = request.headers["mcp-session-id"];
       let session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
+      // Another principal's session is reported as unknown so its existence is not revealed.
+      if (session && session.principal !== principal) session = undefined;
       if (session && !session.queued && !session.reading && Date.now() - session.lastUsed >= idleMs) {
         void retire(session).catch(() => undefined);
         session = undefined;
@@ -238,7 +251,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         const output: Record<string, unknown>[] = [];
         const id = randomUUID();
         const clientLabel = `${client.name} ${client.version}`.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64).trim() || "MCP client";
-        session = { id, version: negotiated,
+        session = { id, principal, version: negotiated,
           server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated, clientLabel, id), messages: output,
           tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now() };
         sessions.set(session.id, session);
