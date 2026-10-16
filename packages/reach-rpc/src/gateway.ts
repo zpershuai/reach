@@ -227,6 +227,12 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     }
     target.emit("upgrade", request, socket, head);
   });
+  const closeGateway = gateway.close.bind(gateway);
+  gateway.close = (callback) => {
+    // Notification streams must end before Node can finish closing the listener.
+    mcp.shutdown();
+    return closeGateway(callback);
+  };
   gateway.on("close", () => {
     mcp.shutdown();
     for (const target of gateways.values()) target.server.emit("close");

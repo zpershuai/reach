@@ -9,7 +9,7 @@ The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method 
 
 #### Scenario: Required authenticated streamable http transport behavior
 - **WHEN** a client uses an HTTP MCP session
-- **THEN** It SHALL negotiate MCP 2025-03-26 or 2025-06-18, validate subsequent protocol headers, acknowledge notifications with empty 202, return GET 405, and support March batches after initialization.
+- **THEN** It SHALL negotiate MCP 2025-03-26 or 2025-06-18, validate subsequent protocol headers, acknowledge notifications with empty 202, support GET notification streams, and support March batches after initialization.
 - **AND** Received HTTP bodies MUST be bounded to 64 KiB; internal RPC metadata MUST NOT reduce this allowance, while forwarded WebSocket envelopes remain bounded.
 
 #### Scenario: Missing credentials
@@ -19,6 +19,26 @@ The Gateway SHALL serve `/mcp` before Engine routing, authenticate every method 
 #### Scenario: Session lifecycle
 - **WHEN** a client initializes successfully
 - **THEN** it receives a secure Mcp-Session-Id; later missing ids receive 400 and unknown or expired ids receive 404
+
+### Requirement: Tool list change notifications
+The Gateway SHALL advertise `capabilities.tools.listChanged: true` and offer an authenticated SSE notification stream through GET `/mcp`. POST requests SHALL continue returning JSON. The stream MUST enforce the same Origin, protocol-version and session-principal checks as other MCP requests and require an Accept header containing `text/event-stream`.
+
+#### Scenario: Subscribe or reconnect
+- **WHEN** an initialized MCP client opens or reopens its notification stream
+- **THEN** it receives `notifications/tools/list_changed` and can fetch the current tool definitions through `tools/list`
+- **AND** a stream opened before `notifications/initialized` waits for that notification before sending its tool-list invalidation
+
+#### Scenario: Catalog invalidation
+- **WHEN** the server signals a change to its tool catalog
+- **THEN** each subscribed MCP session receives a tool-list change notification on its own stream
+- **AND** invalidations without a stream coalesce until reconnection; ordinary tool calls and Engine heartbeats do not generate invalidations
+
+#### Scenario: Stream bounds and lifecycle
+- **WHEN** a client replaces or disconnects its notification stream
+- **THEN** only one stream remains for that MCP session and stream disconnection alone does not retire the MCP session or close Engine ownership
+- **AND** slow-reader buffering is bounded to 1 MiB and keepalives do not extend the MCP idle TTL
+- **AND** retirement and Gateway closure end the stream; OAuth expiration or revocation closes it by the next 15-second authorization check
+- **AND** the stream carries no POST responses or console audit events and does not promise event replay
 
 ### Requirement: Bounded owned sessions
 HTTP sessions SHALL serialize work with bounded queues and expire after configurable inactivity. Engine cleanup on DELETE, expiry, or shutdown SHALL affect only owned sessions; OAuth ownership MAY span multiple HTTP MCP sessions as defined below.

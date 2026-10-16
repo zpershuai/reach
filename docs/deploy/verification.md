@@ -61,7 +61,7 @@ node scripts/verify-mcp-remote.mjs "$HOME/.config/reach/mcp.json" .reach/deploym
 node scripts/verify-mcp-http.mjs .reach/deployment.json
 ```
 
-脚本检查无 token 返回 401、初始化 session id、通知空 202、GET 405、静态 underscore 工具、注册设备、非阻塞连接及 readiness 轮询、竞争会话 `ENGINE_BUSY`、真实文件创建/读取/编辑、过期 revision 冲突，以及 DELETE 后 Engine 状态 `none`、旧 MCP id 返回 404。每个 HTTP 请求不超过 30 秒；设备唤醒轮询总预算 150 秒，不会重复写入。
+脚本检查无 token 返回 401、初始化 session id、通知空 202、`listChanged: true` 与 GET SSE 的 `notifications/tools/list_changed`、静态 underscore 工具、注册设备、非阻塞连接及 readiness 轮询、竞争会话 `ENGINE_BUSY`、真实文件创建/读取/编辑、过期 revision 冲突，以及 DELETE 后 Engine 状态 `none`、旧 MCP id 返回 404。每个 HTTP 请求不超过 30 秒；设备唤醒轮询总预算 150 秒，不会重复写入。
 
 若实际客户端发送 Origin，在私有部署 JSON 加入 `"mcpOrigin": "https://client.example.com"`（替换为实际观察值），脚本会在 MCP 请求中携带该头。Gateway 的 `REACH_MCP_ALLOWED_ORIGINS` 必须包含它，否则初始化返回 403 并提示配置方法。未配置 `mcpOrigin` 时不发送该头，保留服务端默认防护。404 通常表示线上尚未部署 `/mcp`，应更新 Gateway 后重试。
 

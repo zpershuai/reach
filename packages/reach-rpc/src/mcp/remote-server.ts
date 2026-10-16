@@ -59,7 +59,7 @@ export class RemoteMcpServer {
     private readonly clients: OwnedClients = new Map()) {
     this.caller = { type: "mcp-http", label: clientLabel, verified: false, mcpSessionId };
     this.protocol = new McpProtocol(send, () => this.listTools(), params => this.callTool(params), undefined, {
-      protocolVersion, listChanged: false, http: true,
+      protocolVersion, listChanged: true, http: true,
       instructionsPrefix: "Use list_devices, then list_workspaces with deviceId to discover workspace names before file or process operations. If connecting, poll device_status after retryAfterMs, then call list_workspaces again. Use workspaces for file operations and processWorkspaces for process execution. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Use process_status with the same launchId and owned session after an uncertain launch. Close owned sessions when finished. ",
     });
   }

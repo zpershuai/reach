@@ -32,6 +32,7 @@ async function connect() {
     : "MCP initialize must succeed (404 means the deployed Gateway lacks /mcp)");
   const initialized = await response.json();
   assert.equal(initialized.result.serverInfo.name, "reach-mcp");
+  assert.equal(initialized.result.capabilities.tools.listChanged, true);
   const id = response.headers.get("mcp-session-id");
   assert.ok(id, "Initialize must return Mcp-Session-Id");
   const sessionHeaders = { ...headers, "mcp-session-id": id, "mcp-protocol-version": initialized.result.protocolVersion };
@@ -59,14 +60,27 @@ const client = await connect();
 const results = [];
 const probe = `deployment-tests/${randomUUID()}.txt`;
 try {
-  assert.equal((await fetchMcp("GET", undefined, client.sessionHeaders)).status, 405);
+  const stream = await fetchMcp("GET", undefined, client.sessionHeaders);
+  assert.equal(stream.status, 200);
+  assert.equal(stream.headers.get("content-type"), "text/event-stream");
+  const reader = stream.body.getReader();
+  try {
+    let text = "";
+    while (!text.includes("\n\n")) {
+      const chunk = await reader.read();
+      assert.equal(chunk.done, false, "MCP notification stream ended early");
+      text += new TextDecoder().decode(chunk.value);
+    }
+    const data = text.split("\n").find(line => line.startsWith("data: "));
+    assert.deepEqual(JSON.parse(data.slice(6)), { jsonrpc: "2.0", method: "notifications/tools/list_changed" });
+  } finally { await reader.cancel(); }
   const tools = (await client.request("tools/list", {})).tools;
   for (const tool of tools) {
     assert.match(tool.name, /^[a-zA-Z0-9_-]{1,64}$/);
     if (tool.name.startsWith("fs_") || tool.name === "session_close") assert.ok(tool.inputSchema.required.includes("deviceId"));
   }
   assert.ok((await client.tool("list_devices")).devices.some((device) => device.id === deviceId));
-  results.push("auth, initialize, notification ack, static tools and registered devices");
+  results.push("auth, initialize, notification ack, listChanged SSE, static tools and registered devices");
   const started = Date.now();
   await client.tool("list_workspaces");
   assert.ok(Date.now() - started < 30_000, "Cold-start call must fit one HTTP response budget");

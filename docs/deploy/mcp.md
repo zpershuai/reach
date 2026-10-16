@@ -34,7 +34,11 @@ HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`list_worksp
 
 `session_close` 不会关闭其他调用者持有的 Engine；当前 MCP 会话没有持有该设备而设备仍被占用时，返回 `ENGINE_BUSY`。会话退役后立即安排清理，读取请求体期间的 POST 和仍在排队的请求不得再启动工具，返回 404；已经执行的操作结束后再清理，超时不表示写入已取消。
 
-初始化返回 `Mcp-Session-Id`，后续请求需携带它；丢失返回 400，未知或过期返回 404，客户端需重新初始化。支持 MCP `2025-03-26` 与 `2025-06-18`，后续 `MCP-Protocol-Version` 必须匹配协商版本。通知返回空 202；GET 返回 405，当前不提供 SSE。静态 HTTP 列表不发送工具变化通知；stdio 的动态模式不受影响。
+初始化返回 `Mcp-Session-Id`，后续请求需携带它；丢失返回 400，未知或过期返回 404，客户端需重新初始化。支持 MCP `2025-03-26` 与 `2025-06-18`，后续 `MCP-Protocol-Version` 必须匹配协商版本。客户端通知返回空 202，POST 请求继续返回 JSON。
+
+Gateway 声明 `capabilities.tools.listChanged: true`。客户端可使用同一 `/mcp` URL 发起 GET，携带认证、会话与协议头，并声明 `Accept: text/event-stream`，接收 `notifications/tools/list_changed`。每个会话最多保留一条通知流，新 GET 替换旧流；断开通知流不会关闭 Engine 会话。首次连接或重连通知流后，Gateway 在收到 `notifications/initialized` 后发送一次工具列表失效通知，客户端应重新请求 `tools/list`。当前 HTTP 工具集合固定，不会因心跳、选中设备或每次工具调用而反复通知；服务端工具目录变更时可通过通知入口通知已连接客户端。
+
+通知流每 15 秒发送保活，缓冲超过 1 MiB 时断开慢读连接；保活不会延长 MCP 空闲 TTL。DELETE、空闲退役、控制台断开及 Gateway 关闭都会结束通知流。OAuth 令牌失效或撤销后，通知流最迟在下一次保活检查时关闭，客户端可用有效令牌重连。该流只承载服务端通知，不转发控制台 SSE 或 POST 的 RPC 结果，不提供事件重放。ChatGPT 等宿主可能仍保留对话的工具定义；更新后应在连接详情中刷新工具元数据，并在新对话中核对 `list_workspaces`。
 
 默认响应预算 25 秒，包含排队和执行；MCP 空闲 TTL 为 5 分钟。HTTP JSON **总请求体**最多 64 KiB，包含转义和元数据，Caddy 的现有 `max_size 64KB` 无需修改。WebSocket 上限仍是 1 MiB。写入前读取 `revision`，覆盖/编辑时传 `ifMatch`，新文件用 `mode: create`。超时后先重新读取，不能假设写入未提交或直接重试。
 

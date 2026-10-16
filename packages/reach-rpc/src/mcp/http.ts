@@ -3,6 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { EngineApi } from "./in-process.js";
 import { closeOwnedClients, RemoteMcpServer, type OwnedClients } from "./remote-server.js";
 import type { GatewayEvents } from "../console-api/events.js";
+import { McpNotifications } from "./notifications.js";
 
 const VERSIONS = ["2025-03-26", "2025-06-18"];
 const MAX_BODY = 64 * 1024;
@@ -33,6 +34,7 @@ interface HttpSession {
   reading: number;
   cleanupTask?: Promise<void>;
   lastUsed: number;
+  notifications: McpNotifications;
 }
 
 interface OwnerPool {
@@ -127,6 +129,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   shutdown(): void;
   disconnect(label: string): Promise<void>;
   clients(): Array<{ label: string; activeSessions: number }>;
+  notifyToolsChanged(): void;
 } {
   const idleMs = options.sessionIdleMs ?? 300_000;
   const budgetMs = options.responseTimeoutMs ?? 25_000;
@@ -200,6 +203,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   function retire(session: HttpSession, deadline = Date.now() + budgetMs, reason: "delete" | "idle" | "shutdown" | "console" = "idle"): Promise<void> {
     if (sessions.has(session.id)) options.events?.emit("client.disconnected", { caller: session.server.caller, reason });
     sessions.delete(session.id);
+    session.notifications.close();
     session.retireReason ??= reason;
     retired.add(session);
     return scheduleCleanup(session, deadline);
@@ -248,7 +252,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       const principal = controller ? "controller" : oauthClient ? `oauth:${oauthClient.id}` : "loopback";
       const origin = request.headers.origin;
       if (origin !== undefined && !options.allowedOrigins?.includes(origin)) throw new HttpError(403, "Origin is not allowed");
-      if (!["POST", "GET", "DELETE"].includes(request.method ?? "")) { response.setHeader("allow", "POST, DELETE"); json(response, 405); return; }
+      if (!["POST", "GET", "DELETE"].includes(request.method ?? "")) { response.setHeader("allow", "POST, GET, DELETE"); json(response, 405); return; }
       const sessionId = request.headers["mcp-session-id"];
       let session = typeof sessionId === "string" ? sessions.get(sessionId) : undefined;
       // Another principal's session is reported as unknown so its existence is not revealed.
@@ -260,7 +264,15 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       if (sessionId !== undefined && !session) throw new HttpError(404, "Unknown or expired MCP session");
       const version = request.headers["mcp-protocol-version"];
       if (version !== undefined && (typeof version !== "string" || !VERSIONS.includes(version) || (session && version !== session.version))) throw new HttpError(400, "Unsupported MCP-Protocol-Version");
-      if (request.method === "GET") { response.setHeader("allow", "POST, DELETE"); json(response, 405); return; }
+      if (request.method === "GET") {
+        if (!session) throw new HttpError(400, "Mcp-Session-Id is required");
+        if (!(request.headers.accept ?? "").split(",").some(value => value.trim().split(";")[0] === "text/event-stream")) throw new HttpError(406, "Accept must include text/event-stream");
+        const current = session;
+        current.lastUsed = Date.now();
+        current.notifications.attach(response, () => sessions.get(current.id) === current &&
+          (!oauthClient || options.oauth?.verify(authorization)?.id === oauthClient.id));
+        return;
+      }
       if (request.method === "DELETE") {
         if (!session) throw new HttpError(400, "Mcp-Session-Id is required");
         await bounded(retire(session, deadline, "delete"), deadline);
@@ -305,7 +317,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         const pool = oauthClient ? attachPool(principal, clientLabel) : undefined;
         session = { id, principal, pool, version: negotiated,
           server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated, clientLabel, id, pool?.clients), messages: output,
-          tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now() };
+          tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now(), notifications: new McpNotifications() };
         sessions.set(session.id, session);
         options.events?.emit("client.connected", { caller: session.server.caller });
         response.setHeader("mcp-session-id", session.id);
@@ -324,6 +336,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
           if (Date.now() >= current.server.deadlineAt) throw new HttpError(408, "MCP response budget exceeded before dispatch");
           if (!current.server.initialized && message.method !== "notifications/initialized" && message.method !== "initialize" && message.method !== "ping") throw new HttpError(400, "Send notifications/initialized before using tools");
           await current.server.receive(message);
+          if (current.server.initialized) current.notifications.ready();
         }
         return current.messages.filter((message) => "id" in message).slice();
       }), deadline);
@@ -340,6 +353,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
 
   return {
     handle,
+    notifyToolsChanged: () => { for (const session of sessions.values()) session.notifications.toolsChanged(); },
     disconnect: async label => {
       await Promise.all([...sessions.values()].filter(session => session.server.caller.label === label)
         .map(session => retire(session, Date.now() + budgetMs, "console")));

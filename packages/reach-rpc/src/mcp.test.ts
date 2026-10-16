@@ -140,7 +140,7 @@ test("MCP negotiates versions and enforces session, initialization and HTTP mess
     const missing = { ...c.sessionHeaders, "mcp-session-id": "missing" };
     assert.equal((await fetch(`${url}/mcp`, { method: "DELETE", headers: missing })).status, 404);
     assert.equal((await fetch(`${url}/mcp`, { method: "GET", headers: missing })).status, 404);
-    assert.equal((await fetch(`${url}/mcp`, { method: "GET", headers: c.sessionHeaders })).status, 405);
+    assert.equal((await fetch(`${url}/mcp`, { method: "GET", headers: { ...c.sessionHeaders, accept: "application/json" } })).status, 406);
     assert.equal((await c.post({ jsonrpc: "2.0", method: "tools/call", params: { name: "pick_device", arguments: { deviceId: "engine-a" } } })).status, 400);
     assert.equal((await status(url)).status, "none", "A malformed tool notification cannot open an Engine session");
     assert.equal((await c.post({ jsonrpc: "2.0", id: 9, method: "ping" }, { accept: "application/json" })).status, 406);
@@ -484,7 +484,7 @@ test("MCP DELETE drains running work and rejects a write still waiting in the qu
     const deleting = c.remove();
     try {
       const deadline = Date.now() + 1000;
-      while ((await fetch(`${url}/mcp`, { method: "GET", headers: c.sessionHeaders })).status !== 404) {
+      while ((await fetch(`${url}/mcp`, { method: "GET", headers: { ...c.sessionHeaders, accept: "application/json" } })).status !== 404) {
         assert.ok(Date.now() < deadline, "DELETE should retire the MCP session immediately");
         await delay(5);
       }

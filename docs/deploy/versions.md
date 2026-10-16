@@ -1,6 +1,8 @@
 # 组件版本与更新
 
-MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.2`，Gateway 为 `0.5.0`，独立 stdio MCP Connector 为 `0.4.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.2`，Gateway 为 `0.6.0`，独立 stdio MCP Connector 为 `0.4.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+
+Gateway `0.6.0` 新增 HTTP MCP 工具列表变更通知，声明 `listChanged: true`，通过 GET `/mcp` SSE 发送 `notifications/tools/list_changed`，POST JSON 调用保持兼容。客户端应在通知后重新获取 `tools/list`；宿主保存的旧对话工具定义仍需刷新后在新对话中验证。
 
 Gateway `0.5.0` 和 stdio MCP `0.4.0` 新增 `list_workspaces({deviceId})`，从 Engine 就绪元数据返回文件工作区名称和 `processWorkspaces` 执行许可列表。Gateway 同时修复 OAuth 客户端在多次 MCP 初始化之间的 Engine 会话归属，支持每次工具调用创建新 MCP 会话的客户端。Engine `0.2.2` 随本次发布重建，继续使用现有工作区元数据协议，无需修改工作区配置。
 
@@ -40,7 +42,7 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 {
   "mcpVersion": "0.4.0",
   "deviceId": "engine-a",
-  "gatewayVersion": "0.5.0",
+  "gatewayVersion": "0.6.0",
   "engineVersion": "0.2.2"
 }
 ```
@@ -54,7 +56,7 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 更新 Gateway 或 MCP 的包版本，例如：
 
 ```bash
-npm --prefix packages/reach-rpc version 0.5.0 --no-git-tag-version
+npm --prefix packages/reach-rpc version 0.6.0 --no-git-tag-version
 npm --prefix packages/grok-bot-mcp-connector version 0.4.0 --no-git-tag-version
 ```
 
