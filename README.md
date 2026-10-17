@@ -1,187 +1,144 @@
 # Reach
 
-Gateway, device Engine, and a generic MCP connector. Protocol: reach-rpc/1.0.
+English | [简体中文](README_cn.md)
 
-Deployment: [three-component deployment guide](docs/deploy/README.md). MCP clients: [installation instructions](docs/deploy/mcp.md). Validation: [deployment checklist](docs/deploy/deployment-checklist.md).
+**A self-hosted remote MCP gateway that lets cloud AI agents safely reach files and scripts on your own devices.** Devices connect outbound only, every session is a renewable lease, every mutation needs a scoped grant, and every call can be audited.
 
-The optional [Gateway console](docs/deploy/console.md) provides owner administration, device enrollment, live routing topology and metadata-only activity audit at `/console/`. Enable persistent storage with `REACH_DATA_DIR` and configure `REACH_PUBLIC_ORIGIN` before public binding.
+[![Verify](https://github.com/zpershuai/reach/actions/workflows/verify.yml/badge.svg)](https://github.com/zpershuai/reach/actions/workflows/verify.yml)
+[![License: Apache-2.0](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-MCP, Engine and Gateway have independent release versions, exposed through `--version`, Gateway health/session status and the MCP `get_versions` tool. See [component versions and upgrades](docs/deploy/versions.md).
+## Why Reach
 
-Each Engine installation automatically installs a pinned, checksum-verified Node.js runtime under `~/.reach/runtime/node` for Gateway and MCP processes on that host. The Rust Engine uses this runtime for trusted workspace scripts when process execution is explicitly enabled; filesystem-only operation remains independent of Node. The generated MCP configuration uses its stable `bin/node` path. After building, `sh scripts/start-gateway.sh` starts a local Gateway with this runtime. It can also be installed independently with `python3 scripts/install-node-runtime.py`. See [runtime installation and execution boundaries](docs/deploy/node-runtime.md).
+AI agents increasingly run in the cloud (ChatGPT, Grok, hosted agent platforms), while the files they need stay on laptops, home servers and routers behind NAT. The usual workaround is a tunnel in front of a filesystem MCP server. That makes the files reachable, but it also exposes an open port. Every caller gets the same unrestricted access, and nobody can tell later who wrote what.
 
-**Model B topology:** the Gateway is the single Agent-facing control plane; a long-running Engine Runtime on the device owns the workspace and executes `fs.*` RPC and opt-in trusted `process.*` tasks. Local development uses loopback (`127.0.0.1`) with two processes.
+Reach puts a small Gateway on a server you control and a Rust Engine on each device:
 
-## Two-process loopback deployment
+- **Outbound only.** The Engine polls the Gateway over HTTPS and opens a WebSocket only when an agent asks for it. No inbound ports, no port forwarding.
+- **Leases, not open sockets.** An agent opens a session, renews it, and closes it. The Engine enforces its own lease, idle and rotation limits as a fail-safe.
+- **Grants for every mutation.** Writes and script runs carry a short-lived grant scoped to a workspace, path and method. Reads never gain write authority just by sharing a session.
+- **Hardened file access.** Unix file access never follows symbolic links and uses descriptor-relative operations. Reads, directory scans, responses and writes have strict size and depth limits. Writes are atomic and keep permission bits.
+- **Many devices, one endpoint.** One Gateway routes to many Engines (macOS, Linux, OpenWrt), each with its own credentials, session and grants.
+- **Operable.** An optional web console provides owner login, device enrollment, live topology, a metadata-only activity audit and OAuth app management.
 
-Terminal 1 — start the Gateway (default `127.0.0.1:8787`):
+## Architecture
 
-```bash
-cd packages/reach-rpc
-npm run gateway
+```mermaid
+flowchart LR
+    Cloud[Cloud MCP client<br/>ChatGPT, Grok, ...] -->|HTTPS /mcp<br/>token or OAuth| Gateway
+    Desktop[Desktop MCP client] -->|stdio| Connector[Reach MCP Connector] -->|HTTPS| Gateway
+    subgraph Server you control
+      Gateway[Reach Gateway<br/>sessions · grants · audit]
+    end
+    Engine1[Engine on a Mac] -->|outbound HTTPS + WSS| Gateway
+    Engine2[Engine on Linux / OpenWrt] -->|outbound HTTPS + WSS| Gateway
+    Engine1 --> W1[(Workspace)]
+    Engine2 --> W2[(Workspace)]
 ```
 
-Terminal 2 — start the Engine Runtime (heartbeats the Gateway; default workspace `~/.reach/workspace`):
+| Component | Language | Runs on | Role |
+| --- | --- | --- | --- |
+| Gateway | TypeScript (Node 24) | A server or VPS (Docker) | Authentication, session leases, grants, RPC forwarding, `/mcp`, console |
+| Engine | Rust | Each device | Executes `fs.*` and opt-in `process.*` inside configured workspaces |
+| MCP Connector | TypeScript | Desktop next to the MCP client | Translates stdio MCP into Gateway calls |
+
+MCP tools: `list_devices`, `device_status`, `list_workspaces`, `fs_read`, `fs_list`, `fs_stat`, `fs_glob`, `fs_grep`, `fs_write`, `fs_edit`, `session_close`, `get_versions`, and (when enabled per workspace) `process_run`, `process_status`, `process_logs`, `process_stop`, `process_list`.
+
+## Quick start
+
+### A. Try it locally (about 5 minutes)
+
+Requires Node 24 and stable Rust.
 
 ```bash
+git clone https://github.com/zpershuai/reach.git && cd reach
+npm --prefix packages/reach-rpc ci --ignore-scripts
+
+# Terminal 1: Gateway on 127.0.0.1:8787
+npm --prefix packages/reach-rpc run gateway
+
+# Terminal 2: Engine serving ~/.reach/workspace
 cargo run -p reach-rpc --bin engine -- http://127.0.0.1:8787
 ```
 
-Optional Engine configuration (environment variables):
+Then open a session, read a file and close it:
 
 ```bash
-REACH_ENGINE_ID=reach-engine            # non-empty Engine identifier advertised in session.ready
-REACH_WORKSPACE_ROOTS=default:/srv/reach,fixture:/tmp/fixture
-REACH_CONNECTION_TIMEOUT_SECS=15        # bound on session setup/readiness
-REACH_RPC_DEADLINE_SECS=30              # default per-request deadline
-REACH_LEASE_SECS=300                    # Engine-side lease ceiling
-REACH_IDLE_SECS=300                     # session inactivity bound
-REACH_ROTATION_SECS=28800               # continuous connection max age (8h)
+curl -sS -X POST http://127.0.0.1:8787/session/open -H 'content-type: application/json' --data '{}'
+curl -sS http://127.0.0.1:8787/session/status          # wait for "status":"ready"
+curl -sS -X POST http://127.0.0.1:8787/session/rpc -H 'content-type: application/json' \
+  --data '{"requestId":"r1","method":"fs.list","params":{"workspace":"default","path":"."}}'
+curl -sS -X POST http://127.0.0.1:8787/session/close -H 'content-type: application/json' --data '{}'
 ```
 
-The Engine accepts exactly one configured Gateway origin: plaintext HTTP on loopback for local development, or verified HTTPS/WSS with `REACH_ENGINE_TOKEN` for remote deployment. A second origin, invalid scheme, invalid timeout, or empty Engine identifier fails fast before any heartbeat.
+For writes with grants, renewal and the full control API, see the [protocol reference](docs/reference/protocol.md).
 
-## Agent session lifecycle
+### B. Deploy for real
 
-One Agent controls one interactive Engine session through the Gateway. The session is a renewable lease: the Agent  **opens** it, **renews** it before its lease expires, and **closes** it when done. The Engine independently enforces its own bounds (`lease expiry`, `idle` timeout, `rotation`) as a fail-safe.
+1. **Generate credentials and config.** Follow [configuration](docs/deploy/configuration.md) to create a Gateway env file and an Engine env file with separate random tokens.
+2. **Run the Gateway.** Download `gateway-amd64.tgz` from the latest `gateway-v*` [Release](https://github.com/zpershuai/reach/releases), add your `gateway.env`, start it with `docker compose -f deploy/compose.yaml up -d --build`, and put HTTPS in front of it (Caddy example included). A versioned image is also published as `ghcr.io/<owner>/reach-gateway`. See [Gateway deployment](docs/deploy/gateway.md).
+3. **Install an Engine on each device.** On macOS (arm64/x64) or Linux x86_64 with systemd, from a checkout of this repository:
 
-Terminal 3 — open a session, wait for readiness, drive RPC, renew, and close:
+   ```bash
+   bash scripts/install-engine.sh /path/to/engine.env
+   ```
 
-```bash
-# Open a session (one session at a time).
-curl -sS -X POST http://127.0.0.1:8787/session/open \
-  -H 'content-type: application/json' --data '{}'
-# {"wanted":true,"status":"wanted","sessionId":"..."}
+   The script downloads the latest `engine-v*` Release binary for your platform, verifies it against the Release `SHA256SUMS` and its `--version`, then installs a LaunchAgent or systemd service. Pin a version with `REACH_ENGINE_VERSION=0.2.2`. OpenWrt and source builds are covered in [Engine](docs/deploy/engine.md), [Linux](docs/deploy/linux.md) and [OpenWrt](docs/deploy/openwrt.md).
+4. **Connect an MCP client.** Point a remote client at `https://<your-gateway>/mcp` with the Controller token, or use OAuth for clients that cannot send static headers. Desktop clients can use the stdio Connector instead. See [MCP installation](docs/deploy/mcp.md).
 
-# Wait until the Engine connects and the Gateway logs "Reach session ready".
-
-curl -sS http://127.0.0.1:8787/session/status
-# {"wanted":false,"status":"ready","sessionId":"...","leaseExpiresAt":"...","closureReason":null}
-
-curl -sS -X POST http://127.0.0.1:8787/session/rpc \
-  -H 'content-type: application/json' \
-  --data '{"requestId":"r1","method":"fs.read","params":{"workspace":"default","path":"notes/today.txt","maxLines":20}}'
-
-# Mutation requires a Gateway-issued grant (validated before forward),
-# which the Engine's Authorizer trusts on the bound session.
-curl -sS -X POST http://127.0.0.1:8787/grants \
-  -H 'content-type: application/json' \
-  --data '{"workspace":"default","path":"notes/today.txt","methods":["fs.write"]}'
-# {"grantId":"...","expiresAt":"..."}
-
-curl -sS -X POST http://127.0.0.1:8787/session/rpc \
-  -H 'content-type: application/json' \
-  --data '{"requestId":"w1","method":"fs.write","params":{"workspace":"default","path":"notes/today.txt","content":"hi","mode":"overwrite"},"permission":{"grantId":"<grantId>"}}'
-
-# Renew before the lease expires (advised every ~60s for a 5-minute lease).
-curl -sS -X POST http://127.0.0.1:8787/session/renew \
-  -H 'content-type: application/json' --data '{}'
-# {"sessionId":"...","leaseExpiresAt":"..."}
-
-# Close the session (the normal success path).
-curl -sS -X POST http://127.0.0.1:8787/session/close \
-  -H 'content-type: application/json' --data '{}'
-```
-
-`POST /session-wanted` with `{"wanted":true}` / `{"wanted":false}` remains a legacy alias for open/close.
-
-Control API summary:
-
-| Endpoint | Method | Meaning |
+| Client | How it connects | Status |
 | --- | --- | --- |
-| `POST /session/open` | — | Request the selected Engine session |
-| `GET /session/status` | — | Session state (`none`, `wanted`, `pending`, `connecting`, `ready`, `closing`) plus lease expiry and last closure reason |
-| `POST /session/renew` | — | Extend the live session lease (bounded by Gateway/Engine policy) |
-| `POST /session/close` | — | Request fast close; stops new RPC once draining begins |
-| `POST /session/rpc` | — | Forward one data-plane request to the ready Engine |
-| `POST /heartbeat` | — | Engine lease acquisition / idle polling |
-| `POST /grants` | — | Issue scoped filesystem or process grants |
-| `GET /healthz` | — | Gateway health and release version |
-| `POST /mcp`, `DELETE /mcp` | — | Streamable HTTP MCP requests and session cleanup |
+| Grok Bot | Remote HTTP plugin ([template](grok-bot-plugin/README.md)) | Verified by the maintainer |
+| ChatGPT connectors | Remote HTTP with OAuth (dynamic registration, PKCE) | Documented in [MCP installation](docs/deploy/mcp.md) |
+| Other Streamable HTTP MCP clients | `/mcp` with a Bearer token or OAuth | Follows the MCP spec; verify in your host |
+| Desktop stdio MCP clients | Local Connector process | Supported |
 
-## Engine Runtime behavior
+Finish with the [deployment checklist](docs/deploy/deployment-checklist.md).
 
-- While no session is wanted the Engine posts a heartbeat every **120s** by default; configure `REACH_HEARTBEAT_INTERVAL_SECS` on the **Gateway** to adjust its returned interval (the Engine follows `intervalSeconds`). Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
-- The lease `endpoint` is a Gateway-relative path (`/session`); the Engine resolves it against its **configured** Gateway origin and refuses a lease that points anywhere else.
-- After opening the WebSocket the Engine sends `session.ready` (protocol/version, Engine id, workspace names, supported methods). The Gateway forwards no data-plane request until it has seen a valid `ready`.
-- Tools execute serially on one worker while the Runtime continues receiving close/renew control messages. Close, lease expiry, rotation, or the hard RPC execution timeout sets a cooperative cancellation flag, drops queued work, drains the worker, and then releases the session. An atomic mutation already past its commit boundary may finish.
-- The Engine is the executor and never originates data-plane `request` envelopes to the Gateway. It replies to each request with a matching `response` or `error`.
-- On Agent close, lease expiry, idle timeout, rotation, or transport failure the Engine emits `session.closed` with a machine-readable reason, drains, and returns to heartbeat. A session is never resumed with its cursors or pending work.
+## Security model
 
-### Runtime policy defaults
+Reach assumes the Gateway operator is trusted and the network is not. Engines accept exactly one configured Gateway origin, and they use plaintext HTTP only on loopback. Tokens are compared in constant time, and OAuth tokens are stored only as digests. Process execution is disabled unless a workspace is explicitly allowlisted.
 
-| Bound | Default |
+Know the current limits before exposing it. **A Controller token, or an approved OAuth app, can read and write every workspace on every registered Engine.** Treat it like an SSH key. Read [SECURITY.md](SECURITY.md) for the threat model, known limitations and how to report a vulnerability.
+
+## How it compares
+
+| | Tunnel + filesystem MCP server | Reach |
+| --- | --- | --- |
+| Inbound port on the device | Usually (or a tunnel agent) | None, outbound only |
+| Per-call write authorization | No | Grant scoped to workspace, path and method |
+| Session lifetime limits | Connection lifetime | Renewable lease, idle and rotation limits |
+| Multiple devices | One server per device | One Gateway, many Engines |
+| Audit trail | Tunnel logs only | Metadata audit in the console |
+| Setup effort | Minutes | A server, a domain and an install per device |
+
+If you only need occasional access to one machine on a trusted network, a tunnel is simpler. Reach is for long-lived access by cloud agents, where you want to bound and inspect what they do.
+
+## Documentation
+
+| Topic | Link |
 | --- | --- |
-| Connection setup / readiness | 15 s |
-| RPC deadline | 30 s |
-| Session lease (renewable) | 5 min |
-| Idle (no RPC, renewal, or control) | 5 min |
-| Continuous connection rotation | 8 h |
+| Deployment guide (Chinese) | [docs/deploy/README.md](docs/deploy/README.md) |
+| Configuration and credentials | [docs/deploy/configuration.md](docs/deploy/configuration.md) |
+| MCP clients | [docs/deploy/mcp.md](docs/deploy/mcp.md) |
+| Gateway console | [docs/deploy/console.md](docs/deploy/console.md) |
+| Script execution | [docs/deploy/processes.md](docs/deploy/processes.md) |
+| Versions and upgrades | [docs/deploy/versions.md](docs/deploy/versions.md) |
+| Protocol and runtime reference | [docs/reference/protocol.md](docs/reference/protocol.md) |
+| Specifications | [openspec/specs/](openspec/specs/) |
 
-These are Engine **hard maxima**: both the initial lease and every renewal are capped by the Engine policy. Plaintext HTTP origins and their resolved addresses must be loopback; remote connections use verified TLS.
+Most deployment documents are currently in Chinese. Translations are welcome.
 
-### Closure reasons
+## Roadmap
 
-| Reason | Meaning |
-| --- | --- |
-| `agent_requested` | Agent/Gateway requested close |
-| `session_complete` | Legacy `session.complete` translates to a close |
-| `lease_expired` | No valid renewal before the lease expired |
-| `idle_timeout` | No activity within the idle bound |
-| `rotation` | Continuous connection reached the max age |
-| `disconnected` | Transport closed unexpectedly |
-| `shutdown` | Engine is shutting down and drains session-owned work |
-| `connection_failed` / `policy_error` / `rpc_timeout` | Setup or policy failures |
+- Controller tokens scoped to specific Engines or workspaces, and read-only tokens
+- More than one interactive session per Engine
+- Prebuilt Engine binaries for Linux arm64 and OpenWrt targets
+- English versions of the deployment guides
 
-## Session control protocol
+## Contributing
 
-The Gateway↔Engine WebSocket carries control messages and data-plane envelopes:
+See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bash scripts/verify.sh` before sending a pull request.
 
-- Control: `session.ready`, `session.renew`, `session.close`, `session.closed` (each carries a non-empty `sessionId`; `renew` includes an absolute `leaseExpiresAt`; `close`/`closed` include a reason).
-- Data plane: `request` / `response` / `error` with the `reach-rpc/1.0` envelope.
+## License
 
-`tool.call { name, arguments }` is accepted only as a **single-level** compatibility adapter: it is canonicalized to a direct method before authorization and Tool dispatch. Nested, malformed, or depth-exhausted `tool.call` is rejected as `INVALID_PARAMS` and never reaches a Tool.
-
-## Migration from short-job completion
-
-`session.complete` and the `job.done` close signal previously defined the ordinary success path of a session. They are retained **only** for compatibility during migration:
-
-- A `session.complete` request is answered `{ok:true}` and translated to an Engine-requested close (`session.closed` with reason `session_complete`).
-- The Gateway also still accepts a legacy `job.done` message and treats it as a close.
-
-New Agents must use explicit session control (`/session/open`, `/session/renew`, `/session/close`) and renewal. The compatibility path will be removed after Gateway/Engine/Agent integration tests rely on explicit control.
-
-## Gateway hardening
-
-HTTP JSON bodies are limited to 64 KiB and WebSocket text messages to 1 MiB. On `POST /session/rpc`, controllers may omit `type`, `protocol`, `version`, and `sessionId`; the Gateway fills `request`, `reach-rpc`, `1.0`, and the live session id before validating the request. Explicitly supplied fields must still be valid, and a supplied `sessionId` must match the live session. Every request forwarded to the Engine is a complete `reach-rpc/1.0` envelope. Write grants are validated before forward (issuance, path scope, method scope, expiry) and cannot be bypassed by nesting `tool.call`.
-
-The Engine bounds serialized responses to the same 1 MiB, including JSON escaping and the request-id envelope. An oversized result returns `RESPONSE_TOO_LARGE` and keeps the session usable; reduce `fs.read` line ranges when possible. A single oversized line requires another means of retrieval. Edits check their final UTF-8 size before allocation. Atomic overwrite/edit preserves ordinary file permission bits; new files default to 0600, and special permission bits are cleared. Grant paths preserve filename whitespace exactly.
-
-## Multiple Engines and remote MCP
-
-One Gateway can manage multiple registered Engines, each with its own credential, session, lease, grants and RPC state. Controller requests select an Engine with `?engineId=...`; requests without it target the default Engine. MCP device entries use `engineId` to route through a shared Gateway. See [OpenWrt and multi-device deployment](docs/deploy/openwrt.md).
-
-Remote MCP clients connect to the same Gateway's HTTPS `/mcp` using the Controller token. The endpoint exposes static underscore filesystem and process tools, discovers registered Engines and returns promptly while idle devices connect. HTTP MCP sessions have identity-bound ownership, bounded requests, and DELETE/idle cleanup. Desktop stdio clients remain supported. See [MCP installation](docs/deploy/mcp.md) and the [Grok Bot plugin](grok-bot-plugin/README.md).
-
-
-## RPC deadlines and retry behavior
-
-The Gateway stamps each forwarded request with optional RFC3339 `deadlineAt`, bounded by its RPC timeout and any earlier caller deadline. That deadline includes Gateway processing and Engine queue time. The Engine converts the remaining budget to a monotonic deadline and caps it by Runtime and Tool policy; validation never restarts the budget. An expired queued write does not execute. A shorter caller or Tool deadline returns `DEADLINE_EXCEEDED` without discarding unrelated queued work; the Gateway forwarding timeout and Engine hard execution bound still close unresponsive sessions. Pending RPCs and running Tools count as activity, even if an idle timeout is shorter than the execution bound.
-
-Cancellation is cooperative. A filesystem syscall already in progress, or an atomic write past its commit boundary, may finish even if the caller receives a timeout. A successful write Tool result retains its revision and is sent before teardown when the transport is still available; a committed write is not relabeled as a cancellation failure. A timeout is not proof that a write was rolled back. The MCP connector never automatically retries a forwarded RPC. Inspect the file revision before deciding whether to issue a new mutation.
-
-Request-ID deduplication remembers the latest 65,536 IDs per connection. The Gateway retains the latest 4,096 uncertain IDs across session closure, including its own timeouts, Engine deadline/session-closed errors, and forwarded requests whose reply was lost on disconnect. These bounded, in-memory windows do not provide durable exactly-once execution after eviction or a process restart.
-
-`POST /session/open` accepts an optional caller-selected `sessionId` and returns the intent id before the Engine connects. Retrying the same wanted/pending id preserves its token and lease; a different supplied id returns HTTP 409. `/session/renew` and `/session/close` accept an optional `sessionId`; a supplied id must match the pending or live session. Omitting it retains the legacy single-session API and repeated opens preserve the existing pending intent.
-
-## Filesystem and lifecycle bounds
-
-The Rust Engine uses no-follow, descriptor-relative access for reads, stats, directory enumeration, searches, and mutations on Unix. Reads reject non-regular targets without blocking on FIFOs and enforce the 8 MiB limit while reading, including files that grow after opening. Platforms without these primitives fail closed. Directory snapshots are bounded to 10,000 entries and traversal to 128 directory levels (`DIRECTORY_TOO_LARGE` / `DIRECTORY_TOO_DEEP`). Exhausted pagination snapshots are released; only unfinished queries consume the 32-cursor limit.
-
-Runtime events use a 1,024-entry FIFO buffer. `drain_events()` consumes it. The production loop emits structured events as JSON and human-readable lifecycle messages to stdout, consuming the buffer after each outer Runtime step; active-session overflow evicts the oldest events.
-
-## Validation
-
-Install tools with `npm ci --ignore-scripts` and RPC dependencies with `npm --prefix packages/reach-rpc ci --ignore-scripts`, then run `bash scripts/verify.sh`. The script gates pinned OpenSpec 1.14.1 strict validation, installer failure/rollback tests, Rust formatting/tests, TypeScript Gateway/MCP tests including real Engine integration, shared fixtures, and standalone MCP distribution smoke. CI runs on Linux and macOS with Node 24 and stable Rust. A separate Linux x86_64 job runs `bash scripts/verify-packaging.sh` to build the Gateway container and static Engine, compare two OpenWrt bundles, and execute bundled Node and its child in an isolated container. It requires Docker, musl-tools and the Rust musl target. See [deployment validation](docs/deploy/deployment-checklist.md) for platform gaps. The TypeScript workspace filesystem is a test reference; production session execution uses the Rust Engine.
-
-Trusted script tools are `process.run`, `process.status`, `process.logs`, `process.stop`, and `process.list`. Dynamic stdio exposes them after device selection; HTTP uses underscore names with `deviceId`. See [process execution and recovery](docs/deploy/processes.md).
+Copyright 2026 tent zp. Licensed under the [Apache License 2.0](LICENSE).

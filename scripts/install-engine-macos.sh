@@ -36,12 +36,13 @@ print(label)
 AGENT_LABEL
 )"
 agent_file="$HOME/Library/LaunchAgents/$agent_label.plist"
-engine_version="$("$repo_root/target/release/engine" --version)"
+engine_binary="${REACH_ENGINE_BINARY:-$repo_root/target/release/engine}"
+engine_version="$("$engine_binary" --version)"
 node_bin="$(python3 "$repo_root/scripts/install-node-runtime.py")"
 mkdir -p "$engine_dir" "$config_dir" "$HOME/Library/LaunchAgents"
 chmod 700 "$engine_dir" "$config_dir"
 install -m 755 "$repo_root/scripts/run-node.sh" "$engine_dir/run-node.sh"
-install -m 755 "$repo_root/target/release/engine" "$engine_dir/engine"
+install -m 755 "$engine_binary" "$engine_dir/engine"
 install -m 600 "$engine_config" "$config_dir/engine.env"
 if [[ -n "${2:-}" ]]; then
   install -m 600 "$2" "$config_dir/mcp-devices.json"

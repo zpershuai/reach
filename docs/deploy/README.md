@@ -12,7 +12,7 @@
 | [Engine 部署](engine.md) | Mac 构建、工作区、后台安装、启动与停止 |
 | [Linux Engine](linux.md) | VPS 和家庭 server 安装、systemd 系统与用户服务 |
 | [OpenWrt 与多设备](openwrt.md) | 路由器安装、私有 Node 库、一个 Gateway 管理多个 Engine |
-| [MCP 安装](mcp.md) | Grok Bot 远程 HTTP 插件、通用 stdio 安装、客户端配置 |
+| [MCP 安装](mcp.md) | 远程 HTTP MCP（含 Grok Bot 插件、ChatGPT OAuth）、通用 stdio 安装、客户端配置 |
 | [部署验证](verification.md) | 源码检查、公网 RPC、安装后的 MCP、故障恢复验证 |
 | [运维与回滚](operations.md) | 升级、备份、凭证轮换、日志、回滚与停用 |
 | [脚本任务](processes.md) | process 接口、执行权限、任务生命周期及日志 |
@@ -27,7 +27,7 @@
 flowchart LR
     Host[支持本地 MCP 的客户端] -->|stdio| MCP[Reach MCP Connector]
     MCP -->|HTTPS / Controller token| Caddy[VPS Caddy :443]
-    Cloud[Grok Bot / 远程 MCP 客户端] -->|HTTPS /mcp / Controller token| Caddy
+    Cloud[远程 MCP 客户端<br/>如 Grok Bot、ChatGPT] -->|HTTPS /mcp / Controller token| Caddy
     Caddy -->|HTTP / 回环 :28787| Gateway[Gateway 容器 :8787]
     Engine[设备上的 Rust Engine] -->|HTTPS 心跳 / Engine token| Caddy
     Engine -->|按需 WSS / 单次 session token| Caddy
@@ -47,7 +47,7 @@ MCP 安装入口为 [mcp.md](mcp.md)。桌面 stdio Connector 由客户端启动
 1. 确定域名、Engine 标识和工作区，按 [configuration.md](configuration.md) 生成两份独立凭证与配置。
 2. 构建 Gateway 的 TypeScript 产物，上传 VPS，启动 Compose，再接入 Caddy。
 3. 为目标设备构建 Rust Engine，按操作系统安装后台服务并检查心跳。
-4. 桌面客户端安装 stdio Connector；远程客户端配置 HTTPS `/mcp` 或安装 Grok Bot 插件。
+4. 桌面客户端安装 stdio Connector；远程客户端配置 HTTPS `/mcp`（Grok Bot 可使用插件模板，ChatGPT 等使用 OAuth）。
 5. 在没有其他活动会话时执行公网与 MCP 验证；需要验收恢复能力时再执行故障注入。
 
 已有部署沿用自己的私有配置；升级步骤见 [运维与回滚](operations.md)。所有命令默认从仓库根目录执行，标注“VPS”的命令在服务器执行。真实主机、账号、地址、部署记录与备份位置只保存在 Git 忽略的 `.reach/` 或仓库外，不写入公开文档。
@@ -59,6 +59,6 @@ MCP 安装入口为 [mcp.md](mcp.md)。桌面 stdio Connector 由客户端启动
 - LaunchAgent 在用户登录后运行；设备休眠、退出登录或断网期间不可用。
 - Gateway 重启会丢失内存会话与 grant。文件保留在 Engine 工作区，客户端需要重新打开会话。
 - 写入超时可能已经提交。客户端不会自动重放文件 RPC，恢复后先读取内容或 revision 确认结果。
-- 仓库没有统一的 `reach install` 部署 CLI，也没有已发布的 npm 安装包；本文使用现有脚本和源码构建产物。
+- 仓库没有统一的 `reach install` 部署 CLI，也没有已发布的 npm 安装包。macOS 与 Linux x86_64 可用 `scripts/install-engine.sh` 安装经 SHA-256 校验的 Release 版 Engine；其余步骤使用现有脚本和源码构建产物。
 
 源码依据：[Gateway 入口](../../packages/reach-rpc/src/gateway-main.ts)、[Gateway 实现](../../packages/reach-rpc/src/gateway.ts)、[Engine 配置](../../crates/reach-rpc/src/runtime/config.rs)、[MCP 配置](../../packages/grok-bot-mcp-connector/src/config.ts)。

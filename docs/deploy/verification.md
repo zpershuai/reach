@@ -65,7 +65,7 @@ node scripts/verify-mcp-http.mjs .reach/deployment.json
 
 若实际客户端发送 Origin，在私有部署 JSON 加入 `"mcpOrigin": "https://client.example.com"`（替换为实际观察值），脚本会在 MCP 请求中携带该头。Gateway 的 `REACH_MCP_ALLOWED_ORIGINS` 必须包含它，否则初始化返回 403 并提示配置方法。未配置 `mcpOrigin` 时不发送该头，保留服务端默认防护。404 通常表示线上尚未部署 `/mcp`，应更新 Gateway 后重试。
 
-验证会在 `default` 工作区留下 `deployment-tests/<UUID>.txt`；成功报告写入忽略的 `.reach/mcp-http-verification.json`。回归测试另覆盖 Origin、协议版本、慢请求体与 DELETE/空闲过期交错、队列清理、多 Engine 并发、资源上限、近 64 KiB 写入和写入截止时间。脚本通过后，仍需在实际 Grok Bot 安装生成的私有插件副本，确认 token 私有存储、列设备和读取已知文件，并核对实际请求的 Origin，按 [部署检查清单](deployment-checklist.md) 配置；本地测试不代替宿主兼容性验证。
+验证会在 `default` 工作区留下 `deployment-tests/<UUID>.txt`；成功报告写入忽略的 `.reach/mcp-http-verification.json`。回归测试另覆盖 Origin、协议版本、慢请求体与 DELETE/空闲过期交错、队列清理、多 Engine 并发、资源上限、近 64 KiB 写入和写入截止时间。脚本通过后，仍需在实际使用的远程 MCP 宿主中完成接入（Grok Bot 安装生成的私有插件副本），确认 token 私有存储、列设备和读取已知文件，并核对实际请求的 Origin，按 [部署检查清单](deployment-checklist.md) 配置；本地测试不代替宿主兼容性验证。
 
 ## 故障恢复
 

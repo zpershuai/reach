@@ -1,6 +1,6 @@
 ## Why
 
-审查报告 `docs/reviews/repo_060c1d6_2026-10-07.md` 指出的文档/spec 滞后、process 契约分散和维护性问题可在当前源码中复现。需要在保持会话、安全边界和现有传输兼容的前提下修复，并发布可识别的 patch 版本。
+审查报告 `docs/dev/reviews/repo_060c1d6_2026-10-07.md` 指出的文档/spec 滞后、process 契约分散和维护性问题可在当前源码中复现。需要在保持会话、安全边界和现有传输兼容的前提下修复，并发布可识别的 patch 版本。
 
 ## What Changes
 

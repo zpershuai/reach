@@ -2,6 +2,16 @@
 
 Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 心跳等待会话请求，按需建立 WSS 连接；不会监听 Mac 的入站端口。以下流程使用 macOS LaunchAgent；Linux 的 systemd 安装器见 [Linux Engine](linux.md)，x86_64 OpenWrt 的 procd 安装器见 [OpenWrt 与多设备](openwrt.md)。
 
+## 从 Release 安装（无需本地构建）
+
+准备好下文的 `engine.env` 后，可在仓库目录直接安装 GitHub Release 中的预构建 Engine，跳过第 2 节的构建：
+
+```bash
+bash scripts/install-engine.sh .reach/engine.env
+```
+
+脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.2.2` 可以固定版本，`REACH_RELEASE_REPO=owner/repo` 可以指定 fork，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
+
 ## 1. 配置与工作区
 
 先准备 [配置与凭证](configuration.md) 中的 `.reach/engine.env`。文件包含：
