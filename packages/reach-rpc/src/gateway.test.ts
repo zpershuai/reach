@@ -2009,3 +2009,81 @@ test("two real Rust Engines share one Gateway and keep their workspaces separate
     await fs.rm(root, {recursive: true, force: true});
   }
 });
+
+
+test("ready refresh revokes affected grants, preserves pending RPCs and rejects mismatched bindings", async () => {
+  await withGateway(async url => {
+    const { socket, sessionId } = await openEngineSession(url, { ready: false });
+    const base = { type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId, engineId: "test-engine", workspaces: ["default", "docs", "scripts"], processWorkspaces: ["scripts"], workspaceGenerations: { default: "d1", docs: "a1", scripts: "s1" }, methods: ["fs.read", "fs.write", "process.run"] };
+    const status = async () => (await (await fetch(`${url}/session/status`)).json()) as { workspaces?: string[]; processWorkspaces?: string[]; methods?: string[] };
+    const post = async (path: string, body: unknown) => (await (await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json()) as any;
+    let count = 0;
+    let pending: (() => void) | undefined;
+    attachMockEngine(socket, async message => {
+      count++;
+      if (message.requestId === "pending") await new Promise<void>(resolve => { pending = resolve; });
+      return { type: "response", requestId: message.requestId, result: { ok: true } };
+    });
+    socket.send(JSON.stringify(base)); await waitUntil(async () => (await status()).workspaces?.length === 3);
+    const mutation = async (workspace: string) => post("/grants", { workspace, path: "file", methods: ["fs.write"] });
+    const docs = await mutation("docs"); const stable = await mutation("default"); const scripts = await mutation("scripts");
+    const params = { workspace: "scripts", script: "main.cjs", launchId: "launch" };
+    const execute = await post("/grants", { kind: "execute", sessionId, ...params });
+    const flight = post("/session/rpc", rpcBody("pending", "fs.read", { workspace: "default", path: "file" }));
+    await waitUntil(() => pending !== undefined);
+    const refreshed = { ...base, workspaces: [...base.workspaces, "added"], processWorkspaces: [], workspaceGenerations: { ...base.workspaceGenerations, docs: "a2", added: "new" }, methods: [...base.methods, "fs.stat"] };
+    socket.send(JSON.stringify(refreshed)); await waitUntil(async () => (await status()).workspaces?.includes("added") === true);
+    pending!(); assert.equal((await flight).result.ok, true);
+    const write = (id: string, workspace: string, grantId: string) => post("/session/rpc", rpcBody(id, "fs.write", { workspace, path: "file", content: "x", mode: "create" }, { grantId }));
+    const before = count;
+    assert.equal((await write("repoint", "docs", docs.grantId)).error.code, "PERMISSION_DENIED");
+    assert.equal((await post("/session/rpc", rpcBody("disabled", "process.run", params, { grantId: execute.grantId }))).error.code, "PERMISSION_DENIED");
+    assert.equal(count, before);
+    assert.equal((await write("stable", "default", stable.grantId)).result.ok, true);
+    assert.equal((await write("scripts", "scripts", scripts.grantId)).result.ok, true);
+    assert.deepEqual((await status()).methods, refreshed.methods);
+    for (const mismatch of [{ ...refreshed, sessionId: "other" }, { ...refreshed, engineId: "other" }]) {
+      const error = once(socket, "message");
+      socket.send(JSON.stringify({ ...mismatch, workspaces: ["wrong"] }));
+      assert.equal(JSON.parse((await error)[0].toString()).error.code, "INVALID_PARAMS");
+      assert.deepEqual((await status()).workspaces, refreshed.workspaces);
+    }
+    const removed = await mutation("docs");
+    socket.send(JSON.stringify({ ...refreshed, workspaces: ["default", "scripts"] }));
+    await waitUntil(async () => (await status()).workspaces?.length === 2);
+    assert.equal((await write("removed", "docs", removed.grantId)).error.code, "PERMISSION_DENIED");
+    // When either side omits generations, unchanged names retain grants.
+    const legacy = await mutation("default");
+    socket.send(JSON.stringify({ ...base, workspaceGenerations: undefined, workspaces: ["default", "legacy"], processWorkspaces: [] }));
+    await waitUntil(async () => (await status()).workspaces?.includes("legacy") === true);
+    assert.equal((await write("legacy", "default", legacy.grantId)).result.ok, true);
+    socket.send(JSON.stringify({ ...base, workspaces: ["default", "new-engine"], processWorkspaces: [], workspaceGenerations: { default: "changed", "new-engine": "token" } }));
+    await waitUntil(async () => (await status()).workspaces?.includes("new-engine") === true);
+    assert.equal((await write("legacy-upgrade", "default", legacy.grantId)).result.ok, true);
+    socket.close(); await once(socket, "close");
+  }, { logger: () => {} });
+});
+
+test("grant revocation compares readiness across sessions because mutation grants outlive them", async () => {
+  await withGateway(async url => {
+    const status = async () => (await (await fetch(`${url}/session/status`)).json()) as { status: string; workspaces?: string[] };
+    const post = async (path: string, body: unknown) => (await (await fetch(`${url}${path}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) })).json()) as any;
+    const ready = (sessionId: string, docs: string) => ({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId, engineId: "test-engine", workspaces: ["default", "docs"], workspaceGenerations: { default: "d1", docs }, methods: ["fs.write"] });
+    const first = await openEngineSession(url, { ready: false });
+    first.socket.send(JSON.stringify(ready(first.sessionId, "a1")));
+    await waitUntil(async () => (await status()).status === "ready");
+    const docs = await post("/grants", { workspace: "docs", path: "file", methods: ["fs.write"] });
+    const stable = await post("/grants", { workspace: "default", path: "file", methods: ["fs.write"] });
+    first.socket.close(); await once(first.socket, "close");
+    await waitUntil(async () => (await status()).status !== "ready");
+    // The Engine repointed docs while no session was live.
+    const second = await openEngineSession(url, { ready: false });
+    attachMockEngine(second.socket);
+    second.socket.send(JSON.stringify(ready(second.sessionId, "a2")));
+    await waitUntil(async () => (await status()).status === "ready");
+    const write = (id: string, workspace: string, grantId: string) => post("/session/rpc", rpcBody(id, "fs.write", { workspace, path: "file", content: "x", mode: "create" }, { grantId }));
+    assert.equal((await write("repointed", "docs", docs.grantId)).error.code, "PERMISSION_DENIED");
+    assert.equal((await write("stable", "default", stable.grantId)).result.ok, true);
+    second.socket.close(); await once(second.socket, "close");
+  }, { logger: () => {} });
+});

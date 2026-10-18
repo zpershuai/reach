@@ -26,14 +26,20 @@ fn main() {
 
     // Create the default workspace root so the first read/write succeeds out
     // of the box when no explicit root overrides are configured.
-    if let Some(root) = config.workspace_roots.get("default") {
+    if let Some(root) = config
+        .workspaces
+        .entries
+        .get("default")
+        .filter(|_| config.workspace_file.is_none())
+        .map(|entry| &entry.root)
+    {
         if let Err(error) = std::fs::create_dir_all(root) {
             eprintln!("Reach engine could not create default workspace {root:?}: {error}");
             std::process::exit(1);
         }
     }
 
-    let workspace = WorkspaceFilesystem::new(config.workspace_roots.clone());
+    let workspace = WorkspaceFilesystem::new(config.workspaces.roots());
     let hardware = reach_rpc::runtime::hardware::detect_hardware();
     let heartbeat = LocalHttpHeartbeatTransport::new(
         config.gateway.clone(),

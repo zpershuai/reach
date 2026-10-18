@@ -20,6 +20,8 @@ Reach 在你自己控制的服务器上运行一个轻量的 Gateway，在每台
 - **多设备，一个入口。** 一个 Gateway 可以路由到多个 Engine（macOS、Linux、OpenWrt），每个 Engine 有独立的凭证、会话和 grant。
 - **便于运维。** 可选的 Web 控制台提供管理员登录、设备注册、实时拓扑、只记录元数据的操作审计，以及 OAuth 应用管理。
 
+Engine 0.3.0 支持通过本机 JSON 文件动态调整工作区，无需重启。文件格式、重载行为和 Gateway 优先升级顺序见 [Engine 部署](docs/deploy/engine.md)。
+
 ## 架构
 
 ```mermaid
@@ -82,7 +84,7 @@ curl -sS -X POST http://127.0.0.1:8787/session/close -H 'content-type: applicati
    bash scripts/install-engine.sh /path/to/engine.env
    ```
 
-   脚本会下载适合当前平台的最新 `engine-v*` Release 二进制，用 Release 的 `SHA256SUMS` 和 `--version` 校验，然后安装为 LaunchAgent 或 systemd 服务。用 `REACH_ENGINE_VERSION=0.2.2` 可以固定版本。OpenWrt 和源码构建见 [Engine](docs/deploy/engine.md)、[Linux](docs/deploy/linux.md)、[OpenWrt](docs/deploy/openwrt.md)。
+   脚本会下载适合当前平台的最新 `engine-v*` Release 二进制，用 Release 的 `SHA256SUMS` 和 `--version` 校验，然后安装为 LaunchAgent 或 systemd 服务。用 `REACH_ENGINE_VERSION=0.3.0` 可以固定版本。OpenWrt 和源码构建见 [Engine](docs/deploy/engine.md)、[Linux](docs/deploy/linux.md)、[OpenWrt](docs/deploy/openwrt.md)。
 4. **连接 MCP 客户端。** 远程客户端连接 `https://<你的 Gateway>/mcp` 并使用 Controller token；不能设置静态请求头的客户端可以用 OAuth。桌面客户端也可以改用 stdio Connector。详见 [MCP 安装](docs/deploy/mcp.md)。
 
 | 客户端 | 接入方式 | 状态 |

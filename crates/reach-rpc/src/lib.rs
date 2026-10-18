@@ -1,3 +1,5 @@
+pub mod workspace_config;
+mod workspace_watcher;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::fmt;

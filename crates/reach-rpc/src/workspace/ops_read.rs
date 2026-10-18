@@ -80,6 +80,7 @@ impl WorkspaceFilesystem {
         }
         entries.sort_by(|a, b| a.path.cmp(&b.path));
         let (items, cursor, truncated) = self.start_page(
+            &params.workspace,
             "fs.list",
             query,
             CursorField::Entries(entries),

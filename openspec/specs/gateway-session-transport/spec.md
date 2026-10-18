@@ -123,6 +123,21 @@ The gateway SHALL close a live Engine WebSocket that has not sent a valid `sessi
 - **WHEN** an Engine WebSocket is live and has not yet sent `session.ready`
 - **THEN** `/session/open` returns HTTP 409 with `session already active`
 
+### Requirement: Repeated readiness refreshes session metadata
+The Gateway SHALL accept a valid `session.ready` that arrives after the bound session is already ready, and treat it as a metadata refresh. It SHALL replace the cached `workspaces`, `processWorkspaces`, `workspaceGenerations` and `methods`, publish a session state event, and keep forwarding without closing the session. A refresh with a different `sessionId` or authenticated `engineId` SHALL be rejected with `INVALID_PARAMS` and leave the cached metadata unchanged.
+
+#### Scenario: Workspace discovery reflects a refresh
+- **WHEN** a ready session receives a refreshed `session.ready` that adds workspace `docs`
+- **THEN** a subsequent `list_workspaces` for that device returns `docs` without reopening the session
+
+#### Scenario: Mismatched refresh is rejected
+- **WHEN** a refreshed `session.ready` names a different `sessionId`
+- **THEN** the Gateway replies with `INVALID_PARAMS` and keeps the previous workspace metadata
+
+#### Scenario: In-flight requests are unaffected by refresh
+- **WHEN** a refreshed `session.ready` arrives while an RPC is pending
+- **THEN** the pending RPC still completes or times out under its original rules
+
 ### Requirement: Malformed ingress is isolated
 The Gateway MUST catch HTTP and upgrade request-target parsing errors and return 400. Rejected upgrade sockets MUST be destroyed after the response is written, even when the client keeps its write side open. It MUST parse Engine JSON as unknown and validate object and message schemas before accessing fields or resolving RPC waiters. Invalid payloads MUST be rejected without terminating the shared process or disrupting another Engine session.
 

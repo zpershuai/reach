@@ -69,6 +69,7 @@ impl WorkspaceFilesystem {
             .map(serde_json::Value::String)
             .collect::<Vec<_>>();
         let (items, cursor, truncated) = self.start_page(
+            &params.workspace,
             "fs.glob",
             query,
             CursorField::Matches(values),
@@ -188,6 +189,7 @@ impl WorkspaceFilesystem {
             .filter_map(|item| serde_json::to_value(item).ok())
             .collect::<Vec<_>>();
         let (items, cursor, truncated) = self.start_page(
+            &params.workspace,
             "fs.grep",
             query,
             CursorField::Matches(values),

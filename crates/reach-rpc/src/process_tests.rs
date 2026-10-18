@@ -422,3 +422,74 @@ fn poisoned_task_fails_closed_but_supervisor_still_terminates_child() {
         "corrupted state cannot release ownership as healthy"
     );
 }
+
+#[test]
+fn workspace_reload_stops_affected_processes_and_preserves_status() {
+    let (temp, _workspace, mut manager, params) = setup("setInterval(()=>{},1000)");
+    let workspace = WorkspaceFilesystem::new(HashMap::from([
+        ("fixture".into(), temp.path().to_owned()),
+        ("stable".into(), temp.path().to_owned()),
+    ]));
+    manager.policy.workspaces.push("stable".into());
+    let affected = manager.run(&params, &workspace).unwrap();
+    let other = manager
+        .run(
+            &json!({"workspace":"stable","script":"main.cjs","launchId":"stable"}),
+            &workspace,
+        )
+        .unwrap();
+    manager
+        .replace_workspaces(
+            vec!["stable".into()],
+            &std::collections::BTreeSet::from(["fixture".into()]),
+        )
+        .unwrap();
+    assert_eq!(
+        manager
+            .status(&json!({"processId":affected["processId"]}))
+            .unwrap()["state"],
+        "stopped"
+    );
+    assert!(matches!(
+        manager
+            .status(&json!({"processId":other["processId"]}))
+            .unwrap()["state"]
+            .as_str(),
+        Some("starting" | "running")
+    ));
+    let mut next = params;
+    next["launchId"] = json!("new-launch");
+    assert_eq!(
+        manager.run(&next, &workspace).unwrap_err().code,
+        "PROCESS_EXECUTION_DISABLED"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn sighup_requests_reload_without_shutdown() {
+    // Isolate global signal state from concurrently running runtime tests.
+    if std::env::var_os("REACH_SIGNAL_TEST_CHILD").is_some() {
+        install_shutdown_handlers();
+        unsafe extern "C" {
+            fn raise(signal: i32) -> i32;
+        }
+        assert_eq!(unsafe { raise(1) }, 0);
+        assert!(take_reload_requested());
+        assert!(!shutdown_requested());
+        return;
+    }
+    let result = Command::new(std::env::current_exe().unwrap())
+        .args([
+            "--exact",
+            "process::tests::sighup_requests_reload_without_shutdown",
+        ])
+        .env("REACH_SIGNAL_TEST_CHILD", "1")
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stdout)
+    );
+}

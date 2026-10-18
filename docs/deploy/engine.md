@@ -10,7 +10,7 @@ Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 
 bash scripts/install-engine.sh .reach/engine.env
 ```
 
-脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.2.2` 可以固定版本，`REACH_RELEASE_REPO=owner/repo` 可以指定 fork，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
+脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.3.0` 可以固定版本，`REACH_RELEASE_REPO=owner/repo` 可以指定 fork，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
 
 ## 1. 配置与工作区
 
@@ -32,9 +32,32 @@ chmod 700 "$HOME/.reach/workspace"
 
 文件 RPC 的 `workspace` 是配置中的名称，例如 `default`；`path` 是工作区相对路径，例如 `notes/today.txt`。不要把整个用户主目录或系统根目录作为默认工作区。Unix 实现通过目录描述符和 no-follow 访问约束路径，拒绝越界及符号链接绕过，但工作区本身仍应选取明确允许远程访问的文件范围。
 
-添加第二个工作区时采用 `default:/absolute/path,notes:/another/path`，提前准备目录，并重启 Engine。客户端不能通过传入任意绝对路径扩展这些根目录。
+环境变量模式下，添加第二个工作区时采用 `default:/absolute/path,notes:/another/path`，提前准备目录，并重启 Engine。客户端不能通过传入任意绝对路径扩展这些根目录。
 
 MCP 客户端可调用 `list_workspaces({deviceId})` 发现配置中的名称和允许执行脚本的工作区；返回的是 Engine `session.ready` 元数据，不暴露根目录的绝对路径。文件调用应使用返回的名称，不能假定 `default` 一定存在。
+
+### 动态工作区文件（Engine 0.3.0 起）
+
+需要不重启添加、移除或更换根目录时，使用本机 JSON 文件。先创建所有根目录，删除服务环境中的 `REACH_WORKSPACE_ROOTS` 和 `REACH_PROCESS_WORKSPACES`，设置 `REACH_WORKSPACES_FILE=/home/example/.reach/workspaces.json`，再重启一次。macOS 可使用 `/Users/example/.reach/workspaces.json`；必须填写服务用户实际可读的路径。
+
+```json
+{
+  "workspaces": {
+    "default": { "path": "/home/example/.reach/workspace" },
+    "scripts": { "path": "/home/example/reach-scripts", "process": true }
+  }
+}
+```
+
+`process` 默认 `false`。文件只允许上述键；至少声明一个工作区，名称不能为空，根目录必须是已存在的绝对目录，Engine 不会替文件模式创建目录。路径会解析为真实目录，指向同一目录的符号链接不算更换根目录。JSON 不展开 `~` 或 `$HOME`，也不能包含 token 或 Gateway 设置。
+
+显式文件优先，其次是任一工作区环境变量；三者均未设置时自动发现 `~/.reach/workspaces.json`，不存在则保留内置 `default`。显式文件与任一工作区环境变量同时设置会导致启动失败。环境模式不会热重载，也不会监听默认文件后来是否出现。
+
+文件模式每 2 秒检查一次，在空闲心跳期间和会话请求之间均生效；Unix 上 `kill -HUP <engine-pid>` 可请求在下个循环立即重载。建议先写临时文件再原子重命名。无效 JSON、未知键、空工作区集、目录无效或文件被删除、不可读时，整次修改不生效，继续使用最后有效配置，日志记录 `WORKSPACE_RELOAD_FAILED`，不输出文件内容。被拒绝的文件会在每个轮询周期重试，同一原因只记录一次；例如先写入新条目、后创建根目录，目录出现后无需再次修改文件即可生效。启动时出现这些错误则直接退出。
+
+已有请求完成后才替换配置。移除或更换根目录会使该工作区游标返回 `INVALID_CURSOR`，并终止其中当前会话拥有的进程；关闭 `process` 也会终止进程并拒绝新启动。其他工作区的游标和进程继续运行。移除名称后的文件访问返回 `WORKSPACE_ACCESS_DENIED`。
+
+变更后 Engine 在同一会话发送更新的 `session.ready`，`list_workspaces` 和控制台自动读取新列表。请先升级到 Gateway 0.7.0，再升级 Engine：新版 Gateway 会撤销移除、更换根目录工作区的文件和执行 grant，以及关闭执行的工作区的执行 grant；仅绑定 processId 的控制 grant 保留到过期。旧 Gateway 能刷新列表，但更换根目录时无法撤销旧 grant，最长仍可使用 5 分钟；使用旧 Gateway 时应改用新工作区名称，避免原名更换根目录。迁移和回滚见 [组件版本](versions.md)。
 
 ## 2. 构建目标平台二进制
 

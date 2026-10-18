@@ -20,6 +20,8 @@ export interface LiveSession {
   methods?: string[];
   workspaces?: string[];
   processWorkspaces?: string[];
+  workspaceGenerations?: Record<string, string>;
+  engineId?: string;
   /** True while draining after close/expiry: no new data-plane requests. */
   closed: boolean;
   leaseExpiresAt: number;
@@ -40,6 +42,8 @@ export class EngineSessionState {
   private previousStatus = "none";
   /** Last Engine-reported or observed closure reason, kept for session status. */
   public lastClosureReason: string | undefined;
+  /** Last workspace metadata from any ready session; grant revocation diffs against it. */
+  public advertised: { workspaces: string[]; processWorkspaces?: string[]; workspaceGenerations?: Record<string, string> } | undefined;
   public leaseTimer: ReturnType<typeof setTimeout> | undefined;
   public idleTimer: ReturnType<typeof setTimeout> | undefined;
   public connectingTimer: ReturnType<typeof setTimeout> | undefined;
@@ -51,9 +55,9 @@ export class EngineSessionState {
     private readonly sessionEndpoint: string,
     private readonly onStatusChange?: (status: ReturnType<EngineSessionState["sessionStatus"]>) => void,
   ) {}
-  public notify = (): void => {
+  public notify = (metadataChanged = false): void => {
     const status = this.sessionStatus();
-    if (status.status === this.previousStatus) return;
+    if (status.status === this.previousStatus && !metadataChanged) return;
     this.previousStatus = status.status;
     this.onStatusChange?.(status);
   };

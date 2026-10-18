@@ -84,6 +84,16 @@ impl WorkspaceFilesystem {
         }
     }
 
+    pub fn replace_roots(&mut self, next: &crate::workspace_config::WorkspaceSet) {
+        let roots = next.roots();
+        self.cursors.retain(|_, cursor| {
+            self.roots
+                .get(&cursor.workspace)
+                .is_some_and(|old| roots.get(&cursor.workspace) == Some(old))
+        });
+        self.roots = roots;
+    }
+
     #[cfg(unix)]
     pub(crate) fn process_entry(
         &self,
@@ -1008,5 +1018,44 @@ mod tests {
             fs::read_to_string(dir.path().join("timely/write.txt")).unwrap(),
             "y"
         );
+    }
+}
+
+#[cfg(test)]
+mod reload_tests {
+    use super::*;
+    use crate::workspace_config::WorkspaceSet;
+    #[test]
+    fn replacement_invalidates_only_affected_workspace_cursors() {
+        let root = tempfile::tempdir().unwrap();
+        let other = tempfile::tempdir().unwrap();
+        fs::write(root.path().join("a"), "a").unwrap();
+        fs::write(root.path().join("b"), "b").unwrap();
+        for repoint in [false, true] {
+            let roots = HashMap::from([
+                ("affected".into(), root.path().to_owned()),
+                ("stable".into(), root.path().to_owned()),
+            ]);
+            let mut workspace = WorkspaceFilesystem::new(roots.clone());
+            let params = |name: &str| {
+                crate::parse_fs_glob_params_value(
+                    &serde_json::json!({"workspace":name,"pattern":"*","maxResults":1}),
+                )
+                .unwrap()
+            };
+            let mut affected = params("affected");
+            affected.cursor = workspace.glob(&affected).unwrap().cursor;
+            let mut stable = params("stable");
+            stable.cursor = workspace.glob(&stable).unwrap().cursor;
+            assert!(affected.cursor.is_some() && stable.cursor.is_some());
+            let mut next = roots;
+            next.remove("affected");
+            if repoint {
+                next.insert("affected".into(), other.path().to_owned());
+            }
+            workspace.replace_roots(&WorkspaceSet::from_roots(next, &[]));
+            assert_eq!(workspace.glob(&affected).unwrap_err().code, INVALID_CURSOR);
+            assert_eq!(workspace.glob(&stable).unwrap().matches.len(), 1);
+        }
     }
 }

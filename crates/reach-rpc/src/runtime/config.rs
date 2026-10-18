@@ -284,7 +284,8 @@ pub struct EngineConfig {
     pub engine_id: String,
     pub gateway: GatewayConfig,
     pub timeouts: TimeoutPolicy,
-    pub workspace_roots: HashMap<String, PathBuf>,
+    pub workspaces: crate::workspace_config::WorkspaceSet,
+    pub workspace_file: Option<PathBuf>,
     pub processes: crate::process::ProcessPolicy,
     pub update: Option<super::update::UpdateConfig>,
 }
@@ -325,29 +326,54 @@ impl EngineConfig {
             return Err("REACH_ENGINE_ID must not be empty".into());
         }
 
-        let workspace_roots = match lookup("REACH_WORKSPACE_ROOTS") {
-            Some(spec) => parse_workspace_roots(&spec)
-                .map_err(|error| format!("invalid workspace roots: {error}"))?,
-            None => {
-                let mut roots = HashMap::new();
-                roots.insert("default".to_owned(), default_workspace_root());
-                roots
-            }
-        };
-
-        let processes = crate::process::ProcessPolicy::parse(lookup)?;
-        if processes
-            .workspaces
-            .iter()
-            .any(|name| !workspace_roots.contains_key(name))
-        {
-            return Err("REACH_PROCESS_WORKSPACES contains an unknown workspace".into());
+        let explicit_file = lookup("REACH_WORKSPACES_FILE");
+        let roots_env = lookup("REACH_WORKSPACE_ROOTS");
+        let process_env = lookup("REACH_PROCESS_WORKSPACES");
+        let has_env = roots_env.is_some() || process_env.is_some();
+        if explicit_file.is_some() && has_env {
+            return Err(
+                "REACH_WORKSPACES_FILE conflicts with workspace environment variables".into(),
+            );
         }
+        let workspace_file = if let Some(path) = explicit_file {
+            if path.trim().is_empty() {
+                return Err("REACH_WORKSPACES_FILE must not be empty".into());
+            }
+            Some(PathBuf::from(path))
+        } else if !has_env {
+            lookup("HOME")
+                .map(|home| PathBuf::from(home).join(".reach/workspaces.json"))
+                .filter(|path| path.exists())
+        } else {
+            None
+        };
+        let processes = crate::process::ProcessPolicy::parse(lookup)?;
+        let workspaces = if let Some(path) = &workspace_file {
+            crate::workspace_config::WorkspaceSet::read(path, &Default::default())?
+        } else {
+            let workspace_roots = match roots_env {
+                Some(spec) => parse_workspace_roots(&spec)
+                    .map_err(|error| format!("invalid workspace roots: {error}"))?,
+                None => HashMap::from([("default".to_owned(), default_workspace_root())]),
+            };
+            if processes
+                .workspaces
+                .iter()
+                .any(|name| !workspace_roots.contains_key(name))
+            {
+                return Err("REACH_PROCESS_WORKSPACES contains an unknown workspace".into());
+            }
+            crate::workspace_config::WorkspaceSet::from_roots(
+                workspace_roots,
+                &processes.workspaces,
+            )
+        };
         Ok(EngineConfig {
             engine_id,
             gateway,
             timeouts,
-            workspace_roots,
+            workspaces,
+            workspace_file,
             processes,
             update: super::update::UpdateConfig::parse(lookup)?,
         })
@@ -361,6 +387,77 @@ impl EngineConfig {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selects_workspace_sources_and_rejects_conflicts() {
+        let home = tempfile::tempdir().unwrap();
+        std::fs::create_dir(home.path().join(".reach")).unwrap();
+        let path = home.path().join(".reach/workspaces.json");
+        std::fs::write(
+            &path,
+            serde_json::json!({"workspaces":{"scripts":{"path":home.path(),"process":true}}})
+                .to_string(),
+        )
+        .unwrap();
+        let lookup = |name: &str| (name == "HOME").then(|| home.path().display().to_string());
+        let config = EngineConfig::parse(None, &lookup).unwrap();
+        assert_eq!(config.workspace_file.as_ref(), Some(&path));
+        assert_eq!(config.workspaces.process_names(), vec!["scripts"]);
+        let explicit =
+            |name: &str| (name == "REACH_WORKSPACES_FILE").then(|| path.display().to_string());
+        assert_eq!(
+            EngineConfig::parse(None, &explicit)
+                .unwrap()
+                .workspaces
+                .names(),
+            vec!["scripts"]
+        );
+        for variable in ["REACH_WORKSPACE_ROOTS", "REACH_PROCESS_WORKSPACES"] {
+            let conflict = |name: &str| {
+                if name == variable {
+                    Some(String::new())
+                } else {
+                    explicit(name)
+                }
+            };
+            assert!(EngineConfig::parse(None, &conflict)
+                .unwrap_err()
+                .contains("conflicts"));
+        }
+        let environment = |name: &str| match name {
+            "REACH_WORKSPACE_ROOTS" => {
+                Some(format!("env:{}", home.path().join("not-created").display()))
+            }
+            "REACH_PROCESS_WORKSPACES" => Some("env".into()),
+            _ => lookup(name),
+        };
+        let env = EngineConfig::parse(None, &environment).unwrap();
+        assert!(env.workspace_file.is_none());
+        assert_eq!(env.workspaces.process_names(), vec!["env"]);
+        assert_eq!(
+            env.workspaces.entries["env"].root,
+            home.path().join("not-created")
+        );
+        // Either environment variable suppresses discovery, including an empty allowlist.
+        let process_only = |name: &str| {
+            if name == "REACH_PROCESS_WORKSPACES" {
+                Some(String::new())
+            } else {
+                lookup(name)
+            }
+        };
+        assert!(EngineConfig::parse(None, &process_only)
+            .unwrap()
+            .workspace_file
+            .is_none());
+        std::fs::remove_file(&path).unwrap();
+        assert!(EngineConfig::parse(None, &explicit).is_err());
+        let fallback = EngineConfig::parse(None, &lookup).unwrap();
+        assert!(fallback.workspace_file.is_none());
+        assert_eq!(fallback.workspaces.names(), vec!["default"]);
+        std::fs::write(&path, "invalid JSON").unwrap();
+        assert!(EngineConfig::parse(None, &lookup).is_err());
+    }
 
     #[test]
     fn remote_engine_requires_secret_and_redacts_it_in_debug() {
@@ -479,6 +576,6 @@ mod tests {
         assert_eq!(config.engine_id, "reach-engine");
         assert_eq!(config.gateway.origin.host, "127.0.0.1");
         assert_eq!(config.gateway.origin.port, 8787);
-        assert!(config.workspace_roots.contains_key("default"));
+        assert!(config.workspaces.entries.contains_key("default"));
     }
 }

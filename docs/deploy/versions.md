@@ -1,6 +1,18 @@
 # 组件版本与更新
 
-MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.2.2`，Gateway 为 `0.6.0`，独立 stdio MCP Connector 为 `0.4.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+MCP、Engine、Gateway 各自维护独立的 SemVer 发布版本，当前 Engine 为 `0.3.0`，Gateway 为 `0.7.0`，独立 stdio MCP Connector 为 `0.4.0`。修复递增 patch，向后兼容的功能递增 minor，破坏性变更递增 major。版本不要求同步递增；一次发布只更新实际变更的组件。
+
+
+Gateway `0.7.0` 和 Engine `0.3.0` 新增动态工作区文件：Engine 校验并热重载本机 JSON，在同一会话刷新工作区、执行许可和不暴露路径的 generation；Gateway 刷新列表、发布控制台事件，并撤销移除、更换根目录或关闭执行的工作区的相应文件/执行 grant。processId 控制 grant 保留至过期。stdio MCP 代码无需更新，版本保持 `0.4.0`，`reach-rpc/1.0` 协议版本保持不变。
+
+### 迁移到动态工作区
+
+1. 先升级 Gateway 至 `0.7.0`，确认它仍可与现有 Engine 正常连接；再升级 Engine 至 `0.3.0`。环境变量安装保持原行为，无需修改配置。
+2. 需要动态调整时，把当前根目录和执行许可写入设备本机的 `~/.reach/workspaces.json`，格式见 [Engine](engine.md)。移除服务环境中的 `REACH_WORKSPACE_ROOTS` 和 `REACH_PROCESS_WORKSPACES`，可显式设置 `REACH_WORKSPACES_FILE`，然后重启一次。实际路径、凭证和验证记录保留在忽略的 `.reach/` 文件或仓库外。
+3. 后续修改文件会每 2 秒自动检查，Unix 上也可发送 `SIGHUP`；建议写临时文件后原子重命名。无效修改保留最后有效配置，无需关闭会话。
+4. 回滚时恢复原工作区环境变量，移除 `REACH_WORKSPACES_FILE` 并重启。旧 Engine 忽略工作区 JSON 文件。
+
+旧 Gateway 会更新列表，但不能在原名更换根目录时撤销旧 grant，最长可继续授权 5 分钟。尚未升级 Gateway 时请用新名称替代原名更换根目录。
 
 Gateway `0.6.0` 新增 HTTP MCP 工具列表变更通知，声明 `listChanged: true`，通过 GET `/mcp` SSE 发送 `notifications/tools/list_changed`，POST JSON 调用保持兼容。客户端应在通知后重新获取 `tools/list`；宿主保存的旧对话工具定义仍需刷新后在新对话中验证。
 
@@ -42,8 +54,8 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 {
   "mcpVersion": "0.4.0",
   "deviceId": "engine-a",
-  "gatewayVersion": "0.6.0",
-  "engineVersion": "0.2.2"
+  "gatewayVersion": "0.7.0",
+  "engineVersion": "0.3.0"
 }
 ```
 
@@ -56,7 +68,7 @@ MCP 初始化响应的 `serverInfo.version` 返回当前 MCP 产物版本。所�
 更新 Gateway 或 MCP 的包版本，例如：
 
 ```bash
-npm --prefix packages/reach-rpc version 0.6.0 --no-git-tag-version
+npm --prefix packages/reach-rpc version 0.7.0 --no-git-tag-version
 npm --prefix packages/grok-bot-mcp-connector version 0.4.0 --no-git-tag-version
 ```
 

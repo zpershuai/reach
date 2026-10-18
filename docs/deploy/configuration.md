@@ -117,6 +117,7 @@ HTTP MCP 与 REST Controller 共用 `REACH_CONTROLLER_TOKEN`，不使用独立 M
 | `REACH_GATEWAY_URL` | `http://127.0.0.1:8787` | 公网使用 HTTPS；与命令行 URL 二选一 |
 | `REACH_ENGINE_TOKEN` | 无 | HTTPS 必填 |
 | `REACH_ENGINE_ID` | `reach-engine` | 需与 Gateway 的 ID 一致 |
+| `REACH_WORKSPACES_FILE` | 未设置 | 本机工作区 JSON 路径；与两个工作区环境变量互斥，详见 [动态工作区](engine.md#动态工作区文件engine-030-起) |
 | `REACH_WORKSPACE_ROOTS` | `default:~/.reach/workspace` 对应的实际路径 | `name:absolute-path`，多个根用逗号分隔 |
 | `REACH_CONNECTION_TIMEOUT_SECS` | `15` | 建立连接的时限 |
 | `REACH_RPC_DEADLINE_SECS` | `30` | RPC 执行上限 |
@@ -160,3 +161,11 @@ REACH_UPDATE_REQUEST_DIR=/run/reach/update
 Compose 已将 `deploy/update/` 挂载到该路径；先按 [运维](operations.md) 创建目录并安装宿主机 helper。GitHub token 文件若在容器使用，需要单独以只读文件挂载，并令文件权限允许容器用户读取。宿主机 helper 的 token 也需独立配置；容器中的文件路径不能直接供宿主机读取。不要将 token、repo 私有 owner 或安装目录提交到仓库。
 
 Host Engine 仅需 enable 和 repo，安装二进制所在目录必须允许服务用户写入和原子替换。Compose Engine 设置 backend 和独立 request dir，其宿主机 helper 另外使用 `REACH_UPDATE_COMPOSE_FILE` 指定现有 Compose 文件、`REACH_UPDATE_ENGINE_SERVICE`（默认 `engine`）指定服务名、`REACH_UPDATE_ENGINE_BINARY_PATH`（默认 `/usr/local/bin/engine`）指定容器内二进制路径。环境文件、工作区挂载和 Node runtime 沿用现有配置。
+
+## 工作区配置来源
+
+Engine 按以下顺序选择工作区：显式 `REACH_WORKSPACES_FILE` → 任一 `REACH_WORKSPACE_ROOTS` / `REACH_PROCESS_WORKSPACES` 环境变量 → 已存在的 `~/.reach/workspaces.json` → 内置 `default`。显式文件与任一工作区环境变量同时设置是启动错误，包含值为空的环境变量。环境模式沿用现有行为且不会重载；文件模式不会自动创建缺失的根目录。
+
+文件形如 `{"workspaces":{"docs":{"path":"/home/example/documents","process":false}}}`。只允许 `workspaces` 和每项的 `path`、可选 `process`，至少一个非空名称及已存在的绝对目录，拒绝未知键。Gateway 设置和凭证继续放在服务的私有环境文件中，不能放入工作区 JSON。
+
+文件模式每 2 秒轮询并确认内容变化，Unix `SIGHUP` 请求下次循环立即重载。整个文件验证成功后在请求之间原子应用；无效、不可读、删除的文件保留最后有效配置，输出不含文件内容的 `WORKSPACE_RELOAD_FAILED` 诊断。建议写临时文件后重命名。移除/更换根目录会失效对应游标并停止对应进程，关闭执行也会停止进程。会话内刷新 ready 后可重新调用 `list_workspaces`。先升级 Gateway 到 0.7.0；旧 Gateway 无法在更换根目录时撤销旧 grant，应改用新名称。完整格式及行为见 [Engine](engine.md)。

@@ -27,6 +27,16 @@ REACH_PROCESS_NODE_BIN=/absolute/path/to/home/.reach/runtime/node/bin/node
 
 未传 `timeoutMs` 时使用 60000 与 Engine 上限中的较小值；显式请求值不能超过 Engine 上限。任务记录和 launchId 保留到 session 结束，容量耗尽时拒绝新任务，不淘汰去重记录。
 
+### 文件模式下的执行许可
+
+Engine 0.3.0 支持 `REACH_WORKSPACES_FILE` 指定的工作区 JSON，或者在两个工作区环境变量均未设置时自动读取已存在的 `~/.reach/workspaces.json`。文件中的 `"process": true` 为对应工作区开启执行，默认关闭；文件模式不能同时设置 `REACH_WORKSPACE_ROOTS` 或 `REACH_PROCESS_WORKSPACES`。例如 `{"workspaces":{"scripts":{"path":"/home/example/reach-scripts","process":true}}}`，根目录必须已经存在，未知键或无效条目会导致整份配置无效。
+
+文件模式每 2 秒轮询，Unix `SIGHUP` 也可触发重载；配置只在请求之间替换。启动时无效会退出，运行中无效 JSON、不可读或删除的文件则保留最后有效配置，记录 `WORKSPACE_RELOAD_FAILED`，不回显文件内容。环境模式不热重载。
+
+移除、更换工作区根目录或关闭执行许可时，Engine 使用正常终止流程停止其中当前会话拥有的进程，`process.status` 仍能查询终止记录，新 `process.run` 被拒绝。即使个别进程未能在宽限期内结束，工作区变更也照常生效，残留进程按 session 清理失败规则保留所有权并在 session 结束时继续清理。其他工作区的进程继续运行。根目录移除/更换同时使对应文件游标失效。刷新 ready 后，Gateway 0.7.0 撤销受影响的执行 grant；关闭执行不会撤销文件写入 grant。仅按 processId 绑定的控制 grant 保留到过期。
+
+应先升级 Gateway 再升级 Engine。旧 Gateway 更换根目录后仍可能接受旧 grant，直到 5 分钟到期；在旧 Gateway 上请使用新工作区名称。格式、来源优先级和迁移步骤见 [Engine](engine.md) 和 [组件版本](versions.md)。
+
 ## 调用流程
 
 先调用 `list_workspaces({deviceId})`，从 `processWorkspaces` 选择允许执行的名称。列表为空时不能启动脚本。下面假设实际返回的执行工作区包含 `default`；先通过文件接口在该工作区创建脚本，然后启动：

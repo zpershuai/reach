@@ -102,6 +102,39 @@ Control API summary:
 - While no session is wanted the Engine posts a heartbeat every **120s** by default; configure `REACH_HEARTBEAT_INTERVAL_SECS` on the **Gateway** to adjust its returned interval (the Engine follows `intervalSeconds`). Once a session is wanted, the next heartbeat returns interval **5** and a one-time session lease: `endpoint`, `token`, `sessionId`, and an absolute `leaseExpiresAt`. The token is single-use and expires after 30 seconds.
 - The lease `endpoint` is a Gateway-relative path (`/session`); the Engine resolves it against its **configured** Gateway origin and refuses a lease that points anywhere else.
 - After opening the WebSocket the Engine sends `session.ready` (protocol/version, Engine id, workspace names, supported methods). The Gateway forwards no data-plane request until it has seen a valid `ready`.
+- A ready Engine may send `session.ready` again on the same `sessionId` and authenticated `engineId`. Gateway replaces `workspaces`, `processWorkspaces`, `workspaceGenerations` and `methods`, publishes `session.state`, and preserves pending RPCs. Mismatched bindings return `INVALID_PARAMS` without changing metadata.
+- Optional `workspaceGenerations` maps non-empty workspace names to non-empty opaque identity tokens. A token stays stable while the canonical root stays the same and changes on repoint or removal followed by re-addition. Gateway revokes mutation and execution grants on removal or generation change, and execution grants when process access is disabled. If either ready message lacks generations, only removal can identify a changed workspace. Process control grants bind only to the original processId and remain until expiry; the Engine terminates affected owned processes. Older ready messages without this field remain valid; protocol version stays `1.0`.
+
+Example (the shared `fixtures/session.ready.json` contract fixture; `futureField` demonstrates forward compatibility):
+
+```json
+{
+  "type": "session.ready",
+  "protocol": "reach-rpc",
+  "version": "1.0",
+  "sessionId": "session-1",
+  "engineId": "reach-engine",
+  "workspaces": [
+    "default",
+    "fixture"
+  ],
+  "methods": [
+    "fs.read",
+    "fs.list",
+    "fs.stat",
+    "fs.write",
+    "fs.edit",
+    "fs.glob",
+    "fs.grep"
+  ],
+  "futureField": true,
+  "workspaceGenerations": {
+    "default": "generation-default",
+    "fixture": "generation-fixture"
+  }
+}
+```
+
 - Tools execute serially on one worker while the Runtime continues receiving close/renew control messages. Close, lease expiry, rotation, or the hard RPC execution timeout sets a cooperative cancellation flag, drops queued work, drains the worker, and then releases the session. An atomic mutation already past its commit boundary may finish.
 - The Engine is the executor and never originates data-plane `request` envelopes to the Gateway. It replies to each request with a matching `response` or `error`.
 - On Agent close, lease expiry, idle timeout, rotation, or transport failure the Engine emits `session.closed` with a machine-readable reason, drains, and returns to heartbeat. A session is never resumed with its cursors or pending work.

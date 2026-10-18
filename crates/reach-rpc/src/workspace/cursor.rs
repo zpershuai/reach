@@ -8,6 +8,7 @@ pub(super) enum CursorField {
 
 #[derive(Debug)]
 pub(super) struct CursorSnapshot {
+    pub(super) workspace: String,
     pub(super) method: String,
     pub(super) query: String,
     pub(super) field: CursorField,
@@ -43,6 +44,7 @@ impl WorkspaceFilesystem {
 
     pub(super) fn start_page(
         &mut self,
+        workspace: &str,
         method: &str,
         query: String,
         field: CursorField,
@@ -56,6 +58,7 @@ impl WorkspaceFilesystem {
         self.cursors.insert(
             id.clone(),
             CursorSnapshot {
+                workspace: workspace.to_owned(),
                 method: method.to_owned(),
                 query,
                 field,

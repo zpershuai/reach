@@ -35,6 +35,17 @@ export class GrantStore {
     this.processGrants.clear();
   }
 
+  public revokeWorkspace(workspace: string, { processOnly = false }: { processOnly?: boolean } = {}): void {
+    if (!processOnly) {
+      for (const [id, grant] of this.grants) {
+        if (grant.workspace === workspace) this.grants.delete(id);
+      }
+    }
+    for (const [id, grant] of this.processGrants) {
+      if (grant.scope.kind === "execute" && grant.scope.workspace === workspace) this.processGrants.delete(id);
+    }
+  }
+
   public issue(workspace: string, path: string, methods: readonly MutationMethod[]): { grantId: string; expiresAt: string } {
     const normalizedPath = normalizeWorkspacePath(path);
     if (!normalizedPath) throw new Error("invalid grant path");

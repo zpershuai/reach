@@ -153,6 +153,7 @@ pub struct EngineRuntime {
     cleanup_transport: Option<Box<dyn SessionTransport>>,
     updater: Option<Box<dyn super::update::RuntimeUpdater>>,
     next_heartbeat_ms: i64,
+    workspace_watcher: Option<crate::workspace_watcher::WorkspaceWatcher>,
 }
 
 impl EngineRuntime {
@@ -165,7 +166,12 @@ impl EngineRuntime {
         clock: Box<dyn Clock>,
         sleep: Box<dyn Fn(Duration)>,
     ) -> EngineRuntime {
+        let workspace_watcher = config
+            .workspace_file
+            .clone()
+            .map(|path| crate::workspace_watcher::WorkspaceWatcher::new(path, clock.now_ms()));
         EngineRuntime {
+            workspace_watcher,
             config,
             heartbeat,
             session_factory,
@@ -219,6 +225,10 @@ impl EngineRuntime {
     fn idle_wait(&self, duration: Duration) -> StepOutcome {
         StepOutcome::Wait(if self.updater.is_some() {
             duration.min(Duration::from_millis(100))
+        } else if self.workspace_watcher.is_some() {
+            duration.min(Duration::from_millis(
+                crate::workspace_watcher::WORKSPACE_POLL_MS as u64,
+            ))
         } else {
             duration
         })
@@ -291,6 +301,19 @@ impl EngineRuntime {
         {
             self.transition(RuntimeState::Shutdown);
         }
+        if !matches!(
+            self.state,
+            RuntimeState::ActiveSession | RuntimeState::Draining | RuntimeState::Shutdown
+        ) {
+            reload_workspaces(
+                &mut self.workspace_watcher,
+                &mut self.config.workspaces,
+                &mut self.workspace,
+                None,
+                self.clock.now_ms(),
+                &self.events,
+            );
+        }
         if self.poll_update() {
             return Ok(StepOutcome::Shutdown);
         }
@@ -302,7 +325,7 @@ impl EngineRuntime {
         {
             return Ok(self.idle_wait(Duration::from_millis(100)));
         }
-        if self.updater.is_some()
+        if (self.updater.is_some() || self.workspace_watcher.is_some())
             && self.state == RuntimeState::Heartbeating
             && self.clock.now_ms() < self.next_heartbeat_ms
         {
@@ -463,8 +486,6 @@ impl EngineRuntime {
         let events = &self.events;
         let timeouts = self.config.timeouts;
         let engine_id = self.config.engine_id.clone();
-        let mut workspaces: Vec<String> = self.config.workspace_roots.keys().cloned().collect();
-        workspaces.sort();
 
         let mut context = SessionContext::new(
             lease.session_id.clone(),
@@ -476,7 +497,9 @@ impl EngineRuntime {
             self.clock.now_ms(),
             &mut self.workspace,
         );
-        context.processes = crate::process::ProcessManager::new(self.config.processes.clone());
+        let mut policy = self.config.processes.clone();
+        policy.workspaces = self.config.workspaces.process_names();
+        context.processes = crate::process::ProcessManager::new(policy);
         let mut dispatcher = SessionDispatcher::new(
             lease.session_id.clone(),
             self.registry.clone(),
@@ -486,15 +509,15 @@ impl EngineRuntime {
 
         // Announce readiness before reading any data-plane request. The Gateway
         // gates forwarding on this message.
-        let mut ready = session_ready(&lease.session_id, &engine_id, workspaces, methods);
-        let mut process_workspaces = self.config.processes.workspaces.clone();
-        process_workspaces.sort();
-        ready.process_workspaces = Some(process_workspaces);
-        let ready_text = match serialize_session_message(&SessionMessage::Ready(ready)) {
-            Ok(text) => text,
-            Err(_) => return SessionClosureReason::Disconnected,
-        };
-        if transport.send(&ready_text).is_err() {
+        if send_workspace_ready(
+            transport,
+            &lease.session_id,
+            &engine_id,
+            &self.config.workspaces,
+            &methods,
+        )
+        .is_err()
+        {
             return SessionClosureReason::Disconnected;
         }
         events.borrow_mut().push(RuntimeEvent::SessionReady {
@@ -513,6 +536,25 @@ impl EngineRuntime {
             last_activity_ms,
         };
         let reason = 'drive: loop {
+            if reload_workspaces(
+                &mut self.workspace_watcher,
+                &mut self.config.workspaces,
+                context.workspace,
+                Some(&mut context.processes),
+                self.clock.now_ms(),
+                events,
+            ) && send_workspace_ready(
+                transport,
+                &lease.session_id,
+                &engine_id,
+                &self.config.workspaces,
+                &methods,
+            )
+            .is_err()
+            {
+                break 'drive SessionClosureReason::Disconnected;
+            }
+
             if crate::process::shutdown_requested() {
                 break 'drive SessionClosureReason::Shutdown;
             }
@@ -621,6 +663,78 @@ impl EngineRuntime {
         drop(context);
         reason
     }
+}
+
+fn send_workspace_ready(
+    transport: &mut Box<dyn SessionTransport>,
+    session_id: &str,
+    engine_id: &str,
+    workspaces: &crate::workspace_config::WorkspaceSet,
+    methods: &[String],
+) -> Result<(), String> {
+    let mut ready = session_ready(session_id, engine_id, workspaces.names(), methods.to_vec());
+    ready.process_workspaces = Some(workspaces.process_names());
+    ready.workspace_generations = Some(workspaces.generations());
+    let text = serialize_session_message(&SessionMessage::Ready(ready))
+        .map_err(|_| INVALID_PARAMS.to_owned())?;
+    transport.send(&text)
+}
+
+/// Validate completely before touching live roots, cursors, or process policy.
+fn reload_workspaces(
+    watcher: &mut Option<crate::workspace_watcher::WorkspaceWatcher>,
+    current: &mut crate::workspace_config::WorkspaceSet,
+    workspace: &mut WorkspaceFilesystem,
+    processes: Option<&mut crate::process::ProcessManager>,
+    now_ms: i64,
+    events: &RefCell<EventBuffer>,
+) -> bool {
+    let force = crate::process::take_reload_requested();
+    let Some(watcher) = watcher else {
+        return false;
+    };
+    if !watcher.check(now_ms, force) {
+        return false;
+    }
+    let next = match crate::workspace_config::WorkspaceSet::read(&watcher.path, current) {
+        Ok(next) => next,
+        Err(reason) => {
+            if watcher.reload_failed(&reason) {
+                events.borrow_mut().push(RuntimeEvent::Message {
+                    line: format!("WORKSPACE_RELOAD_FAILED: {reason}"),
+                });
+            }
+            return false;
+        }
+    };
+    watcher.reload_succeeded();
+    if *current == next {
+        return false;
+    }
+    let diff = current.diff(&next);
+    let affected = diff
+        .removed
+        .union(&diff.repointed)
+        .cloned()
+        .chain(diff.process_disabled.iter().cloned())
+        .collect();
+    // Apply even when cleanup fails: removal must take effect, and processes
+    // that did not stop stay owned until session drain handles them.
+    if let Some(processes) = processes {
+        if let Err(error) = processes.replace_workspaces(next.process_names(), &affected) {
+            events.borrow_mut().push(RuntimeEvent::Message {
+                line: format!("Reach workspace process cleanup failed: {}", error.code),
+            });
+        }
+    }
+    workspace.replace_roots(&next);
+    for name in &affected {
+        events.borrow_mut().push(RuntimeEvent::Message {
+            line: format!("Reach workspace state invalidated: {name}"),
+        });
+    }
+    *current = next;
+    true
 }
 
 /// Handle one engine-side session message: control messages (`session.renew`,
@@ -810,6 +924,273 @@ pub fn finalize_session(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn invalid_reload_preserves_last_good_state_without_disclosing_contents() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("workspaces.json");
+        let valid = json!({"workspaces":{"default":{"path":dir.path()}}}).to_string();
+        std::fs::write(&file, &valid).unwrap();
+        let original =
+            crate::workspace_config::WorkspaceSet::read(&file, &Default::default()).unwrap();
+        let mut current = original.clone();
+        let mut workspace = WorkspaceFilesystem::new(current.roots());
+        let mut watcher = Some(crate::workspace_watcher::WorkspaceWatcher::new(
+            file.clone(),
+            0,
+        ));
+        let events = RefCell::new(EventBuffer::default());
+        for (index, contents) in [Some("private-secret invalid".to_owned()), None,
+            Some(json!({"workspaces":{"added":{"path":dir.path()},"bad":{"path":dir.path().join("missing")}}}).to_string())].into_iter().enumerate() {
+            if let Some(contents) = contents { std::fs::write(&file, contents).unwrap(); }
+            else { std::fs::remove_file(&file).unwrap(); }
+            assert!(!reload_workspaces(&mut watcher, &mut current, &mut workspace, None, (index as i64 + 1)*2000, &events));
+            assert_eq!(current, original);
+            let messages = events.borrow_mut().drain();
+            assert!(matches!(&messages[0], RuntimeEvent::Message { line } if line.starts_with("WORKSPACE_RELOAD_FAILED") && !line.contains("private-secret")));
+        }
+        std::fs::write(
+            &file,
+            json!({"workspaces":{"default":{"path":dir.path()},"added":{"path":dir.path()}}})
+                .to_string(),
+        )
+        .unwrap();
+        assert!(reload_workspaces(
+            &mut watcher,
+            &mut current,
+            &mut workspace,
+            None,
+            8000,
+            &events
+        ));
+        assert_eq!(
+            current.entries["default"].generation,
+            original.entries["default"].generation
+        );
+    }
+
+    #[test]
+    fn rejected_reload_applies_once_missing_root_appears_without_file_edit() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("workspaces.json");
+        let missing = dir.path().join("docs");
+        std::fs::write(
+            &file,
+            json!({"workspaces":{"default":{"path":dir.path()}}}).to_string(),
+        )
+        .unwrap();
+        let mut current =
+            crate::workspace_config::WorkspaceSet::read(&file, &Default::default()).unwrap();
+        let mut workspace = WorkspaceFilesystem::new(current.roots());
+        let mut watcher = Some(crate::workspace_watcher::WorkspaceWatcher::new(
+            file.clone(),
+            0,
+        ));
+        let events = RefCell::new(EventBuffer::default());
+        std::fs::write(
+            &file,
+            json!({"workspaces":{"default":{"path":dir.path()},"docs":{"path":&missing}}})
+                .to_string(),
+        )
+        .unwrap();
+        for now in [2000, 4000] {
+            assert!(!reload_workspaces(
+                &mut watcher,
+                &mut current,
+                &mut workspace,
+                None,
+                now,
+                &events
+            ));
+        }
+        // The identical failure is reported once, not on every poll.
+        assert_eq!(events.borrow_mut().drain().len(), 1);
+        std::fs::create_dir(&missing).unwrap();
+        assert!(reload_workspaces(
+            &mut watcher,
+            &mut current,
+            &mut workspace,
+            None,
+            6000,
+            &events
+        ));
+        assert_eq!(current.names(), vec!["default", "docs"]);
+    }
+
+    struct ReloadTransport {
+        awaiting_response: bool,
+        clock: SharedClock,
+        path: std::path::PathBuf,
+        actions: VecDeque<(Option<String>, Option<String>)>,
+        sent: Arc<Mutex<Vec<Value>>>,
+    }
+    impl SessionTransport for ReloadTransport {
+        fn recv(&mut self) -> Result<SessionIncoming, String> {
+            if self.awaiting_response {
+                std::thread::sleep(Duration::from_millis(1));
+                return Ok(SessionIncoming::WouldBlock);
+            }
+            let Some((edit, request)) = self.actions.pop_front() else {
+                return Ok(SessionIncoming::Close {
+                    code: None,
+                    reason: String::new(),
+                });
+            };
+            if let Some(edit) = edit {
+                std::fs::write(&self.path, edit).unwrap();
+                self.clock.advance(2000);
+            }
+            self.awaiting_response = request.is_some();
+            Ok(request
+                .map(SessionIncoming::Text)
+                .unwrap_or(SessionIncoming::WouldBlock))
+        }
+        fn send(&mut self, text: &str) -> Result<(), String> {
+            let value: Value = serde_json::from_str(text).unwrap();
+            if value["type"] == "response" || value["type"] == "error" {
+                self.awaiting_response = false;
+            }
+            self.sent.lock().unwrap().push(value);
+            Ok(())
+        }
+        fn send_pong(&mut self, _: &[u8]) -> Result<(), String> {
+            Ok(())
+        }
+        fn close(&mut self, _: u16, _: &str) -> Result<(), String> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn live_reload_refreshes_before_requests_and_noop_is_silent() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("workspaces.json");
+        std::fs::write(dir.path().join("note"), "reload works").unwrap();
+        let initial = json!({"workspaces":{"default":{"path":dir.path()}}}).to_string();
+        let added =
+            json!({"workspaces":{"default":{"path":dir.path()},"docs":{"path":dir.path()}}})
+                .to_string();
+        std::fs::write(&file, &initial).unwrap();
+        let mut config = test_config(0, TimeoutPolicy::default());
+        config.workspaces =
+            crate::workspace_config::WorkspaceSet::read(&file, &Default::default()).unwrap();
+        config.workspace_file = Some(file.clone());
+        let clock = SharedClock::new(0);
+        let (factory, _, _) = factory(vec![], None, 0);
+        let workspace = WorkspaceFilesystem::new(config.workspaces.roots());
+        let mut engine = EngineRuntime::new(
+            config,
+            workspace,
+            crate::tools::default_registry(),
+            Box::new(FakeHeartbeat::new(vec![])),
+            Box::new(factory),
+            Box::new(clock.clone()),
+            Box::new(|_| {}),
+        );
+        let request = |id| {
+            json!({"type":"request","protocol":"reach-rpc","version":"1.0","sessionId":"session-1","requestId":id,"method":"fs.read","params":{"workspace":"docs","path":"note"}}).to_string()
+        };
+        let sent = Arc::new(Mutex::new(Vec::new()));
+        let mut transport: Box<dyn SessionTransport> = Box::new(ReloadTransport {
+            awaiting_response: false,
+            clock,
+            path: file,
+            sent: sent.clone(),
+            actions: VecDeque::from([
+                (Some(added.clone()), None),
+                (None, Some(request("added"))),
+                (Some(format!("{added}\n")), None),
+                (None, Some(request("noop"))),
+                (Some(initial), None),
+                (None, Some(request("removed"))),
+            ]),
+        });
+        let lease = match lease_at("/session", 100000) {
+            HeartbeatOutcome::Lease(lease) => lease,
+            _ => unreachable!(),
+        };
+        engine.run_session(&mut transport, &lease);
+        let messages = sent.lock().unwrap();
+        let kinds: Vec<_> = messages
+            .iter()
+            .map(|m| m["type"].as_str().unwrap())
+            .collect();
+        assert_eq!(
+            kinds,
+            vec![
+                "session.ready",
+                "session.ready",
+                "response",
+                "response",
+                "session.ready",
+                "error"
+            ]
+        );
+        assert_eq!(messages[2]["result"]["content"], "reload works");
+        assert_eq!(messages[5]["error"]["code"], "WORKSPACE_ACCESS_DENIED");
+        assert_eq!(
+            messages[0]["workspaceGenerations"]["default"],
+            messages[1]["workspaceGenerations"]["default"]
+        );
+        for message in messages.iter().filter(|m| m["type"] == "session.ready") {
+            assert_eq!(message["sessionId"], "session-1");
+            assert_eq!(message["engineId"], "test-engine");
+            assert_eq!(message["methods"], messages[0]["methods"]);
+        }
+    }
+
+    #[test]
+    fn idle_reload_is_included_in_next_sessions_first_ready() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("workspaces.json");
+        std::fs::write(
+            &file,
+            json!({"workspaces":{"default":{"path":dir.path()}}}).to_string(),
+        )
+        .unwrap();
+        let mut config = test_config(0, TimeoutPolicy::default());
+        config.workspace_file = Some(file.clone());
+        config.workspaces =
+            crate::workspace_config::WorkspaceSet::read(&file, &Default::default()).unwrap();
+        let clock = SharedClock::new(0);
+        let (factory, sent, _) = factory(
+            vec![SessionIncoming::Close {
+                code: None,
+                reason: String::new(),
+            }],
+            None,
+            0,
+        );
+        let heartbeat = FakeHeartbeat::new(vec![
+            Ok(HeartbeatOutcome::Idle {
+                interval: Duration::from_secs(120),
+            }),
+            Ok(lease_at("/session", 100000)),
+        ]);
+        let mut engine = runtime(
+            config,
+            Box::new(heartbeat),
+            Box::new(factory),
+            Box::new(clock.clone()),
+        );
+        engine.step().unwrap();
+        assert_eq!(
+            engine.step().unwrap(),
+            StepOutcome::Wait(Duration::from_secs(2))
+        );
+        std::fs::write(&file, json!({"workspaces":{"default":{"path":dir.path()},"docs":{"path":dir.path(),"process":true}}}).to_string()).unwrap();
+        clock.advance(2000);
+        engine.step().unwrap();
+        assert_eq!(engine.config.workspaces.process_names(), vec!["docs"]);
+        clock.advance(118000);
+        for _ in 0..4 {
+            engine.step().unwrap();
+        }
+        let messages = sent.lock().unwrap();
+        let ready: Value = serde_json::from_str(&messages[0]).unwrap();
+        assert_eq!(ready["workspaces"], json!(["default", "docs"]));
+        assert_eq!(ready["processWorkspaces"], json!(["docs"]));
+    }
 
     #[test]
     fn response_budget_counts_envelope_utf8_and_json_escaping() {
@@ -1350,7 +1731,8 @@ mod tests {
             engine_id: "test-engine".into(),
             gateway: GatewayConfig::new("http://127.0.0.1:8787").unwrap(),
             timeouts,
-            workspace_roots: roots,
+            workspaces: crate::workspace_config::WorkspaceSet::from_roots(roots, &[]),
+            workspace_file: None,
             processes: Default::default(),
             update: None,
         }

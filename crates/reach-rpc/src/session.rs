@@ -39,6 +39,8 @@ pub struct SessionReady {
     pub workspaces: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub process_workspaces: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_generations: Option<std::collections::BTreeMap<String, String>>,
     pub methods: Vec<String>,
 }
 
@@ -113,6 +115,11 @@ fn validate_ready(ready: &SessionReady) -> Result<(), ContractError> {
             .engine_version
             .as_deref()
             .is_some_and(|version| !is_non_empty(version))
+        || ready.workspace_generations.as_ref().is_some_and(|entries| {
+            entries
+                .iter()
+                .any(|(name, generation)| !is_non_empty(name) || !is_non_empty(generation))
+        })
         || ready.workspaces.is_empty()
         || ready.methods.is_empty()
         || ready.workspaces.iter().any(|name| !is_non_empty(name))
@@ -249,6 +256,7 @@ pub fn session_ready(
         engine_version: Some(ENGINE_VERSION.to_owned()),
         workspaces,
         process_workspaces: None,
+        workspace_generations: None,
         methods,
     }
 }
@@ -274,6 +282,34 @@ pub fn session_close(session_id: &str, reason: &str) -> SessionClose {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ready_generations_are_additive_and_round_trip() {
+        let mut value: Value =
+            serde_json::from_str(include_str!("../../../fixtures/session.ready.json")).unwrap();
+        let ready = parse_session_ready(&value.to_string()).unwrap();
+        assert_eq!(
+            ready.workspace_generations.as_ref().unwrap()["default"],
+            "generation-default"
+        );
+        let text = serialize_session_message(&SessionMessage::Ready(ready.clone())).unwrap();
+        assert_eq!(parse_session_ready(&text).unwrap(), ready);
+        value
+            .as_object_mut()
+            .unwrap()
+            .remove("workspaceGenerations");
+        assert!(parse_session_ready(&value.to_string())
+            .unwrap()
+            .workspace_generations
+            .is_none());
+        for generations in [
+            serde_json::json!({"": "value"}),
+            serde_json::json!({"default": ""}),
+        ] {
+            value["workspaceGenerations"] = generations;
+            assert!(parse_session_ready(&value.to_string()).is_err());
+        }
+    }
 
     #[test]
     fn readiness_accepts_enabled_disabled_and_unreported_process_workspaces() {

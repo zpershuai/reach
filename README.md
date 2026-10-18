@@ -20,6 +20,8 @@ Reach puts a small Gateway on a server you control and a Rust Engine on each dev
 - **Many devices, one endpoint.** One Gateway routes to many Engines (macOS, Linux, OpenWrt), each with its own credentials, session and grants.
 - **Operable.** An optional web console provides owner login, device enrollment, live topology, a metadata-only activity audit and OAuth app management.
 
+Engine 0.3.0 also supports a local workspace JSON file with hot reload. See [dynamic workspaces](docs/deploy/engine.md) for the format, reload behavior and Gateway-first upgrade order.
+
 ## Architecture
 
 ```mermaid
@@ -82,7 +84,7 @@ For writes with grants, renewal and the full control API, see the [protocol refe
    bash scripts/install-engine.sh /path/to/engine.env
    ```
 
-   The script downloads the latest `engine-v*` Release binary for your platform, verifies it against the Release `SHA256SUMS` and its `--version`, then installs a LaunchAgent or systemd service. Pin a version with `REACH_ENGINE_VERSION=0.2.2`. OpenWrt and source builds are covered in [Engine](docs/deploy/engine.md), [Linux](docs/deploy/linux.md) and [OpenWrt](docs/deploy/openwrt.md).
+   The script downloads the latest `engine-v*` Release binary for your platform, verifies it against the Release `SHA256SUMS` and its `--version`, then installs a LaunchAgent or systemd service. Pin a version with `REACH_ENGINE_VERSION=0.3.0`. OpenWrt and source builds are covered in [Engine](docs/deploy/engine.md), [Linux](docs/deploy/linux.md) and [OpenWrt](docs/deploy/openwrt.md).
 4. **Connect an MCP client.** Point a remote client at `https://<your-gateway>/mcp` with the Controller token, or use OAuth for clients that cannot send static headers. Desktop clients can use the stdio Connector instead. See [MCP installation](docs/deploy/mcp.md).
 
 | Client | How it connects | Status |

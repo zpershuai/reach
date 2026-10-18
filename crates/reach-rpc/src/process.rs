@@ -162,6 +162,48 @@ impl ProcessManager {
             json!({"processes":&records[start..end],"nextCursor":if end<records.len(){Some(format!("{prefix}{end}"))}else{None}}),
         )
     }
+    /// Retain task records so status remains observable after a workspace reload.
+    /// The allowlist is replaced first, so a cleanup failure never leaves new
+    /// launches enabled in an affected workspace.
+    pub fn replace_workspaces(
+        &mut self,
+        allowed: Vec<String>,
+        affected: &std::collections::BTreeSet<String>,
+    ) -> Result<()> {
+        self.policy.workspaces = allowed;
+        let mut ids = Vec::new();
+        for (id, managed) in &self.tasks {
+            let task = managed
+                .task
+                .lock()
+                .map_err(|_| error("PROCESS_CLEANUP_FAILED"))?;
+            if affected.contains(&task.params.workspace) {
+                ids.push(id.clone());
+            }
+        }
+        for id in &ids {
+            self.stop(&json!({"processId":id}))?;
+        }
+        let deadline = Instant::now() + Duration::from_millis(self.policy.grace_ms + 2000);
+        for id in ids {
+            let managed = self.tasks.get_mut(&id).unwrap();
+            while managed
+                .worker
+                .as_ref()
+                .is_some_and(|worker| !worker.is_finished())
+            {
+                if Instant::now() >= deadline {
+                    return Err(error("PROCESS_CLEANUP_FAILED"));
+                }
+                thread::sleep(Duration::from_millis(10));
+            }
+            if let Some(worker) = managed.worker.take() {
+                worker.join().map_err(|_| error("PROCESS_CLEANUP_FAILED"))?;
+            }
+        }
+        Ok(())
+    }
+
     pub fn drain(&mut self) -> Result<()> {
         let mut poisoned = false;
         for managed in self.tasks.values() {
@@ -216,6 +258,12 @@ mod tests;
 static SHUTDOWN_REQUESTED: std::sync::atomic::AtomicBool =
     std::sync::atomic::AtomicBool::new(false);
 
+static RELOAD_REQUESTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn take_reload_requested() -> bool {
+    RELOAD_REQUESTED.swap(false, std::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn shutdown_requested() -> bool {
     SHUTDOWN_REQUESTED.load(std::sync::atomic::Ordering::Relaxed)
 }
@@ -225,10 +273,14 @@ pub fn install_shutdown_handlers() {
     extern "C" fn request_shutdown(_signal: i32) {
         SHUTDOWN_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
     }
+    extern "C" fn request_reload(_signal: i32) {
+        RELOAD_REQUESTED.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
     unsafe extern "C" {
         fn signal(signal: i32, handler: usize) -> usize;
     }
     unsafe {
+        signal(1, request_reload as *const () as usize);
         signal(2, request_shutdown as *const () as usize);
         signal(15, request_shutdown as *const () as usize);
     }

@@ -487,3 +487,35 @@ test("process schema requires launch identity and rejects runtime overrides", ()
   for (const wrong of [{ ...params, executable: "sh" }, { ...params, env: {} }, { ...params, script: "../escape.js" }, { ...params, launchId: "" }, { ...params, args: ["\0"] }]) assert.equal(processRunSchema.safeParse(wrong).success, false);
   assert.equal(processStatusSchema.safeParse({ processId: "a", launchId: "b" }).success, false);
 });
+
+
+test("ready generations are additive and round-trip", () => {
+  const fixture = JSON.parse(readFileSync(new URL("../../../fixtures/session.ready.json", import.meta.url), "utf8"));
+  const ready = parseSessionMessage(fixture) as SessionReady;
+  assert.deepEqual(ready.workspaceGenerations, { default: "generation-default", fixture: "generation-fixture" });
+  assert.deepEqual(parseSessionMessage(JSON.parse(serializeSessionMessage(ready))), ready);
+  delete fixture.workspaceGenerations;
+  assert.equal((parseSessionMessage(fixture) as SessionReady).workspaceGenerations, undefined);
+  for (const generations of [{ "": "value" }, { default: "" }]) {
+    assert.throws(() => parseSessionMessage({ ...fixture, workspaceGenerations: generations }));
+  }
+});
+
+
+test("workspace revocation preserves unrelated grants and process control scopes", () => {
+  const grants = new GrantStore(() => 1000);
+  const mutation = grants.issue("docs", "file", ["fs.write"]);
+  const stable = grants.issue("default", "file", ["fs.write"]);
+  const params = { workspace: "docs", script: "main.cjs", launchId: "launch" };
+  const execute = grants.issueProcess({ kind: "execute", sessionId: "s", ...params });
+  const other = grants.issueProcess({ kind: "execute", sessionId: "s", ...params, workspace: "default" });
+  const control = grants.issueProcess({ kind: "control", sessionId: "s", processId: "task" });
+  grants.revokeWorkspace("docs", { processOnly: true });
+  assert.equal(grants.matchesProcess(execute.grantId, "s", "process.run", params), undefined);
+  assert.equal(grants.matches(mutation.grantId, "fs.write", "docs", "file"), true);
+  grants.revokeWorkspace("docs");
+  assert.equal(grants.matches(mutation.grantId, "fs.write", "docs", "file"), false);
+  assert.equal(grants.matches(stable.grantId, "fs.write", "default", "file"), true);
+  assert.equal(grants.matchesProcess(other.grantId, "s", "process.run", { ...params, workspace: "default" }), "execute");
+  assert.equal(grants.matchesProcess(control.grantId, "s", "process.stop", { processId: "task" }), "control");
+});

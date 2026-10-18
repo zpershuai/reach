@@ -574,16 +574,34 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
       if (message.type === MESSAGE_READY) {
         try {
           const ready = parseSessionReady(message);
-          if (ready.sessionId !== session.sessionId || (authentication && ready.engineId !== authentication.engineId)) {
+          if (ready.sessionId !== session.sessionId || ready.engineId !== (authentication?.engineId ?? session.engineId ?? ready.engineId)) {
             webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
             return;
           }
+          const refreshing = session.ready;
+          // Mutation grants outlive sessions, so compare with the last metadata
+          // this Engine advertised in any session, not only the current one.
+          const previous = state.advertised;
+          if (previous) {
+            for (const workspace of previous.workspaces) {
+              const removed = !ready.workspaces.includes(workspace);
+              const repointed = previous.workspaceGenerations !== undefined && ready.workspaceGenerations !== undefined
+                && previous.workspaceGenerations[workspace] !== ready.workspaceGenerations[workspace];
+              if (removed || repointed) grants.revokeWorkspace(workspace);
+            }
+            for (const workspace of previous.processWorkspaces ?? []) {
+              if (!ready.processWorkspaces?.includes(workspace)) grants.revokeWorkspace(workspace, { processOnly: true });
+            }
+          }
+          state.advertised = { workspaces: ready.workspaces, processWorkspaces: ready.processWorkspaces, workspaceGenerations: ready.workspaceGenerations };
+          session.engineId = ready.engineId;
+          session.workspaceGenerations = ready.workspaceGenerations;
           session.ready = true;
           session.methods = ready.methods;
           session.workspaces = ready.workspaces;
           session.processWorkspaces = ready.processWorkspaces;
           state.engineVersion = ready.engineVersion;
-          state.notify();
+          state.notify(refreshing);
           if (state.connectingTimer) {
             clearTimeout(state.connectingTimer);
             state.connectingTimer = undefined;

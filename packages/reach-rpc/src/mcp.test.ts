@@ -1,3 +1,5 @@
+import { McpServer } from "./mcp/server.js";
+import { loadConfig } from "./mcp/config.js";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { createServer, request as httpRequest, type ClientRequest } from "node:http";
@@ -577,3 +579,38 @@ test("MCP shares Engine ownership across one OAuth client's per-call sessions an
     engine.close();
   }, { mcp: { oauth, sessionIdleMs: 300 } });
 });
+
+
+for (const mode of ["stdio", "remote"] as const) {
+  test(`${mode} list_workspaces reflects repeated ready in the same session`, async () => {
+    await withGateway(async url => {
+      const replies: Record<string, any>[] = [];
+      const stdio = new McpServer(loadConfig({ REACH_MCP_DEVICES: JSON.stringify([{ id: "engine-a", engineId: "engine-a", gatewayUrl: url, controllerToken }]), REACH_MCP_READY_POLL_MS: "5" }), reply => replies.push(reply));
+      let sequence = 10;
+      await stdio.receive(init()); await stdio.receive({ jsonrpc: "2.0", method: "notifications/initialized" });
+      const remote = mode === "remote" ? await client(url) : undefined;
+      await remote?.notify();
+      const discover = async () => {
+        if (remote) return (await remote.tool("list_workspaces", { deviceId: "engine-a" })).value;
+        const id = ++sequence;
+        await stdio.receive({ jsonrpc: "2.0", id, method: "tools/call", params: { name: "list_workspaces", arguments: { deviceId: "engine-a" } } });
+        const result = replies.find(reply => reply.id === id)!.result;
+        assert.ok(!result.isError, result.content[0].text);
+        return JSON.parse(result.content[0].text);
+      };
+      const first = discover();
+      for (let n = 0; n < 100 && (await status(url)).status === "none"; n++) await delay(5);
+      const engine = await mockEngine(url, "engine-a", engineToken, undefined, { workspaces: ["default"], processWorkspaces: [] });
+      try {
+        if (remote) { await first; assert.deepEqual((await discover()).workspaces, ["default"]); }
+        else assert.deepEqual((await first).workspaces, ["default"]);
+        const identity = (await status(url)).sessionId;
+        engine.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: identity, engineId: "engine-a", workspaces: ["default", "docs"], processWorkspaces: ["docs"], methods: ["fs.read"] }));
+        let refreshed;
+        for (let n = 0; n < 100; n++) { refreshed = await discover(); if (refreshed.workspaces.includes("docs")) break; await delay(5); }
+        assert.deepEqual(refreshed, { deviceId: "engine-a", status: "ready", workspaces: ["default", "docs"], processWorkspaces: ["docs"] });
+        assert.equal((await status(url)).sessionId, identity);
+      } finally { if (remote) await remote.remove(); else await stdio.shutdown(); engine.terminate(); }
+    });
+  });
+}

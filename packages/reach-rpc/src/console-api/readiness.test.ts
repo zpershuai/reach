@@ -1,3 +1,4 @@
+import { GatewayEvents, type GatewayEvent } from "./events.js";
 import assert from "node:assert/strict";
 import { once } from "node:events";
 import { test } from "node:test";
@@ -8,7 +9,9 @@ import { engineView } from "./server.js";
 
 test("readiness preserves workspaces and distinguishes enabled, disabled and unreported execution", async () => {
   for (const processWorkspaces of [undefined, [], ["scripts"]]) {
-    const gateway = createGateway({ logger: () => {} });
+    const events = new GatewayEvents();
+    const recorded: GatewayEvent[] = []; events.subscribe(event => recorded.push(event));
+    const gateway = createGateway({ logger: () => {}, events });
     gateway.listen(0, "127.0.0.1"); await once(gateway, "listening");
     let socket: WebSocket | undefined;
     try {
@@ -26,6 +29,14 @@ test("readiness preserves workspaces and distinguishes enabled, disabled and unr
       assert.equal(session.status, "ready");
       assert.equal(engineView(gateway.registry.engines.get("local-engine")!, gateway.registry, Date.now() + 3_600_000, 120).online, true);
       assert.deepEqual(session.workspaces, ["default", "scripts"]); assert.deepEqual(session.processWorkspaces, processWorkspaces);
+      socket.send(JSON.stringify({ ...ready, workspaces: ["default", "docs"], processWorkspaces: ["docs"] }));
+      for (let attempt = 0; attempt < 100 && !recorded.some(event => event.type === "session.state" && event.workspaces?.includes("docs")); attempt++) await new Promise(resolve => setTimeout(resolve, 5));
+      const refreshed = recorded.filter(event => event.type === "session.state").at(-1)!;
+      assert.equal(refreshed.status, "ready");
+      assert.equal(refreshed.sessionId, heartbeat.sessionId);
+      assert.deepEqual(refreshed.workspaces, ["default", "docs"]);
+      assert.deepEqual(refreshed.processWorkspaces, ["docs"]);
+
     } finally {
       if (socket && socket.readyState !== WebSocket.CLOSED) { const closed = once(socket, "close"); socket.terminate(); await closed; }
       await new Promise<void>(resolve => gateway.close(() => resolve()));
