@@ -21,6 +21,7 @@ python3 scripts/test-node-launcher.py
 python3 scripts/test-engine-linux-installer.py
 python3 scripts/test-install-engine.py
 python3 scripts/test-release-metadata.py
+python3 scripts/test-package-notices.py
 python3 scripts/test-release-helpers.py
 node --test scripts/test-grok-plugin.mjs
 cargo fmt --all -- --check

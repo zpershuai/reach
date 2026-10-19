@@ -6,7 +6,7 @@ set -euo pipefail
 script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 engine_config="${1:?Usage: install-engine.sh /path/to/engine.env [mcp-devices.json]}"
 [[ -f "$engine_config" ]] || { echo "Engine config not found: $engine_config" >&2; exit 1; }
-repo="${REACH_RELEASE_REPO:-zpershuai/reach}"
+repo="${REACH_RELEASE_REPO:-zpershuai/reach-engine}"
 
 if [[ -f /etc/openwrt_release ]]; then
   echo 'OpenWrt needs a Node bundle; follow docs/deploy/openwrt.md instead.' >&2

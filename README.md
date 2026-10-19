@@ -77,7 +77,7 @@ For writes with grants, renewal and the full control API, see the [protocol refe
 ### B. Deploy for real
 
 1. **Generate credentials and config.** Follow [configuration](docs/deploy/configuration.md) to create a Gateway env file and an Engine env file with separate random tokens.
-2. **Run the Gateway.** Download `gateway-amd64.tgz` from the latest `gateway-v*` [Release](https://github.com/zpershuai/reach/releases), add your `gateway.env`, start it with `docker compose -f deploy/compose.yaml up -d --build`, and put HTTPS in front of it (Caddy example included). A versioned image is also published as `ghcr.io/<owner>/reach-gateway`. See [Gateway deployment](docs/deploy/gateway.md).
+2. **Run the Gateway.** Download `gateway-amd64.tgz` from the latest `gateway-v*` [Release](https://github.com/zpershuai/reach-gateway/releases), add your `gateway.env`, start it with `docker compose -f deploy/compose.yaml up -d --build`, and put HTTPS in front of it (Caddy example included). Public releases currently use the tarball and do not advertise a container image. See [Gateway deployment](docs/deploy/gateway.md).
 3. **Install an Engine on each device.** On macOS (arm64/x64) or Linux x86_64 with systemd, from a checkout of this repository:
 
    ```bash
@@ -144,3 +144,13 @@ See [CONTRIBUTING.md](CONTRIBUTING.md). Run `bash scripts/verify.sh` before send
 ## License
 
 Copyright 2026 tent zp. Licensed under the [Apache License 2.0](LICENSE).
+
+## Public release distribution
+
+Development history stays private. Runtime downloads are published separately to [reach-engine](https://github.com/zpershuai/reach-engine/releases) and [reach-gateway](https://github.com/zpershuai/reach-gateway/releases). Gateway archives contain readable JavaScript.
+
+Existing Engine installations use `REACH_UPDATE_REPO=zpershuai/reach-engine`; Gateway uses `REACH_UPDATE_REPO=zpershuai/reach-gateway`. These are startup settings, so existing devices need an approved service restart/container recreation after configuration migration. Preserve all workspace and credential settings. No bootstrap binary is required for Engine 0.2.2/Gateway 0.6.0. The installer uses `REACH_RELEASE_REPO` (a different variable) and defaults to the public Engine repository.
+
+The private Release workflow requires an already configured `PUBLIC_RELEASE_TOKEN` with Contents write on the two distribution repositories, or an equivalent GitHub App token passed under that secret name. The normal workflow GITHUB_TOKEN is scoped to this repository and cannot publish across repositories. No credential is shipped to clients. Public release tags target the clean distribution repository's main branch; private Git objects and commit messages are never pushed. The initial public Gateway release uses tarball fallback and does not advertise an unaudited/private container image.
+
+Anonymous GitHub API quotas remain shared per IP. Respect rate-limit reset/Retry-After headers, use longer failure backoff and cache release metadata rather than retrying every minute; moving downloads to public repositories does not repair network timeouts. Runtime retry improvements require a separate implementation/versioned rollout.

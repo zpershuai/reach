@@ -12,6 +12,20 @@ spec.loader.exec_module(metadata)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_public_targets_and_notes_do_not_publish_private_history(self):
+        self.assertEqual(metadata.public_repository("engine"), "zpershuai/reach-engine")
+        self.assertEqual(metadata.public_repository("gateway"), "zpershuai/reach-gateway")
+        with self.assertRaises(ValueError):
+            metadata.public_repository("arbitrary")
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / "crates/reach-rpc").mkdir(parents=True)
+            (root / "crates/reach-rpc/Cargo.toml").write_text('[package]\nversion = "1.2.3"\n')
+            notes = metadata.public_release_notes("engine-v1.2.3", root)
+        self.assertIn("Engine 1.2.3", notes)
+        self.assertNotIn(".reach/", notes)
+        self.assertNotIn("git log", notes)
+
     def test_tag_version_guard(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

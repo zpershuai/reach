@@ -39,6 +39,23 @@ def checksums(directory, assets):
     (directory / "SHA256SUMS").write_text("".join(lines))
 
 
+def public_repository(component):
+    if component not in ("engine", "gateway"):
+        raise ValueError("Unknown release component")
+    return f"zpershuai/reach-{component}"
+
+
+def public_release_notes(tag, root=ROOT):
+    component, version = parse_tag(tag, root)
+    description = ("Platform runtime binaries, checksums and redistribution notices."
+                   if component == "engine" else
+                   "Readable JavaScript runtime archive, checksums and redistribution notices. "
+                   "No container image is advertised; compatible helpers build from the tarball.")
+    return (f"Reach {component.title()} {version}\n\n{description}\n\n"
+            "Keep existing private configuration and workspaces. Release tags refer to the "
+            "public distribution repository only. Private commit messages are not published.\n")
+
+
 def release_notes(tag, root=ROOT):
     component, _ = parse_tag(tag, root)
     def git(*args):
@@ -68,12 +85,18 @@ def main():
     notes_parser = sub.add_parser("notes")
     notes_parser.add_argument("tag")
     notes_parser.add_argument("output", type=Path)
+    public_notes_parser = sub.add_parser("public-notes")
+    public_notes_parser.add_argument("tag")
+    public_notes_parser.add_argument("output", type=Path)
     args = parser.parse_args()
     if args.command == "tag":
         component, version = parse_tag(args.tag)
         print(f"component={component}\nversion={version}")
+        print(f"repository={public_repository(component)}")
     elif args.command == "checksums":
         checksums(args.directory, args.assets)
+    elif args.command == "public-notes":
+        args.output.write_text(public_release_notes(args.tag))
     else:
         args.output.write_text(release_notes(args.tag))
 

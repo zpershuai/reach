@@ -85,16 +85,16 @@ npm --prefix packages/grok-bot-mcp-connector version 0.4.0 --no-git-tag-version
 | 组件 | Release 资产 |
 | --- | --- |
 | Engine | `engine-linux-x64-musl`、`engine-darwin-arm64`、`engine-darwin-x64` |
-| Gateway | `gateway-amd64.tgz`、`gateway-image.txt`（GHCR 镜像 digest） |
-| 两者 | `SHA256SUMS`，覆盖该 Release 的文件资产 |
+| Gateway | `gateway-amd64.tgz`（可读 JavaScript，不附镜像入口） |
+| 两者 | `LICENSE`、`THIRD_PARTY_NOTICES.txt`、`third-party-licenses.tgz` 和覆盖这些文件及运行时资产的 `SHA256SUMS` |
 
-Linux x64 Engine 是静态 musl 二进制，同一资产可用于 systemd Linux 和 x86_64 OpenWrt。macOS 使用原生 arm64 与 Intel runner，Intel runner 为 `macos-15-intel`。Gateway tarball 包含 `packages/reach-rpc/dist`、npm manifests、Compose/Dockerfile 和宿主机 helpers，不包含 systemd service/path 模板；首次安装 updater 需按 [运维步骤](operations.md#安装可选-github-release-updater) 从同一发布标签的源码取得模板并安装 helper。Gateway 镜像发布为 `ghcr.io/<owner>/reach-gateway:<X.Y.Z>`，并附组件标签别名。
+Linux x64 Engine 是静态 musl 二进制，同一资产可用于 systemd Linux 和 x86_64 OpenWrt。macOS 使用原生 arm64 与 Intel runner，Intel runner 为 `macos-15-intel`。Gateway tarball 包含 `packages/reach-rpc/dist`、npm manifests、Compose/Dockerfile 和宿主机 helpers，不包含 systemd service/path 模板；首次安装 updater 需按 [运维步骤](operations.md#安装可选-github-release-updater) 从同一发布标签的源码取得模板并安装 helper。当前公开发行不推送 GHCR 镜像，也不提供 `gateway-image.txt`；兼容的宿主机 helper 从 tarball 构建镜像。
 
-发布说明来自前一个同组件标签之后的提交；没有前一个标签时包含仓库历史。生成器过滤包含 `.reach/`、env 文件名和 SSH 目标的行，发布者仍应确保提交说明不含私有库存或凭证。下载文件后，在资产目录执行 `sha256sum -c SHA256SUMS`（macOS 可用 `shasum -a 256 -c SHA256SUMS`）。
+源码仓库保持私有，发布目标分别为 `zpershuai/reach-engine` 和 `zpershuai/reach-gateway`。工作流使用预先配置的 `PUBLIC_RELEASE_TOKEN` 跨仓库发布；不创建或覆盖已有公开 tag/Release。公开 tag 指向发行仓库自己的 `main`，发行说明只含组件和资产描述，不复制私有提交历史。下载文件后，在资产目录执行 `sha256sum -c SHA256SUMS`（macOS 可用 `shasum -a 256 -c SHA256SUMS`）。
 
 ## 可选自动更新
 
-自动更新默认关闭；仅 `REACH_UPDATE_ENABLED=1` 或 `true` 启用，并需设置 `REACH_UPDATE_REPO=example/reach`。配置详见 [配置](configuration.md)，宿主机 helper 安装与回滚见 [运维](operations.md)。检查使用分页 GitHub Releases，按组件选择最高稳定 `X.Y.Z`，忽略 draft、prerelease、相等或更旧版本。默认每小时检查，失败时只对更新器退避，不改变心跳或 HTTP 服务。
+自动更新默认关闭；仅 `REACH_UPDATE_ENABLED=1` 或 `true` 启用，并需按组件设置 `REACH_UPDATE_REPO=zpershuai/reach-engine` 或 `REACH_UPDATE_REPO=zpershuai/reach-gateway`。配置详见 [配置](configuration.md)，宿主机 helper 安装与回滚见 [运维](operations.md)。检查使用分页 GitHub Releases，按组件选择最高稳定 `X.Y.Z`，忽略 draft、prerelease、相等或更旧版本。默认每小时检查，失败时只对更新器退避，不改变心跳或 HTTP 服务。
 
 Engine 在独立后台线程下载和校验 SHA-256、`--version`，只在没有连接中、活动或 draining 会话时替换二进制，保存同目录的 `engine.prev`，退出 0 交给 LaunchAgent/systemd/procd 重新启动。存在的 `~/.reach/versions.json` 同步记录 `engineVersion`。Compose Engine 与 Gateway 则在空闲时写入共享目录的 `request.json`，由宿主机 helper 先下载、校验并准备镜像，再通过共享目录握手等待空闲、暂缓新会话并重建容器；Gateway 要求所有注册 Engine 的会话均为 `none`。未安装 helper 时只保留更新请求与日志，当前进程继续运行。
 

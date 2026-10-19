@@ -77,7 +77,7 @@ curl -sS -X POST http://127.0.0.1:8787/session/close -H 'content-type: applicati
 ### B. 正式部署
 
 1. **生成凭证和配置。** 按[配置与凭证](docs/deploy/configuration.md)生成 Gateway 和 Engine 两份环境文件，使用两个互不相同的随机 token。
-2. **运行 Gateway。** 从最新的 `gateway-v*` [Release](https://github.com/zpershuai/reach/releases) 下载 `gateway-amd64.tgz`，放入 `gateway.env`，执行 `docker compose -f deploy/compose.yaml up -d --build` 启动，并在前面配置 HTTPS（仓库附带 Caddy 示例）。每个版本也会发布镜像 `ghcr.io/<owner>/reach-gateway`。详见 [Gateway 部署](docs/deploy/gateway.md)。
+2. **运行 Gateway。** 从最新的 `gateway-v*` [Release](https://github.com/zpershuai/reach-gateway/releases) 下载 `gateway-amd64.tgz`，放入 `gateway.env`，执行 `docker compose -f deploy/compose.yaml up -d --build` 启动，并在前面配置 HTTPS（仓库附带 Caddy 示例）。当前公开发行使用 tarball，不提供容器镜像入口。详见 [Gateway 部署](docs/deploy/gateway.md)。
 3. **在每台设备上安装 Engine。** macOS（arm64/x64）或带 systemd 的 Linux x86_64，在本仓库目录下执行：
 
    ```bash
@@ -142,3 +142,13 @@ Reach 的前提是 Gateway 的运营者可信，而网络不可信。每个 Engi
 ## 许可证
 
 Copyright 2026 tent zp。以 [Apache License 2.0](LICENSE) 授权。
+
+## 公开发行与迁移
+
+源码开发历史保持私有；[Engine 发行](https://github.com/zpershuai/reach-engine/releases) 与 [Gateway 发行](https://github.com/zpershuai/reach-gateway/releases) 分别托管当前资产。Gateway 包内 JavaScript 可读。
+
+现有 Engine 配置使用 `REACH_UPDATE_REPO=zpershuai/reach-engine`，Gateway 使用 `REACH_UPDATE_REPO=zpershuai/reach-gateway`。它们在启动时读取，首次迁移需要另行批准修改配置及重启/重建，保留工作区和凭证；旧版 Engine 0.2.2/Gateway 0.6.0 无需过渡二进制。安装器的变量是 `REACH_RELEASE_REPO`，默认新 Engine 公开仓库。
+
+私有 CI 需要预先配置 `PUBLIC_RELEASE_TOKEN`（两个发行仓库的 Contents write，或等效 GitHub App token），普通 GITHUB_TOKEN 不具备跨仓库权限。发行 tag 只指向公开仓库的干净 main，禁止推送私有 Git 对象或提交消息。本次 Gateway 使用 tarball 回退，不发布未审查/私有镜像入口。
+
+公开下载仍受共享 IP 匿名 API 限额与网络故障影响。更新器后续应遵循 reset/Retry-After、延长失败退避并缓存元数据；这些运行时代码改进需单独版本发布。

@@ -13,6 +13,7 @@ jobs:
     outputs:
       component: ${{ steps.tag.outputs.component }}
       version: ${{ steps.tag.outputs.version }}
+      repository: ${{ steps.tag.outputs.repository }}
     steps:
       - uses: actions/checkout@v4
       - id: tag
@@ -38,6 +39,8 @@ jobs:
   engine:
     needs: [version, verify]
     if: needs.version.outputs.component == 'engine'
+    outputs:
+      rust_version: ${{ steps.compiler.outputs.version }}
     strategy:
       fail-fast: false
       matrix:
@@ -52,6 +55,8 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - id: compiler
+        run: echo "version=$(rustc --version | cut -d' ' -f2)" >> "$GITHUB_OUTPUT"
       - if: runner.os == 'Linux'
         run: |
           rustup target add x86_64-unknown-linux-musl
@@ -67,9 +72,6 @@ jobs:
     needs: [version, verify]
     if: needs.version.outputs.component == 'gateway'
     runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -84,19 +86,6 @@ jobs:
       - env:
           IMAGE: ${{ steps.image.outputs.name }}
         run: bash scripts/package-gateway.sh .reach/release "$IMAGE"
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - env:
-          IMAGE: ${{ steps.image.outputs.name }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          docker push "$IMAGE"
-          docker tag "$IMAGE" "${IMAGE%:*}:$RELEASE_TAG"
-          docker push "${IMAGE%:*}:$RELEASE_TAG"
-          docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' > .reach/release/gateway-image.txt
       - uses: actions/upload-artifact@v4
         with:
           name: gateway-amd64
@@ -110,8 +99,6 @@ jobs:
       ((needs.version.outputs.component == 'engine' && needs.engine.result == 'success') ||
        (needs.version.outputs.component == 'gateway' && needs.gateway.result == 'success'))
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@v4
         with:
@@ -120,18 +107,48 @@ jobs:
         with:
           path: .reach/release
           merge-multiple: true
+      - if: needs.version.outputs.component == 'engine'
+        run: python3 scripts/package-notices.py engine .reach/release --rust-version '${{ needs.engine.outputs.rust_version }}'
+      - name: Require an existing cross-repository publisher credential
+        env:
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+        run: test -n "$RELEASE_PUBLISH_TOKEN" || { echo 'Configure PUBLIC_RELEASE_TOKEN with Contents write on the two distribution repositories.' >&2; exit 1; }
+      - name: Refuse to overwrite public tags or releases
+        env:
+          GH_TOKEN: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          PUBLIC_REPOSITORY: ${{ needs.version.outputs.repository }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          python3 - <<'PY'
+          import os, subprocess
+          repo, tag = os.environ['PUBLIC_REPOSITORY'], os.environ['RELEASE_TAG']
+          for path in [f'releases/tags/{tag}', f'git/ref/tags/{tag}']:
+              response = subprocess.run(['gh', 'api', f'repos/{repo}/{path}'], capture_output=True, text=True)
+              if response.returncode == 0:
+                  raise SystemExit('Refusing to overwrite an existing public tag or release')
+              if '(HTTP 404)' not in response.stderr:
+                  raise SystemExit('Cannot verify that the public tag and release are absent')
+          PY
       - env:
           COMPONENT: ${{ needs.version.outputs.component }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           if [[ "$COMPONENT" == engine ]]; then
-            python3 scripts/release-metadata.py checksums .reach/release engine-linux-x64-musl engine-darwin-arm64 engine-darwin-x64
+            python3 scripts/release-metadata.py checksums .reach/release engine-linux-x64-musl engine-darwin-arm64 engine-darwin-x64 LICENSE THIRD_PARTY_NOTICES.txt third-party-licenses.tgz
           else
-            python3 scripts/release-metadata.py checksums .reach/release gateway-amd64.tgz gateway-image.txt
+            python3 scripts/release-metadata.py checksums .reach/release gateway-amd64.tgz LICENSE THIRD_PARTY_NOTICES.txt third-party-licenses.tgz
           fi
-          python3 scripts/release-metadata.py notes "$RELEASE_TAG" .reach/release-notes.md
+          python3 scripts/release-metadata.py public-notes "$RELEASE_TAG" .reach/release-notes.md
       - uses: softprops/action-gh-release@v2
         with:
+          repository: ${{ needs.version.outputs.repository }}
+          token: ${{ secrets.PUBLIC_RELEASE_TOKEN }}
+          target_commitish: main
           body_path: .reach/release-notes.md
-          files: .reach/release/*
+          files: |
+            .reach/release/${{ needs.version.outputs.component == 'engine' && 'engine-*' || 'gateway-amd64.tgz' }}
+            .reach/release/SHA256SUMS
+            .reach/release/LICENSE
+            .reach/release/THIRD_PARTY_NOTICES.txt
+            .reach/release/third-party-licenses.tgz
           fail_on_unmatched_files: true
