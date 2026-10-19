@@ -168,4 +168,4 @@ Engine 按以下顺序选择工作区：显式 `REACH_WORKSPACES_FILE` → 任�
 
 文件形如 `{"workspaces":{"docs":{"path":"/home/example/documents","process":false}}}`。只允许 `workspaces` 和每项的 `path`、可选 `process`，至少一个非空名称及已存在的绝对目录，拒绝未知键。Gateway 设置和凭证继续放在服务的私有环境文件中，不能放入工作区 JSON。
 
-文件模式每 2 秒轮询并确认内容变化，Unix `SIGHUP` 请求下次循环立即重载。整个文件验证成功后在请求之间原子应用；无效、不可读、删除的文件保留最后有效配置，输出不含文件内容的 `WORKSPACE_RELOAD_FAILED` 诊断。建议写临时文件后重命名。移除/更换根目录会失效对应游标并停止对应进程，关闭执行也会停止进程。会话内刷新 ready 后可重新调用 `list_workspaces`。先升级 Gateway 到 0.7.0；旧 Gateway 无法在更换根目录时撤销旧 grant，应改用新名称。完整格式及行为见 [Engine](engine.md)。
+文件模式每 2 秒轮询并确认内容变化，Unix `SIGHUP` 请求下次循环立即重载。整个文件验证成功后在请求之间原子应用；无效、不可读、删除的文件保留最后有效配置，输出不含文件内容的 `WORKSPACE_RELOAD_FAILED` 诊断。建议写临时文件后重命名。移除/更换根目录会失效对应游标并停止对应进程，关闭执行也会停止进程。会话内刷新 ready 后可重新调用 `list_workspaces`。先升级 Gateway 到 0.7.1；旧 Gateway 无法在更换根目录时撤销旧 grant，应改用新名称。完整格式及行为见 [Engine](engine.md)。

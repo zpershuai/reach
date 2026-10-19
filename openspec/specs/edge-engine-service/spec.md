@@ -55,11 +55,14 @@ While a session WebSocket is open, the Engine SHALL first initialize a session c
 - **THEN** the Engine does not dispatch it and returns a deterministic session-not-ready error
 
 ### Requirement: Engine startup configuration
-The Engine SHALL accept one Gateway base URL (default `http://127.0.0.1:8787`), an Engine identifier, Runtime timeout policy, and workspace definitions at process start. Workspace definitions come from either an optional workspace root map override in the environment or a workspace configuration file, as defined by `engine-workspace-config`. It MUST fail fast on an invalid Gateway URL scheme, invalid timeout configuration, empty Engine identifier, invalid workspace configuration, or ambiguous workspace sources. It MUST NOT accept multiple Gateway origins in one Runtime instance.
+The Engine SHALL accept one Gateway base URL (default `http://127.0.0.1:8787`), an Engine identifier, Runtime timeout policy, and workspace definitions at process start. Workspace definitions come from either an optional workspace root map override in the environment or a workspace configuration file, as defined by `engine-workspace-config`.
 
 #### Scenario: Multiple Gateway configuration is rejected
 - **WHEN** Engine startup configuration supplies more than one Gateway origin
 - **THEN** the Engine fails before starting heartbeat
+
+### Requirement: Engine startup rejects invalid or ambiguous sources
+The Engine MUST fail fast on an invalid Gateway URL scheme, invalid timeout configuration, empty Engine identifier, invalid workspace configuration, or ambiguous workspace sources. It MUST NOT accept multiple Gateway origins in one Runtime instance.
 
 #### Scenario: Workspace file and environment roots both supplied
 - **WHEN** Engine startup configuration sets both `REACH_WORKSPACES_FILE` and `REACH_WORKSPACE_ROOTS`

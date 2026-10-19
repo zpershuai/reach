@@ -10,7 +10,7 @@ Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 
 bash scripts/install-engine.sh .reach/engine.env
 ```
 
-脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.3.0` 可以固定版本，`REACH_RELEASE_REPO=owner/repo` 可以指定 fork，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
+脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.3.1` 可以固定版本，`REACH_RELEASE_REPO=owner/repo` 可以指定 fork，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
 
 ## 1. 配置与工作区
 
@@ -57,7 +57,7 @@ MCP 客户端可调用 `list_workspaces({deviceId})` 发现配置中的名称和
 
 已有请求完成后才替换配置。移除或更换根目录会使该工作区游标返回 `INVALID_CURSOR`，并终止其中当前会话拥有的进程；关闭 `process` 也会终止进程并拒绝新启动。其他工作区的游标和进程继续运行。移除名称后的文件访问返回 `WORKSPACE_ACCESS_DENIED`。
 
-变更后 Engine 在同一会话发送更新的 `session.ready`，`list_workspaces` 和控制台自动读取新列表。请先升级到 Gateway 0.7.0，再升级 Engine：新版 Gateway 会撤销移除、更换根目录工作区的文件和执行 grant，以及关闭执行的工作区的执行 grant；仅绑定 processId 的控制 grant 保留到过期。旧 Gateway 能刷新列表，但更换根目录时无法撤销旧 grant，最长仍可使用 5 分钟；使用旧 Gateway 时应改用新工作区名称，避免原名更换根目录。迁移和回滚见 [组件版本](versions.md)。
+变更后 Engine 在同一会话发送更新的 `session.ready`，`list_workspaces` 和控制台自动读取新列表。请先升级到 Gateway 0.7.1，再升级 Engine：新版 Gateway 会撤销移除、更换根目录工作区的文件和执行 grant，以及关闭执行的工作区的执行 grant；仅绑定 processId 的控制 grant 保留到过期。旧 Gateway 能刷新列表，但更换根目录时无法撤销旧 grant，最长仍可使用 5 分钟；使用旧 Gateway 时应改用新工作区名称，避免原名更换根目录。迁移和回滚见 [组件版本](versions.md)。
 
 ## 2. 构建目标平台二进制
 
