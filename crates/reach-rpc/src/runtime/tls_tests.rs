@@ -2,7 +2,7 @@
 use super::*;
 use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
-    ClientConfig, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
+    ClientConfig, ClientConnection, RootCertStore, ServerConfig, ServerConnection, StreamOwned,
 };
 use std::{
     fs,
@@ -67,27 +67,106 @@ fn tls_peer(
         }
         let mut request = Vec::new();
         let mut buffer = [0; 4096];
-        loop {
+        let header_end = loop {
             match stream.read(&mut buffer) {
                 Ok(0) | Err(_) => return false,
                 Ok(n) => request.extend_from_slice(&buffer[..n]),
             }
-            if request.windows(4).any(|value| value == b"\r\n\r\n") {
-                break;
+            if let Some(offset) = request.windows(4).position(|value| value == b"\r\n\r\n") {
+                break offset + 4;
             }
             if request.len() > 8192 {
                 return false;
             }
+        };
+        let headers = std::str::from_utf8(&request[..header_end])
+            .unwrap()
+            .to_owned();
+        let body_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().unwrap())
+            })
+            .unwrap_or(0);
+        if header_end > 8192 || body_length > 8192 - header_end {
+            return false;
         }
-        let request = String::from_utf8(request).unwrap();
+        // Headers and body may arrive in separate TLS records. Closing with an
+        // unread POST body can reset the TCP socket before the client reads us.
+        while request.len() < header_end + body_length {
+            match stream.read(&mut buffer) {
+                Ok(0) | Err(_) => return false,
+                Ok(n) => request.extend_from_slice(&buffer[..n]),
+            }
+        }
         let body = r#"{"intervalSeconds":30}"#;
         let _ = write!(stream, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
+        stream.conn.send_close_notify();
         let _ = stream.flush();
-        request
+        headers
             .to_ascii_lowercase()
             .contains("authorization: bearer private-engine-sentinel")
     });
     (address, peer)
+}
+
+#[test]
+fn https_fixture_waits_for_the_request_body_before_responding() {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    let directory = tempfile::tempdir().unwrap();
+    let generated = Command::new("python3")
+        .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/tls-test-fixture.py"))
+        .arg(directory.path())
+        .output()
+        .unwrap();
+    assert!(generated.status.success());
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(CertificateDer::from(
+            fs::read(directory.path().join("ca.der")).unwrap(),
+        ))
+        .unwrap();
+    let config = ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth();
+    let (address, peer) = tls_peer(directory.path(), "trusted", false);
+    let socket = std::net::TcpStream::connect(address).unwrap();
+    socket
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    socket
+        .set_write_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    let mut stream = StreamOwned::new(
+        ClientConnection::new(Arc::new(config), "127.0.0.1".try_into().unwrap()).unwrap(),
+        socket,
+    );
+    stream.write_all(b"POST /heartbeat HTTP/1.1\r\nHost: localhost\r\nAuthorization: Bearer private-engine-sentinel\r\nContent-Length: 4\r\n\r\n").unwrap();
+    stream.flush().unwrap();
+    stream
+        .sock
+        .set_read_timeout(Some(Duration::from_millis(100)))
+        .unwrap();
+    let mut byte = [0; 1];
+    let error = stream
+        .read(&mut byte)
+        .expect_err("fixture responded before the POST body");
+    assert!(matches!(
+        error.kind(),
+        std::io::ErrorKind::WouldBlock | std::io::ErrorKind::TimedOut
+    ));
+    stream
+        .sock
+        .set_read_timeout(Some(Duration::from_secs(3)))
+        .unwrap();
+    stream.write_all(b"body").unwrap();
+    stream.flush().unwrap();
+    let mut response = Vec::new();
+    stream.read_to_end(&mut response).unwrap();
+    assert!(response.starts_with(b"HTTP/1.1 200 OK\r\n"));
+    assert!(peer.join().unwrap());
 }
 
 #[test]

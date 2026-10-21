@@ -15,7 +15,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
-import { test } from "node:test";
+import { before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
 const script = fileURLToPath(
@@ -154,36 +154,41 @@ test("host update corruption fails closed without executing either candidate", a
   }
 });
 
-test("a real Engine acknowledges host-update health only after a successful heartbeat", { timeout: 20_000 }, async () => {
+describe("real Engine supervisor fixture", () => {
   const root = fileURLToPath(new URL("../", import.meta.url));
-  execFileSync("cargo", ["build", "--quiet", "--locked", "-p", "reach-rpc", "--bin", "engine"], { cwd: root });
-  const f = fixture("healthy");
-  copyFileSync(join(root, "target/debug/engine"), f.binary);
-  const version = execFileSync(f.binary, ["--version"], { encoding: "utf8" }).trim();
-  const intent = JSON.parse(readFileSync(f.pending)); intent.version = version; intent.digest = digest(f.binary); writeFileSync(f.pending, JSON.stringify(intent));
-  const workspace = join(f.directory, "workspace"); mkdirSync(workspace);
-  const token = "e".repeat(48); let observed = false;
-  const server = createServer(async (request, response) => {
-    for await (const _chunk of request) { /* Consume application data without logging it. */ }
-    observed = request.headers.authorization === `Bearer ${token}`;
-    const body = '{"intervalSeconds":1}';
-    response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); response.end(body);
+  // A cold Rust build is setup work, not part of the heartbeat deadline.
+  before(() => {
+    execFileSync("cargo", ["build", "--quiet", "--locked", "-p", "reach-rpc", "--bin", "engine"], { cwd: root, timeout: 120_000 });
+  }, { timeout: 125_000 });
+  test("a real Engine acknowledges host-update health only after a successful heartbeat", { timeout: 20_000 }, async () => {
+    const f = fixture("healthy");
+    copyFileSync(join(root, "target/debug/engine"), f.binary);
+    const version = execFileSync(f.binary, ["--version"], { encoding: "utf8" }).trim();
+    const intent = JSON.parse(readFileSync(f.pending)); intent.version = version; intent.digest = digest(f.binary); writeFileSync(f.pending, JSON.stringify(intent));
+    const workspace = join(f.directory, "workspace"); mkdirSync(workspace);
+    const token = "e".repeat(48); let observed = false;
+    const server = createServer(async (request, response) => {
+      for await (const _chunk of request) { /* Consume application data without logging it. */ }
+      observed = request.headers.authorization === `Bearer ${token}`;
+      const body = '{"intervalSeconds":1}';
+      response.writeHead(200, { "content-type": "application/json", "content-length": Buffer.byteLength(body) }); response.end(body);
+    });
+    server.listen(0, "127.0.0.1"); await once(server, "listening");
+    const address = server.address(); assert.ok(address && typeof address === "object");
+    const child = spawn(process.execPath, [script, f.binary], { env: { PATH: process.env.PATH, HOME: f.directory,
+      REACH_GATEWAY_URL: `http://127.0.0.1:${address.port}`, REACH_ENGINE_ID: "fixture", REACH_ENGINE_TOKEN: token,
+      REACH_WORKSPACE_ROOTS: `default:${workspace}`, REACH_PROCESS_WORKSPACES: "", REACH_SUPERVISOR_TEST_MODE: "1", REACH_SUPERVISOR_TEST_TIMEOUT_MS: "5000" }, stdio: ["ignore", "pipe", "pipe"] });
+    let output = ""; child.stdout.on("data", data => { output += data; }); child.stderr.on("data", data => { output += data; });
+    const exit = once(child, "exit");
+    try {
+      for (let n = 0; n < 1200 && !output.includes("HOST_UPDATE_HEALTHY"); n++) await delay(5);
+      assert.ok(output.includes("HOST_UPDATE_HEALTHY"), output); assert.ok(observed); assert.ok(!output.includes(token));
+      assert.equal(existsSync(f.pending), false);
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exit; }
+      server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); rmSync(f.directory, { recursive: true, force: true });
+    }
   });
-  server.listen(0, "127.0.0.1"); await once(server, "listening");
-  const address = server.address(); assert.ok(address && typeof address === "object");
-  const child = spawn(process.execPath, [script, f.binary], { env: { PATH: process.env.PATH, HOME: f.directory,
-    REACH_GATEWAY_URL: `http://127.0.0.1:${address.port}`, REACH_ENGINE_ID: "fixture", REACH_ENGINE_TOKEN: token,
-    REACH_WORKSPACE_ROOTS: `default:${workspace}`, REACH_PROCESS_WORKSPACES: "", REACH_SUPERVISOR_TEST_MODE: "1", REACH_SUPERVISOR_TEST_TIMEOUT_MS: "5000" }, stdio: ["ignore", "pipe", "pipe"] });
-  let output = ""; child.stdout.on("data", data => { output += data; }); child.stderr.on("data", data => { output += data; });
-  const exit = once(child, "exit");
-  try {
-    for (let n = 0; n < 1200 && !output.includes("HOST_UPDATE_HEALTHY"); n++) await delay(5);
-    assert.ok(output.includes("HOST_UPDATE_HEALTHY"), output); assert.ok(observed); assert.ok(!output.includes(token));
-    assert.equal(existsSync(f.pending), false);
-  } finally {
-    if (child.exitCode === null && child.signalCode === null) { child.kill("SIGTERM"); await exit; }
-    server.closeAllConnections(); await new Promise(resolve => server.close(resolve)); rmSync(f.directory, { recursive: true, force: true });
-  }
 });
 
 test("an interrupted pre-activation intent preserves and starts the prior binary", async () => {
