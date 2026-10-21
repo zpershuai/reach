@@ -3,6 +3,7 @@ import io
 import json
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import tarfile
 import tempfile
@@ -36,6 +37,17 @@ if [ "$2" = -p ]; then echo linux-x64; elif [ "$(basename "$1")" = new-engine ];
         self.tool('jsonfilter', '''#!/usr/bin/env python3
 import json,sys
 data=json.load(open(sys.argv[2])); print(data['version'] if sys.argv[4]=='@.version' else data['sha256']['openwrt-x64'])
+''')
+        # OpenWrt provides sha256sum; macOS does not. Keep checksum verification
+        # real in the isolated fixture without requiring host GNU utilities.
+        self.tool('sha256sum', '''#!/usr/bin/env python3
+import hashlib, pathlib, sys
+if sys.argv[1:] != ['-c', '-']: sys.exit(2)
+expected, separator, name = sys.stdin.read().rstrip('\\n').partition('  ')
+if not separator: sys.exit(2)
+try: actual = hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest()
+except OSError: sys.exit(1)
+sys.exit(0 if actual == expected.lower() else 1)
 ''')
         # Exercise BusyBox mv -T semantics on macOS without invoking a supervisor.
         self.tool('mv', '''#!/usr/bin/env python3
@@ -98,6 +110,30 @@ esac
         before=self.snapshot(); self.archive.write_bytes(b'truncated fixture')
         result=self.install(); self.assertNotEqual(result.returncode,0); self.assertEqual(self.snapshot(),before)
         self.assertFalse((self.root/'calls').exists()); self.assertTrue((self.root/'active').exists())
+
+    def test_fixture_needs_no_host_sha256sum_and_still_rejects_wrong_digest(self):
+        host_tools = self.root / 'host-tools'; host_tools.mkdir()
+        for command in ['sh', 'python3', 'dirname', 'grep', 'mkdir', 'chmod', 'mktemp',
+                        'cat', 'rm', 'ln', 'cp', 'readlink', 'awk', 'tar', 'gzip',
+                        'basename', 'od', 'tr', 'wc', 'touch']:
+            executable = shutil.which(command)
+            self.assertIsNotNone(executable, command)
+            (host_tools / command).symlink_to(executable)
+        path = str(self.root) + os.pathsep + str(host_tools)
+        self.assertEqual(shutil.which('sha256sum', path=path), str(self.root / 'sha256sum'))
+        self.assertFalse((host_tools / 'sha256sum').exists())
+        manifest = self.root / 'node-runtime.json'
+        original = manifest.read_text(); wrong = json.loads(original)
+        wrong['sha256']['openwrt-x64'] = '0' * 64
+        manifest.write_text(json.dumps(wrong))
+        before = self.snapshot(); rejected = self.install(PATH=path)
+        self.assertNotEqual(rejected.returncode, 0)
+        self.assertEqual(self.snapshot(), before)
+        self.assertFalse((self.root / 'calls').exists())
+        manifest.write_text(original)
+        accepted = self.install(PATH=path)
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        self.assertEqual(self.targets[0].read_bytes(), self.engine.read_bytes())
 
     def test_failed_rollback_preserves_private_recovery_artifacts(self):
         result=self.install(REACH_INSTALL_FAIL_AT='start',FAIL_RESTORE='1')
