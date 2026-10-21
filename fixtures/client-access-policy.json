@@ -1,0 +1,48 @@
+{
+  "cases": [
+    {
+      "name": "empty policies deny all resources",
+      "permissions": [],
+      "requests": [
+        {"engineId":"engine-a","workspace":"docs","method":"fs.read","allowed":false},
+        {"engineId":"engine-a","workspace":"docs","method":"process.run","allowed":false}
+      ],
+      "visible": {"engine-a":[]}
+    },
+    {
+      "name": "read-only cannot write execute or cross Engine or workspace",
+      "permissions": [{"engineId":"engine-a","workspace":"docs","read":true,"write":false,"execute":false}],
+      "requests": [
+        {"engineId":"engine-a","workspace":"docs","method":"fs.read","allowed":true},
+        {"engineId":"engine-a","workspace":"docs","method":"fs.grep","allowed":true},
+        {"engineId":"engine-a","workspace":"docs","method":"fs.write","allowed":false},
+        {"engineId":"engine-a","workspace":"docs","method":"fs.edit","allowed":false},
+        {"engineId":"engine-a","workspace":"docs","method":"process.logs","allowed":false},
+        {"engineId":"engine-a","workspace":"docs","method":"process.run","allowed":false},
+        {"engineId":"engine-b","workspace":"docs","method":"fs.read","allowed":false},
+        {"engineId":"engine-a","workspace":"new-workspace","method":"fs.read","allowed":false},
+        {"engineId":"engine-a","workspace":"docs","method":"constructor","allowed":false},
+        {"engineId":"engine-a","workspace":"docs","method":"fs.unknown","allowed":false}
+      ],
+      "visible": {"engine-a":["docs"],"engine-b":[]}
+    },
+    {
+      "name": "write and execute are independent",
+      "permissions": [
+        {"engineId":"engine-a","workspace":"scripts","read":false,"write":false,"execute":true},
+        {"engineId":"engine-a","workspace":"output","read":false,"write":true,"execute":false}
+      ],
+      "requests": [
+        {"engineId":"engine-a","workspace":"scripts","method":"process.run","allowed":true},
+        {"engineId":"engine-a","workspace":"scripts","method":"process.stop","allowed":true},
+        {"engineId":"engine-a","workspace":"scripts","method":"process.status","allowed":true},
+        {"engineId":"engine-a","workspace":"scripts","method":"fs.read","allowed":false},
+        {"engineId":"engine-a","workspace":"scripts","method":"fs.write","allowed":false},
+        {"engineId":"engine-a","workspace":"output","method":"fs.write","allowed":true},
+        {"engineId":"engine-a","workspace":"output","method":"fs.read","allowed":false},
+        {"engineId":"engine-a","workspace":"output","method":"process.run","allowed":false}
+      ],
+      "visible": {"engine-a":["scripts","output"]}
+    }
+  ]
+}

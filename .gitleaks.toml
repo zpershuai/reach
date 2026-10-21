@@ -1,0 +1,10 @@
+title = "Reach publication secret scanning"
+
+[extend]
+useDefault = true
+
+[[rules]]
+id = "reach-synthetic-regression"
+description = "Synthetic marker used only in isolated scanner regression fixtures"
+regex = '''REACH_TEST_SECRET=([A-Z0-9]{32})'''
+secretGroup = 1

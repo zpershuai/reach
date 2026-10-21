@@ -20,14 +20,16 @@
 
 | 凭证 | 保存位置 | 用途 |
 | --- | --- | --- |
-| Controller token | Gateway env、MCP 私有设备 JSON | 会话控制、RPC、申请文件写入和进程 grant |
+| Owner Controller token | Gateway env、可信管理工具私有配置 | 所有 Engine/workspace 的数据面权限 |
+| Delegated token | 日常 MCP 私有设置 | 明确 Engine/workspace/read/write/execute 策略和到期时间 |
+| OAuth token | 已批准应用私有设置 | 当前策略；旧 legacy-global 应用须复核 |
 | Engine token | Gateway env、Mac Engine env | Engine 心跳认证，绑定配置的 Engine ID |
 | session token | Gateway 心跳响应，Engine 短期持有 | 建立一次 WSS 会话；30 秒有效且只可消费一次 |
 | grant ID | Gateway 内存，客户端短期持有 | 文件 grant 按工作区、路径、方法授权写入；进程 grant 按 sessionId 与 execute（workspace/script/launchId）或 control（processId）授权；均检查有效期，当前为 5 分钟 |
 
 两份长期 token 必须不同，至少 32 字符。推荐各生成 32 随机字节的十六进制字符串，即 64 字符。Engine token 只接受 ASCII 字母、数字和 `-_.`，十六进制值符合要求。生产环境采用 TLS 校验证书，不关闭证书检查。
 
-Gateway 的 Controller token 持有人能够发起配置工作区内的读写操作并申请 grant，因此工作区范围也是部署权限的一部分。MCP 配置使用 Controller token，Engine 配置使用 Engine token，不能交换。
+Gateway 的 Controller token 持有人能够发起配置工作区内的读写操作并申请 grant，因此工作区范围也是部署权限的一部分。日常 MCP 配置使用 scoped delegated 或 OAuth token；Owner token 仅用于可信管理。Engine 只使用 Engine token。字段、单管理员边界、创建/轮换/撤销、legacy 复核和升级回滚见 [客户端权限](client-access.md)。
 
 ## 首次生成私有配置
 
@@ -97,7 +99,7 @@ PY
 | `REACH_HTTP_LOG` | 关闭 | `1` 启用请求路径、状态与耗时日志 |
 | `REACH_DATA_DIR` | 无；控制台关闭 | 可写的持久化目录，保存 `reach.db`、WAL 及管理员、设备和审计数据；目录建议权限 `0700`，数据库权限 `0600`；不可写时启动失败 |
 | `REACH_PUBLIC_ORIGIN` | 回环监听的 HTTP origin | 控制台的完整外部 origin，例如 `https://gateway.example.com`，不带尾部斜线或路径；启用控制台且非回环监听时必填；同时作为 MCP OAuth 的 issuer 和资源地址（`<origin>/mcp`） |
-| `REACH_ADMIN_SETUP_TOKEN` | 首次启动随机生成并记录一次 | 仅无管理员时有效的首次设置凭证；保存于私有环境文件，管理员创建后失效 |
+| `REACH_ADMIN_SETUP_TOKEN` | 无管理员时自动生成到数据目录 `admin-setup-token`（0600，不输出到日志） | 可显式在私有 env 配置；自动文件安全复用，设置成功删除，已有管理员不生成；读取方式见控制台文档 |
 | `REACH_TRUSTED_PROXIES` | 空 | 逗号分隔的受信代理 IP 或 CIDR，例如 `192.0.2.10,198.51.100.0/24`；仅 socket 对端受信时使用 `X-Forwarded-For` 解析限流地址；应按实际代理设置最小范围 |
 | `REACH_AUDIT_RETENTION_DAYS` | `30` | 审计保留天数，整数 `1`–`365`；非法值在监听前报错；管理员也可在控制台修改 |
 | `REACH_MCP_ALLOWED_ORIGINS` | 空 | HTTP MCP 允许的完整 Origin，逗号分隔；默认拒绝带 Origin 的请求，无该头的云端客户端正常使用 |
@@ -160,7 +162,7 @@ REACH_UPDATE_REQUEST_DIR=/run/reach/update
 
 Compose 已将 `deploy/update/` 挂载到该路径；先按 [运维](operations.md) 创建目录并安装宿主机 helper。GitHub token 文件若在容器使用，需要单独以只读文件挂载，并令文件权限允许容器用户读取。宿主机 helper 的 token 也需独立配置；容器中的文件路径不能直接供宿主机读取。不要将 token、repo 私有 owner 或安装目录提交到仓库。
 
-Host Engine 仅需 enable 和 repo，安装二进制所在目录必须允许服务用户写入和原子替换。Compose Engine 设置 backend 和独立 request dir，其宿主机 helper 另外使用 `REACH_UPDATE_COMPOSE_FILE` 指定现有 Compose 文件、`REACH_UPDATE_ENGINE_SERVICE`（默认 `engine`）指定服务名、`REACH_UPDATE_ENGINE_BINARY_PATH`（默认 `/usr/local/bin/engine`）指定容器内二进制路径。环境文件、工作区挂载和 Node runtime 沿用现有配置。
+Host Engine 需先通过新版安装器安装带健康回收的启动脚本，再设置 enable 和 repo；安装目录必须允许服务用户写入和原子替换。不要手工设置 guard 的内部环境字段来跳过启动器。Compose Engine 设置 backend 和独立 request dir，其宿主机 helper 另外使用 `REACH_UPDATE_COMPOSE_FILE` 指定现有 Compose 文件、`REACH_UPDATE_ENGINE_SERVICE`（默认 `engine`）指定服务名、`REACH_UPDATE_ENGINE_BINARY_PATH`（默认 `/usr/local/bin/engine`）指定容器内二进制路径。环境文件、工作区挂载和 Node runtime 沿用现有配置。
 
 ## 工作区配置来源
 

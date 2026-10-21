@@ -183,7 +183,7 @@ The Engine bounds serialized responses to the same 1 MiB, including JSON escapin
 
 One Gateway can manage multiple registered Engines, each with its own credential, session, lease, grants and RPC state. Controller requests select an Engine with `?engineId=...`; requests without it target the default Engine. MCP device entries use `engineId` to route through a shared Gateway. See [OpenWrt and multi-device deployment](../deploy/openwrt.md).
 
-Remote MCP clients connect to the same Gateway's HTTPS `/mcp` using the Controller token. The endpoint exposes static underscore filesystem and process tools, discovers registered Engines and returns promptly while idle devices connect. HTTP MCP sessions have identity-bound ownership, bounded requests, and DELETE/idle cleanup. Desktop stdio clients remain supported. See [MCP installation](../deploy/mcp.md) and the [Grok Bot plugin](../../grok-bot-plugin/README.md).
+Remote MCP clients connect to the same Gateway's HTTPS `/mcp` using an explicitly scoped delegated/OAuth credential, or a trusted global Owner token. The endpoint exposes static underscore filesystem and process tools, discovers registered Engines and returns promptly while idle devices connect. HTTP MCP sessions have identity-bound ownership, bounded requests, and DELETE/idle cleanup. Desktop stdio clients remain supported. See [MCP installation](../deploy/mcp.md) and the [Grok Bot plugin](../../grok-bot-plugin/README.md).
 
 
 ## RPC deadlines and retry behavior
@@ -224,3 +224,13 @@ These paths exist only for older Agents and are scheduled for removal; new integ
 - The Gateway also still accepts a legacy `job.done` message and treats it as a close.
 
 New Agents must use explicit session control (`/session/open`, `/session/renew`, `/session/close`) and renewal. The compatibility path will be removed after Gateway/Engine/Agent integration tests rely on explicit control.
+
+## Client policy and identity
+
+REST, HTTP MCP and Connector calls share the Gateway's authenticated-principal facade. Owner tokens remain global; delegated and newly approved OAuth clients have explicit Engine/workspace permissions. Read maps to fs.read/list/stat/glob/grep, write to fs.write/edit, and execute to all process methods. Permissions are independent. Unknown or hidden Engine IDs return the same 404; cross-principal MCP session IDs return 404. Scoped discovery filters Engine/workspace/method/version/process metadata.
+
+Session and task ownership use the authenticated principal, not caller labels or wire identity fields. File, execution and control grants bind principal, Engine and policy revision as well as their original scope/TTL. Issuance and forwarding both recheck current policy; nested tool.call is invalid. Grant issuance denial is HTTP 403, authenticated RPC policy denial is PERMISSION_DENIED, and invalid/expired/revoked credentials return 401. MCP reports ordinary tool failures through tool errors.
+
+Rotation, revocation, delegated expiry and policy changes synchronously block old authority, revoke grants and drain owned sessions/tasks; expiry does not wait for another request. OAuth refresh preserves the same principal and current policy. Cleanup failures retain ownership for retry. Automatic MCP grants do not represent human approval. A write already forwarded to the Engine may cross its atomic commit boundary before revocation; read back revisions before retrying uncertain writes. Script execution has the Engine account's OS privileges and is not an OS sandbox.
+
+See [client access](../deploy/client-access.md) for the management API, exact error shapes, legacy-global review and rollback procedure. No Engine wire-protocol change is needed for Gateway client policy.

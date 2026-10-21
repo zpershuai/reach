@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +9,14 @@ import { loadConfig } from "./config.js";
 import { GatewayHttpError, SessionReplacedError, type SessionStatus } from "./gateway.js";
 import { McpServer, MCP_PROTOCOL_VERSION } from "./server.js";
 import { MCP_VERSION } from "./version.js";
+
+test("invalid private configuration emits a stable code without echoing credentials or input", () => {
+  const secret = "private-credential-sentinel\nFORGED_LOG".repeat(1000);
+  const env: NodeJS.ProcessEnv = { PATH: process.env.PATH, HOME: process.env.HOME, REACH_MCP_DEVICES: secret };
+  const result = spawnSync(process.execPath, [fileURLToPath(new URL("./main.js", import.meta.url))], { env, encoding: "utf8" });
+  assert.equal(result.status, 1); assert.equal(result.stdout, "");
+  assert.equal(result.stderr, "reach-mcp: CONFIGURATION_INVALID; check private client settings\n");
+});
 
 function readyGateway(overrides: Partial<{
   rpc: (method: string, params: Record<string, unknown>, permission?: { grantId: string }) => Promise<Record<string, unknown>>;

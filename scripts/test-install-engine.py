@@ -6,6 +6,8 @@ import platform
 import subprocess
 import tempfile
 import unittest
+from executable_test_fixture import compile_fixture
+from binary_identity import check_executable
 
 SCRIPT = Path(__file__).with_name('install-engine.sh')
 ASSETS = {
@@ -30,13 +32,13 @@ class InstallEngineTests(unittest.TestCase):
         directory = self.releases / f'engine-v{version}'
         directory.mkdir(parents=True)
         binary = directory / ASSET
-        binary.write_text(f'#!/bin/sh\necho {reported or version}\n')
+        compile_fixture(binary, reported or version)
         binary.chmod(0o755)
         digest = digest or hashlib.sha256(binary.read_bytes()).hexdigest()
         (directory / 'SHA256SUMS').write_text(f'{digest}  {ASSET}\n{"0" * 64}  engine-other\n')
 
     def run_installer(self, version=None, api=None):
-        env = {**os.environ, 'REACH_INSTALL_DRY_RUN': '1',
+        env = {**os.environ, 'REACH_INSTALL_DRY_RUN': '1', 'REACH_RELEASE_TEST_MODE': '1',
                'REACH_RELEASE_BASE_URL': self.releases.as_uri()}
         env.pop('REACH_ENGINE_VERSION', None)
         if version:
@@ -77,10 +79,69 @@ class InstallEngineTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('expected 1.2.3', result.stderr)
 
+    def test_untrusted_version_output_is_not_echoed_to_diagnostics(self):
+        sentinel = 'private-credential-body-output-sentinel'
+        self.publish('1.2.3', reported=sentinel)
+        binary = self.releases / 'engine-v1.2.3' / ASSET
+        compile_fixture(binary, sentinel, stderr=sentinel)
+        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+        (binary.parent / 'SHA256SUMS').write_text(f'{digest}  {ASSET}\n')
+        result = self.run_installer('1.2.3')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('ENGINE_VERSION_MISMATCH', result.stderr)
+        self.assertNotIn(sentinel, result.stdout + result.stderr)
+
     def test_invalid_version_is_refused(self):
         result = self.run_installer('latest')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('Invalid Engine version', result.stderr)
+
+    def test_shared_executable_identity_matrix(self):
+        cases = json.loads((SCRIPT.parent.parent / 'fixtures/executable-identity.json').read_text())
+        for case in cases:
+            with self.subTest(case=case['id']):
+                if case['valid']:
+                    check_executable(bytes.fromhex(case['hex']), case['target'])
+                else:
+                    with self.assertRaises(ValueError): check_executable(bytes.fromhex(case['hex']), case['target'])
+
+    def test_openwrt_elf_checker_matches_shared_rejection_matrix(self):
+        cases = json.loads((SCRIPT.parent.parent / 'fixtures/executable-identity.json').read_text())
+        for case in cases:
+            path = self.root / 'fixture-executable'; path.write_bytes(bytes.fromhex(case['hex']))
+            result = subprocess.run(['sh', str(SCRIPT.with_name('verify-elf-x64.sh')), str(path)], capture_output=True)
+            # "wrong-os" is a valid Linux x64 ELF presented to a Mach-O consumer.
+            expected = case['id'] in ('linux-x64', 'wrong-os')
+            self.assertEqual(result.returncode == 0, expected, case['id'])
+
+    def test_wrong_format_architecture_and_truncation_are_rejected_before_version_probe(self):
+        self.publish('1.2.3')
+        binary = self.releases / 'engine-v1.2.3' / ASSET
+        original = binary.read_bytes()
+        wrong_arch = bytearray(original)
+        wrong_arch[18:20] = (183).to_bytes(2, 'little') if original.startswith(b'\x7fELF') else wrong_arch[18:20]
+        if original.startswith(b'\xcf\xfa\xed\xfe'):
+            wrong_arch[4:8] = (0x1000007 if platform.machine() == 'arm64' else 0x100000c).to_bytes(4, 'little')
+        marker = self.root / 'executed'
+        script = f'#!/bin/sh\ntouch "{marker}"\necho 1.2.3\n'.encode()
+        for data in [script, bytes(wrong_arch), original[:30]]:
+            with self.subTest(size=len(data)):
+                binary.write_bytes(data)
+                (binary.parent / 'SHA256SUMS').write_text(f'{hashlib.sha256(data).hexdigest()}  {ASSET}\n')
+                result = self.run_installer('1.2.3')
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('EXECUTABLE_IDENTITY_REJECTED', result.stderr)
+                self.assertFalse(marker.exists())
+
+    def test_duplicate_and_malformed_selected_checksums_are_refused(self):
+        self.publish('1.2.3')
+        directory = self.releases / 'engine-v1.2.3'
+        line = (directory / 'SHA256SUMS').read_text().splitlines()[0]
+        for sums in [line + '\n' + line + '\n', line + ' extra\n', line + '\n' + line + ' extra\n']:
+            (directory / 'SHA256SUMS').write_text(sums)
+            result = self.run_installer('1.2.3')
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn('no single valid digest', result.stderr)
 
 
 if __name__ == '__main__':

@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { setTimeout as delay } from "node:timers/promises";
 import { GatewayHttpError, SessionReplacedError, type GatewayClient, type ReadySession, type SessionStatus } from "./gateway.js";
 import type { CallerContext } from "../console-api/events.js";
+import type { GrantAuthority, MutationMethod } from "../grants.js";
 
 export interface EngineResult {
   statusCode: number;
@@ -11,6 +12,8 @@ export interface EngineResult {
 export interface EngineStatus extends Omit<SessionStatus, "engineVersion"> {
   lastSeenAt?: string;
   engineVersion: string | null;
+  endpoint?: string;
+  ownerLabel?: string;
 }
 
 export interface EngineApi {
@@ -18,9 +21,10 @@ export interface EngineApi {
   open(sessionId: string, caller?: CallerContext): EngineResult;
   renew(sessionId: string): EngineResult;
   close(sessionId: string): EngineResult;
-  grant(sessionId: string, workspace: string, path: string, method: "fs.write" | "fs.edit"): EngineResult;
-  processGrant?(sessionId: string, scope: Record<string, unknown>): EngineResult;
-  rpc(body: Record<string, unknown>, caller?: CallerContext): Promise<EngineResult>;
+  grant(sessionId: string, workspace: string, path: string, method: MutationMethod | readonly MutationMethod[], authority?: GrantAuthority): EngineResult;
+  processGrant?(sessionId: string, scope: Record<string, unknown>, authority?: GrantAuthority): EngineResult;
+  rpc(body: Record<string, unknown>, caller?: CallerContext, authority?: GrantAuthority, receivedAt?: number): Promise<EngineResult>;
+  revokePrincipal?(principalId: string): void;
 }
 
 function unwrap(path: string, result: EngineResult): Record<string, unknown> {

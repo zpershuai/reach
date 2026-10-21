@@ -234,6 +234,53 @@ test("MCP discovers advertised workspace names for file calls while retaining ex
   });
 });
 
+test("compatibility matrix: additive fields, older metadata, missing capabilities and unknown protocols", async () => {
+  await withGateway(async (url) => {
+    const c = await client(url); await c.notify();
+    // A newer Engine may add fields; reach-rpc/1.0 Gateways ignore what they do not understand.
+    await c.tool("list_workspaces", { deviceId: "engine-a" });
+    const forwarded: string[] = [];
+    let engine = await mockEngine(url, "engine-a", engineToken, (message, socket) => {
+      forwarded.push(message.method);
+      socket.send(JSON.stringify({ type: "response", requestId: message.requestId, result: { entries: [] } }));
+    }, { workspaces: ["docs", "scripts"], processWorkspaces: ["scripts"], methods: ["fs.read", "fs.list"], workspaceGenerations: { docs: "g1", scripts: "g2" }, futureFeature: { enabled: true } } as never);
+    assert.deepEqual((await c.tool("list_workspaces", { deviceId: "engine-a" })).value, { deviceId: "engine-a", status: "ready", workspaces: ["docs", "scripts"], processWorkspaces: ["scripts"] });
+    // An Engine without process methods (for example a non-Unix build) is reported as unsupported, not forwarded.
+    const unsupported = await c.tool("process_run", { deviceId: "engine-a", workspace: "scripts", script: "job.mjs", launchId: "job-1" });
+    assert.match(unsupported.value, /^PROCESS_UNSUPPORTED:/);
+    assert.deepEqual(forwarded, []);
+    assert.equal((await c.tool("session_close", { deviceId: "engine-a" })).value.closed, true);
+    engine.terminate();
+    for (let n = 0; n < 100 && (await status(url)).status !== "none"; n++) await delay(5);
+
+    // An older Engine that predates execution metadata still works for files.
+    await c.tool("list_workspaces", { deviceId: "engine-a" });
+    engine = await mockEngine(url, "engine-a", engineToken, undefined, { workspaces: ["default"] });
+    assert.deepEqual((await c.tool("list_workspaces", { deviceId: "engine-a" })).value, { deviceId: "engine-a", status: "ready", workspaces: ["default"], processWorkspaces: [] });
+    assert.equal((await c.tool("session_close", { deviceId: "engine-a" })).value.closed, true);
+    engine.terminate();
+    for (let n = 0; n < 100 && (await status(url)).status !== "none"; n++) await delay(5);
+
+    // An unknown protocol version fails fast with a stable reason and nothing is forwarded.
+    await c.tool("list_workspaces", { deviceId: "engine-a" });
+    const heartbeat = await (await fetch(`${url}/heartbeat`, { method: "POST", headers: { ...headers, authorization: `Bearer ${engineToken}` }, body: JSON.stringify({ device: { id: "engine-a" } }) })).json() as { endpoint: string; token: string; sessionId: string };
+    const socket = new WebSocket(`${url.replace("http:", "ws:")}${heartbeat.endpoint}?token=${heartbeat.token}`);
+    await once(socket, "open");
+    const requests: unknown[] = [];
+    socket.on("message", (data) => { const message = JSON.parse(data.toString()); if (message.type === "request") requests.push(message); });
+    const started = Date.now();
+    const closed = once(socket, "close");
+    socket.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "2.0", sessionId: heartbeat.sessionId, engineId: "engine-a", workspaces: ["default"], methods: ["fs.read"] }));
+    const [code] = await closed as [number];
+    assert.equal(code, 1008);
+    for (let n = 0; n < 100 && (await status(url)).status !== "none"; n++) await delay(5);
+    const final = await (await fetch(`${url}/session/status`, { headers })).json() as { status: string; closureReason: string };
+    assert.deepEqual([final.status, final.closureReason], ["none", "unsupported_protocol"]);
+    assert.ok(Date.now() - started < 2000, "Unsupported protocols must not wait for the connecting timeout");
+    assert.deepEqual(requests, []);
+  });
+});
+
 test("MCP owns multiple devices without routing races and rejects a competing REST controller", async () => {
   await withGateway(async (url) => {
     const c = await client(url); await c.notify();

@@ -18,8 +18,8 @@ fn main() {
     }
     let config = match EngineConfig::parse_from_env(gateway_url.as_deref()) {
         Ok(config) => config,
-        Err(error) => {
-            eprintln!("Reach engine configuration error: {error}");
+        Err(_) => {
+            eprintln!("CONFIGURATION_INVALID: check private Engine settings");
             std::process::exit(1);
         }
     };
@@ -33,8 +33,8 @@ fn main() {
         .filter(|_| config.workspace_file.is_none())
         .map(|entry| &entry.root)
     {
-        if let Err(error) = std::fs::create_dir_all(root) {
-            eprintln!("Reach engine could not create default workspace {root:?}: {error}");
+        if let Err(_) = std::fs::create_dir_all(root) {
+            eprintln!("WORKSPACE_CREATE_FAILED: check directory permissions");
             std::process::exit(1);
         }
     }
@@ -71,19 +71,19 @@ fn main() {
     if let Some(update) = config.update.clone() {
         match reach_rpc::runtime::update::EngineUpdater::new(update) {
             Ok(updater) => runtime.set_updater(Box::new(updater)),
-            Err(error) => {
-                eprintln!("Reach updater initialization failed: {error}");
+            Err(_) => {
+                eprintln!("UPDATE_CONFIGURATION_INVALID");
                 std::process::exit(1);
             }
         }
     }
 
     println!(
-        "Reach engine v{} ({}) heartbeating {}",
-        ENGINE_VERSION, config.engine_id, config.gateway.base_url
+        "Reach engine v{} heartbeating configured Gateway",
+        ENGINE_VERSION
     );
-    if let Err(error) = runtime.run() {
-        eprintln!("Reach engine failed: {error}");
+    if let Err(_) = runtime.run() {
+        eprintln!("ENGINE_RUNTIME_FAILED");
         std::process::exit(1);
     }
 }

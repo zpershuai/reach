@@ -13,6 +13,7 @@ import { EngineRegistry, RegistryError, deviceKinds, type RegisteredEngine } fro
 import type { ConsoleStore } from "./store.js";
 import { serveEvents } from "./sse.js";
 import type { OAuthServer } from "./oauth.js";
+import { ClientAccess, ClientAccessError } from "./client-access.js";
 
 const name = z.string().trim().min(1).max(64).regex(/^[^\x00-\x1f\x7f]+$/);
 const override = z.object({ kind: z.enum(deviceKinds), model: z.string().max(64).regex(/^[^\x00-\x1f\x7f]*$/) }).strict();
@@ -43,6 +44,7 @@ export class ConsoleServer {
     private readonly audit: AuditWriter, private readonly activity: ActivityLog,
     private readonly auth: ConsoleAuth, private readonly mcp: ReturnType<typeof createMcpHttpHandler>,
     private readonly oauth: OAuthServer,
+    private readonly access: ClientAccess,
     private readonly heartbeatInterval: number, private readonly updateEnabled: boolean,
     private readonly now = Date.now,
   ) {}
@@ -99,9 +101,42 @@ export class ConsoleServer {
     try {
       const mutation = !["GET", "HEAD"].includes(request.method ?? "");
       const recent = request.method === "DELETE" && path.startsWith("engines/")
-        || request.method === "POST" && (path === "engines" || /^engines\/[^/]+\/rotate$/.test(path) || /^clients\/[^/]+\/disconnect$/.test(path)) || request.method === "DELETE" && path.startsWith("oauth/");
+        || request.method === "POST" && (path === "engines" || /^engines\/[^/]+\/rotate$/.test(path) || /^clients\/[^/]+\/disconnect$/.test(path)) || request.method === "DELETE" && path.startsWith("oauth/")
+        || mutation && (path === "access-clients" || path.startsWith("access-clients/"));
       this.auth.require(request, mutation, recent);
       const method = request.method;
+      if (method === "GET" && path === "access-clients") { sendJson(response, 200, { clients: this.access.list() }); return; }
+      if (method === "POST" && path === "access-clients") {
+        const body = z.object({ name, expiresAt: z.number().int(), permissions: z.unknown().optional() }).strict().parse(await readJsonBody(request));
+        const result = this.access.create(body.name, body.expiresAt, body.permissions);
+        this.auth.action(`client.create:${result.client.id}`);
+        sendJson(response, 201, result); return;
+      }
+      const accessRoute = /^access-clients\/([^/]+)(?:\/(rotate|policy|review-global))?$/.exec(path);
+      if (accessRoute) {
+        const id = decodeURIComponent(accessRoute[1]);
+        const action = accessRoute[2];
+        if (method === "GET" && !action) { sendJson(response, 200, { client: this.access.get(id) }); return; }
+        if (method === "DELETE" && !action) {
+          this.access.revoke(id); this.auth.action(`client.revoke:${id}`);
+          sendJson(response, 200, { revoked: id }); return;
+        }
+        if (method === "POST" && action === "rotate") {
+          const body = z.object({ expiresAt: z.number().int() }).strict().parse(await readJsonBody(request));
+          const result = this.access.rotate(id, body.expiresAt);
+          this.auth.action(`client.rotate:${id}`); sendJson(response, 200, result); return;
+        }
+        if (method === "PATCH" && action === "policy") {
+          const body = z.object({ permissions: z.unknown() }).strict().parse(await readJsonBody(request));
+          const client = this.access.setPolicy(id, body.permissions);
+          this.auth.action(`client.policy:${id}`); sendJson(response, 200, { client }); return;
+        }
+        if (method === "POST" && action === "review-global") {
+          z.object({ confirm: z.literal(true) }).strict().parse(await readJsonBody(request));
+          const client = this.access.reviewLegacy(id);
+          this.auth.action(`client.review-global:${id}`); sendJson(response, 200, { client }); return;
+        }
+      }
       if (method === "GET" && path === "events") { serveEvents(this.events, request, response, () => Boolean(this.auth.session(request))); return; }
       if (method === "GET" && path === "snapshot") { sendJson(response, 200, this.snapshot()); return; }
       if (method === "GET" && (path === "activity" || path === "activity/export")) {
@@ -164,6 +199,7 @@ export class ConsoleServer {
       if (response.headersSent) { response.destroy(); return; }
       if (error instanceof ConsoleError) sendJson(response, error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
       else if (error instanceof RegistryError) sendJson(response, error.status, { error: error.message });
+      else if (error instanceof ClientAccessError) sendJson(response, error.status, { error: error.message });
       else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB" });
       else if (error instanceof z.ZodError || error instanceof InvalidJsonError || error instanceof URIError || error instanceof Error && error.message.includes("cursor")) sendJson(response, 400, { error: "Invalid console request" });
       else sendJson(response, 500, { error: "Console storage unavailable" });

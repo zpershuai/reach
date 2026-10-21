@@ -4,12 +4,16 @@
 import fcntl
 import json
 import os
+import re
 from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from binary_identity import check_executable
+from install_transaction import stage_file, restore_file
 
 SERVICE = 'reach-engine.service'
 
@@ -27,43 +31,6 @@ def unit_text(home, engine_dir, system):
             '\n[Install]\nWantedBy=' + ('multi-user.target' if system else 'default.target') + '\n')
 
 
-def stage_file(target, content=None, source=None, mode=0o600, link=None):
-    """Keep each staged file on its target filesystem for atomic replacement."""
-    descriptor, name = tempfile.mkstemp(prefix='.reach-install-', dir=target.parent)
-    os.close(descriptor)
-    temporary = Path(name)
-    try:
-        if link is not None:
-            temporary.unlink()
-            temporary.symlink_to(link)
-        else:
-            if source is not None:
-                shutil.copyfile(source, temporary)
-            else:
-                temporary.write_text(content)
-            temporary.chmod(mode)
-            with temporary.open('rb') as stream:
-                os.fsync(stream.fileno())
-        return temporary
-    except BaseException:
-        temporary.unlink(missing_ok=True)
-        raise
-
-
-def restore_file(target, saved):
-    if saved is None:
-        target.unlink(missing_ok=True)
-        return
-    if saved.is_symlink():
-        temporary = stage_file(target, link=os.readlink(saved))
-    else:
-        temporary = stage_file(target, source=saved, mode=saved.stat().st_mode & 0o7777)
-    try:
-        os.replace(temporary, target)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def install_engine(engine_source, config_source, script_dir, home, unit_dir, system,
                    archive=None, runner=subprocess.run, checkpoint=lambda step: None):
     engine_dir = home / '.local/share/reach'
@@ -79,16 +46,19 @@ def install_engine(engine_source, config_source, script_dir, home, unit_dir, sys
 
     # All sources and the manager are checked before changing installed files.
     for source in [engine_source, config_source, script_dir / 'run-node.sh',
-                   script_dir / 'install-node-runtime.py', script_dir / 'node-runtime.json']:
+                   script_dir / 'install-node-runtime.py', script_dir / 'node-runtime.json', script_dir / 'engine-supervisor.mjs']:
         if not source.is_file():
             raise FileNotFoundError(f'Required installation artifact is missing: {source}')
     if not os.access(engine_source, os.X_OK):
         raise ValueError('Engine binary is not executable')
     if archive is not None and not archive.is_file():
         raise FileNotFoundError('Node archive is missing')
+    check_executable(engine_source.read_bytes(), 'linux-x64')
+    checkpoint('source-identity')
     engine_version = run([str(engine_source), '--version']).stdout.strip()
-    if not engine_version:
-        raise ValueError('Engine returned an empty version')
+    if not re.fullmatch(r'(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)', engine_version):
+        raise ValueError('Engine returned an invalid component version')
+    checkpoint('source-version')
     syntax = run(['/bin/bash', '-n', str(config_source)])
     if syntax.stderr.strip():
         raise ValueError('Engine configuration failed Bash syntax validation')
@@ -114,7 +84,7 @@ def activate_install(engine_source, config_source, script_dir, home, unit_dir,
     node_pointer.parent.mkdir(parents=True, exist_ok=True)
     targets = [engine_dir / 'engine', config_dir / 'engine.env', engine_dir / 'run-node.sh',
                engine_dir / 'start-engine.sh', reach_dir / 'versions.json',
-               unit_dir / SERVICE, node_pointer]
+               unit_dir / SERVICE, node_pointer, engine_dir / 'engine-supervisor.mjs']
     active = service('is-active', '--quiet', SERVICE, check=False).returncode == 0
     enabled = service('is-enabled', SERVICE, check=False).stdout.strip()
     if enabled not in ('enabled', 'enabled-runtime', 'disabled', 'static', 'not-found', ''):
@@ -129,6 +99,10 @@ def activate_install(engine_source, config_source, script_dir, home, unit_dir,
             shutil.copy2(target, snapshot, follow_symlinks=False)
             saved[target] = snapshot
     (backup / 'service-state.json').write_text(json.dumps({'active': active, 'enabled': enabled}) + '\n')
+    recovery = {'schemaVersion': 1, 'service': SERVICE,
+                'files': [{'target': str(target), 'backup': str(snapshot) if snapshot else None} for target, snapshot in saved.items()]}
+    (backup / 'recovery.json').write_text(json.dumps(recovery, indent=2) + '\n')
+    (backup / 'recovery.json').chmod(0o600)
     checkpoint('snapshot')
 
     staged = {}
@@ -167,7 +141,7 @@ def activate_install(engine_source, config_source, script_dir, home, unit_dir,
             versions.setdefault('mcpVersion', None)
         launcher = ('#!/usr/bin/env bash\nset -euo pipefail\nset -a\n'
                     'source "$HOME/.config/reach/engine.env"\nset +a\n'
-                    'exec "$HOME/.local/share/reach/engine"\n')
+                    'exec "$HOME/.local/share/reach/run-node.sh" "$HOME/.local/share/reach/engine-supervisor.mjs" "$HOME/.local/share/reach/engine"\n')
         inputs = [
             {'source': engine_source, 'mode': 0o755},
             {'source': config_source},
@@ -176,6 +150,7 @@ def activate_install(engine_source, config_source, script_dir, home, unit_dir,
             {'content': json.dumps(versions, indent=2) + '\n'},
             {'content': unit_text(home, engine_dir, system), 'mode': 0o644},
             {'link': new_runtime.name},
+            {'source': script_dir / 'engine-supervisor.mjs', 'mode': 0o644},
         ]
         for target, values in zip(targets, inputs):
             staged[target] = stage_file(target, **values)
@@ -243,7 +218,7 @@ def main():
                                   Path(__file__).resolve().parent, home, unit_dir, system,
                                   Path(sys.argv[3]).resolve() if len(sys.argv) == 4 else None)
     except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as error:
-        raise SystemExit(f'Reach Engine installation failed: {error}')
+        raise SystemExit('ENGINE_INSTALL_FAILED: inspect private ~/.reach/backups/linux-*/recovery.json and service-state.json; follow the Linux recovery guide')
     print(json.dumps(versions))
     print(f'Installed Reach Engine {versions["engineVersion"]} with private Node runtime (systemd).')
 

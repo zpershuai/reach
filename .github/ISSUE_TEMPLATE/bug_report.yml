@@ -1,0 +1,53 @@
+name: Bug report
+description: Something in the Gateway, Engine or MCP Connector does not behave as documented.
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        **Security vulnerabilities must not be reported here.** Follow [SECURITY.md](../blob/main/SECURITY.md) instead.
+
+        This issue is public. Do not paste tokens, setup credentials, cookies, env dumps, databases, full WSS URLs, real hostnames or IP addresses, file contents, script arguments or process output. Use `example.com`, `192.0.2.x` and placeholder device IDs.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: Output of `--version` (or `get_versions`) for each component involved.
+      placeholder: "Gateway 0.7.1, Engine 0.3.1, Connector 0.4.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Engine platform
+      options: [macOS arm64, macOS x64, Linux x86_64 (systemd), OpenWrt x86_64, Built from source on another platform, Not relevant]
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How was it installed?
+      options: [Release assets and installer, Docker Compose Gateway, Built from source, Other]
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: A minimal synthetic reproduction, preferably on a local loopback setup like docs/deploy/first-run.md.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+      description: Include stable error codes (for example `PERMISSION_DENIED`, `HEARTBEAT_FAILED`) and HTTP status codes, not raw logs.
+    validations:
+      required: true
+  - type: checkboxes
+    id: sanitized
+    attributes:
+      label: Confirmation
+      options:
+        - label: I removed credentials, private hostnames, file contents and other deployment details from this report.
+          required: true

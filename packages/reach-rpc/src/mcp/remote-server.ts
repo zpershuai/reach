@@ -56,8 +56,8 @@ export class RemoteMcpServer {
   public receive(value: unknown): Promise<void> { return this.protocol.receive(value); }
 
   public constructor(private readonly engines: ReadonlyMap<string, EngineApi>, send: (message: Record<string, unknown>) => void, protocolVersion: string, clientLabel = "MCP client", mcpSessionId?: string,
-    private readonly clients: OwnedClients = new Map()) {
-    this.caller = { type: "mcp-http", label: clientLabel, verified: false, mcpSessionId };
+    private readonly clients: OwnedClients = new Map(), private readonly canMethod?: (method: string) => boolean, principalId?: string) {
+    this.caller = { type: "mcp-http", label: clientLabel, verified: false, mcpSessionId, ...(principalId ? { principalId } : {}) };
     this.protocol = new McpProtocol(send, () => this.listTools(), params => this.callTool(params), undefined, {
       protocolVersion, listChanged: true, http: true,
       instructionsPrefix: "Use list_devices, then list_workspaces with deviceId to discover workspace names before file or process operations. If connecting, poll device_status after retryAfterMs, then call list_workspaces again. Use workspaces for file operations and processWorkspaces for process execution. Read revision before overwrite/edit and pass ifMatch. After any write timeout, re-read before another write. Use process_status with the same launchId and owned session after an uncertain launch. Close owned sessions when finished. ",
@@ -71,7 +71,11 @@ export class RemoteMcpServer {
       if (tool.name === "pick_device") tool.description = "Connect to a Reach Engine without waiting for it to wake up. When connecting, wait retryAfterMs and poll device_status. ENGINE_BUSY means another controller owns it.";
 
     }
-    return [...tools, {
+    const permitted = tools.filter(tool => {
+      const method = METHODS[String(tool.name)];
+      return !method || !this.canMethod || this.canMethod(method);
+    });
+    return [...permitted, {
       name: "device_status", description: "Observe a device connection without opening or canceling its session. Poll after retryAfterMs when connecting.",
       inputSchema: { type: "object", properties: { deviceId: { type: "string" } }, required: ["deviceId"], additionalProperties: false },
     }];

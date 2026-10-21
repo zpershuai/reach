@@ -7,6 +7,30 @@ import { once } from "node:events";
 import { GATEWAY_VERSION } from "./version.js";
 import { createGateway } from "./gateway.js";
 import { GatewayUpdater, parseUpdateConfig, selectRelease, updateAdmissionPaused, type Release, type UpdateConfig } from "./gateway-update.js";
+import { approvedReleaseUrl, fetchRelease } from "./release-fetch.js";
+
+test("release fetch rejects unapproved origins and strips credentials across every origin change", async () => {
+  for (const url of ["http://api.github.com/x", "file:///tmp/fixture", "https://api.github.com.evil.example/x", "https://user:secret@api.github.com/x", "https://api.github.com:8443/x", "https://unknown.example/x"]) assert.throws(() => approvedReleaseUrl(url));
+  const requests: Array<{ url: string; headers: Record<string, string> }> = [];
+  const fetcher: typeof fetch = async (input, init) => {
+    assert.equal(init?.redirect, "manual");
+    requests.push({ url: String(input), headers: init?.headers as Record<string, string> });
+    if (requests.length === 1) return new Response(null, { status: 302, headers: { location: "/same-origin" } });
+    if (requests.length === 2) return new Response(null, { status: 302, headers: { location: "https://release-assets.githubusercontent.com/fixture" } });
+    if (requests.length === 3) return new Response(null, { status: 302, headers: { location: "https://api.github.com/returned" } });
+    return new Response("fixture");
+  };
+  const response = await fetchRelease("https://api.github.com/start", { Authorization: "Bearer private-sentinel", Cookie: "private-cookie" }, fetcher);
+  assert.equal(await response.text(), "fixture");
+  assert.equal(requests[1].headers.Authorization, "Bearer private-sentinel");
+  assert.equal(requests[2].headers.Authorization, undefined); assert.equal(requests[2].headers.Cookie, undefined);
+  assert.equal(requests[3].headers.Authorization, undefined);
+  for (const location of ["http://api.github.com/x", "https://unapproved.example/x"]) {
+    let calls = 0;
+    await assert.rejects(fetchRelease("https://api.github.com/start", {}, async () => { calls++; return new Response(null, { status: 302, headers: { location } }); }));
+    assert.equal(calls, 1, "rejected destination must not receive a request");
+  }
+});
 
 const digest = "a".repeat(64);
 const versionParts = GATEWAY_VERSION.split(".").map(BigInt);
@@ -27,6 +51,23 @@ function fixtureFetch(releases = [release(nextVersion)]): typeof fetch {
       : Response.json(releases);
   };
 }
+
+test("duplicate release assets and malformed selected checksums cannot prepare an update", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "reach-duplicate-update-"));
+  try {
+    for (const kind of ["package", "checksums", "checksum-lines"] as const) {
+      const selected = release(nextVersion);
+      if (kind !== "checksum-lines") selected.assets.push(selected.assets[kind === "package" ? 0 : 1]);
+      const updater = new GatewayUpdater(config(directory), () => true, () => {}, async input => {
+        if (String(input).includes("/assets/")) return new Response(`${digest}  gateway-amd64.tgz\n${digest}  gateway-amd64.tgz extra\n`);
+        return Response.json([selected]);
+      });
+      await updater.tick();
+      assert.equal(existsSync(join(directory, "request.json")), false);
+      updater.stop();
+    }
+  } finally { rmSync(directory, { recursive: true, force: true }); }
+});
 
 function intent(directory: string, expiresAt: number): void {
   writeFileSync(join(directory, "apply.json"), JSON.stringify({ component: "gateway", version: nextVersion, asset: "gateway-amd64.tgz", digest, repo: "example/reach", nonce: "b".repeat(32), expiresAt }));

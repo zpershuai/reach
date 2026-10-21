@@ -5,6 +5,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { setTimeout as delay } from "node:timers/promises";
+import WebSocket from "ws";
 import { createGateway } from "../gateway.js";
 import { totp } from "./credentials.js";
 
@@ -14,11 +16,13 @@ const password = "a long owner password";
 const mcpHeaders = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "openai-mcp", version: "1.0.0" } } };
 
-async function fixture() {
+async function fixture(options: { idleMs?: number } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "reach-oauth-"));
   let now = Date.now();
   const gateway = createGateway({ logger: () => {}, now: () => now, heartbeatIntervalSeconds: 1,
     authentication: { controllerToken: "c".repeat(48), engineToken: "e".repeat(48), engineId: "engine-a" },
+    engines: [{ engineId: "engine-b", engineToken: "f".repeat(48) }],
+    mcp: { sessionIdleMs: options.idleMs },
     console: { dataDir: directory, publicOrigin: origin, setupToken: "setup-token", trustedProxies: [], retentionDays: 30 },
   });
   gateway.listen(0, "127.0.0.1");
@@ -52,7 +56,9 @@ async function fixture() {
     return response.json() as Promise<Record<string, any>>;
   };
   /** Runs the browser part of the flow and returns the redirect back to the client. */
-  const approve = async (clientId: string, verifier: string, decision = "approve") => {
+  const approve = async (clientId: string, verifier: string, decision = "approve", permissions: Record<string, string> = {
+    "permission.0.engineId": "engine-a", "permission.0.workspace": "docs", "permission.0.read": "on",
+  }) => {
     const query = new URLSearchParams({ response_type: "code", client_id: clientId, redirect_uri: redirectUri, state: "state-1",
       code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256", resource: `${origin}/mcp`, scope: "reach" });
     const page = await fetch(`${base}/oauth/authorize?${query}`);
@@ -62,20 +68,51 @@ async function fixture() {
     assert.match(page.headers.get("content-security-policy")!, /form-action 'self' https:\/\/chatgpt\.com/);
     const html = await page.text();
     assert.match(html, /wants to use this Gateway/);
+    assert.ok(!html.includes(" checked"), "no permissions selected by default");
     const request = /name="request" value="([^"]+)"/.exec(html)![1];
     now += 30_000; // A fresh TOTP step; the setup code was consumed.
-    return form("/oauth/authorize", { request, password, code: totp(secret, now), decision }, { origin });
+    return form("/oauth/authorize", { request, password, code: totp(secret, now), decision, ...permissions }, { origin });
   };
   /** Completes authorization for a public client and returns its tokens. */
-  const grant = async (clientId: string) => {
+  const grant = async (clientId: string, permissions?: Record<string, string>) => {
     const verifier = randomBytes(32).toString("base64url");
-    const code = new URL((await approve(clientId, verifier)).headers.get("location")!).searchParams.get("code")!;
+    const code = new URL((await approve(clientId, verifier, "approve", permissions)).headers.get("location")!).searchParams.get("code")!;
     const response = await form("/oauth/token", { grant_type: "authorization_code", code, client_id: clientId, redirect_uri: redirectUri, code_verifier: verifier });
     assert.equal(response.status, 200);
     return response.json() as Promise<Record<string, any>>;
   };
-  return { base, gateway, consoleCall, form, register, approve, grant, advance: (ms: number) => { now += ms; },
-    close: async () => { await new Promise<void>(resolve => gateway.close(() => resolve())); rmSync(directory, { recursive: true, force: true }); } };
+  const sockets: WebSocket[] = [];
+  const ownerStatus = async (engineId = "engine-a") => (await fetch(`${base}/session/status?engineId=${engineId}`, { headers: { authorization: `Bearer ${"c".repeat(48)}` } })).json() as Promise<Record<string, any>>;
+  const waitFor = async (check: () => Promise<boolean>) => { for (let n = 0; n < 500; n++) { if (await check()) return; await delay(5); } assert.fail("OAuth fixture did not converge"); };
+  const engine = async (engineId = "engine-a", failFirstClose = false) => {
+    const lease = await (await fetch(`${base}/heartbeat`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${(engineId === "engine-a" ? "e" : "f").repeat(48)}` }, body: JSON.stringify({ device: { id: engineId } }) })).json() as any;
+    const socket = new WebSocket(`${base.replace("http:", "ws:")}${lease.endpoint}&token=${lease.token}`);
+    sockets.push(socket); await once(socket, "open");
+    let closes = 0;
+    socket.on("message", data => {
+      const message = JSON.parse(data.toString());
+      if (message.type === "session.close") {
+        closes++;
+        if (failFirstClose && closes === 1) return;
+        socket.send(JSON.stringify({ type: "session.closed", sessionId: lease.sessionId, reason: "agent_requested" })); socket.close();
+      }
+      if (message.type === "request") socket.send(JSON.stringify({ type: "response", requestId: message.requestId, result: { content: "fixture", revision: "a".repeat(64) } }));
+    });
+    socket.send(JSON.stringify({ type: "session.ready", protocol: "reach-rpc", version: "1.0", sessionId: lease.sessionId, engineId, workspaces: ["docs"], methods: ["fs.read", "fs.write"] }));
+    await waitFor(async () => (await ownerStatus(engineId)).status === "ready");
+    return { socket, closes: () => closes };
+  };
+  const mcp = async (token: string) => {
+    const headers = { ...mcpHeaders, authorization: `Bearer ${token}` };
+    const initialized = await fetch(`${base}/mcp`, { method: "POST", headers, body: JSON.stringify(initialize) });
+    assert.equal(initialized.status, 200);
+    const sessionHeaders = { ...headers, "mcp-session-id": initialized.headers.get("mcp-session-id")!, "mcp-protocol-version": "2025-06-18" };
+    await fetch(`${base}/mcp`, { method: "POST", headers: sessionHeaders, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) });
+    const call = (body: unknown) => fetch(`${base}/mcp`, { method: "POST", headers: sessionHeaders, body: JSON.stringify(body) });
+    return { call, tool: (name: string, deviceId = "engine-a") => call({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name, arguments: { deviceId } } }) };
+  };
+  return { base, gateway, consoleCall, form, register, approve, grant, engine, ownerStatus, waitFor, mcp, advance: (ms: number) => { now += ms; },
+    close: async () => { for (const socket of sockets) socket.terminate(); await new Promise<void>(resolve => gateway.close(() => resolve())); rmSync(directory, { recursive: true, force: true }); } };
 }
 
 test("ChatGPT-style OAuth flow discovers, registers, approves and calls MCP with rotating tokens", async () => {
@@ -178,6 +215,44 @@ test("OAuth registration rejects unsafe redirect URIs and authorization requires
   } finally { await f.close(); }
 });
 
+test("OAuth approvals require explicit valid resource permissions and persist a read-only principal", async () => {
+  const f = await fixture();
+  try {
+    const client = await f.register();
+    const verifier = randomBytes(32).toString("base64url");
+    const missing = await f.approve(client.client_id, verifier, "approve", {});
+    assert.equal(missing.status, 400); assert.match(await missing.text(), /Select registered Engines/);
+    assert.deepEqual((await f.consoleCall("access-clients")).data.clients, []);
+    const foreign = await f.approve(client.client_id, verifier, "approve", { "permission.0.engineId": "unregistered", "permission.0.workspace": "docs", "permission.0.read": "on" });
+    assert.equal(foreign.status, 400);
+    assert.deepEqual((await f.consoleCall("access-clients")).data.clients, []);
+    // A selection the page cannot have rendered is rejected, never silently dropped.
+    for (const extra of <Record<string, string>[]>[
+      { "permission.0.engineId": "engine-a", "permission.0.workspace": "docs", "permission.0.read": "on", "permission.128.engineId": "engine-a", "permission.128.workspace": "docs", "permission.128.write": "on" },
+      { "permission.0.engineId": "engine-a", "permission.0.workspace": "docs", "permission.0.read": "on", "permission.x.write": "on" },
+    ]) {
+      const rejected = await f.approve(client.client_id, verifier, "approve", extra);
+      assert.equal(rejected.status, 400);
+      assert.deepEqual((await f.consoleCall("access-clients")).data.clients, []);
+    }
+    const tokens = await f.grant(client.client_id);
+    const clients = (await f.consoleCall("access-clients")).data.clients;
+    assert.equal(clients.length, 1);
+    assert.deepEqual(clients[0].permissions, [{ engineId: "engine-a", workspace: "docs", read: true, write: false, execute: false }]);
+    assert.equal(clients[0].id, `oauth:${client.client_id}`);
+    assert.equal(clients[0].legacyGlobal, false); assert.equal(clients[0].reviewRequired, false);
+    const headers = { ...mcpHeaders, authorization: `Bearer ${tokens.access_token}` };
+    const initialized = await fetch(`${f.base}/mcp`, { method: "POST", headers, body: JSON.stringify(initialize) });
+    const sessionHeaders = { ...headers, "mcp-session-id": initialized.headers.get("mcp-session-id")!, "mcp-protocol-version": "2025-06-18" };
+    assert.equal((await fetch(`${f.base}/mcp`, { method: "POST", headers: sessionHeaders, body: JSON.stringify({ jsonrpc: "2.0", method: "notifications/initialized" }) })).status, 202);
+    const list = await (await fetch(`${f.base}/mcp`, { method: "POST", headers: sessionHeaders, body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) })).json() as any;
+    assert.ok(list.result.tools.some((tool: any) => tool.name === "fs_read"));
+    assert.ok(!list.result.tools.some((tool: any) => ["fs_write", "fs_edit", "process_run"].includes(tool.name)));
+    const write = await fetch(`${f.base}/grants`, { method: "POST", headers, body: JSON.stringify({ workspace: "docs", path: "x.txt", methods: ["fs.write"] }) });
+    assert.equal(write.status, 403);
+  } finally { await f.close(); }
+});
+
 test("MCP sessions stay bound to the OAuth client that created them across token refresh", async () => {
   const f = await fixture();
   try {
@@ -197,8 +272,59 @@ test("MCP sessions stay bound to the OAuth client that created them across token
     assert.equal((await call(tokensA.access_token, ping, sessionId)).status, 200);
     const refreshed = await (await f.form("/oauth/token", { grant_type: "refresh_token", refresh_token: tokensA.refresh_token, client_id: a.client_id })).json() as Record<string, any>;
     assert.equal((await call(refreshed.access_token, ping, sessionId)).status, 200);
+    const listed = await (await call(refreshed.access_token, { jsonrpc: "2.0", id: 3, method: "tools/list" }, sessionId)).json() as any;
+    assert.ok(!listed.result.tools.some((tool: any) => ["fs_write", "process_run"].includes(tool.name)));
   } finally { await f.close(); }
 });
+
+test("OAuth policy reduction drains the idle ownership pool and refresh retains the reduced policy", async () => {
+  const f = await fixture({ idleMs: 400 });
+  try {
+    const app = await f.register(); const tokens = await f.grant(app.client_id);
+    const client = await f.mcp(tokens.access_token);
+    assert.equal((await client.tool("pick_device")).status, 200); await f.engine();
+    await delay(550);
+    assert.equal((await f.ownerStatus()).status, "ready", "pool retains ownership during grace");
+    const id = encodeURIComponent(`oauth:${app.client_id}`);
+    assert.equal((await f.consoleCall(`access-clients/${id}/policy`, { permissions: [] }, "PATCH")).response.status, 200);
+    await f.waitFor(async () => (await f.ownerStatus()).status === "none");
+    const refreshed = await (await f.form("/oauth/token", { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: app.client_id })).json() as any;
+    assert.ok(refreshed.access_token);
+    const next = await f.mcp(refreshed.access_token);
+    assert.equal((await next.tool("pick_device")).status, 404);
+    const tools = await (await next.call({ jsonrpc: "2.0", id: 4, method: "tools/list" })).json() as any;
+    assert.ok(!tools.result.tools.some((tool: any) => tool.name === "fs_read"));
+    assert.equal((await f.ownerStatus()).status, "none");
+  } finally { await f.close(); }
+});
+
+for (const action of ["console-revoke", "token-revoke", "refresh-replay"] as const) {
+  test(`OAuth ${action} invalidates tokens and drains only its client's pool`, async () => {
+    const f = await fixture();
+    try {
+      const app = await f.register(); const other = await f.register({ client_name: "Other fixture" });
+      const tokens = await f.grant(app.client_id);
+      const otherTokens = await f.grant(other.client_id, { "permission.0.engineId": "engine-b", "permission.0.workspace": "docs", "permission.0.read": "on" });
+      const client = await f.mcp(tokens.access_token); const otherClient = await f.mcp(otherTokens.access_token);
+      await client.tool("pick_device"); const engine = await f.engine("engine-a", action === "refresh-replay");
+      await otherClient.tool("pick_device", "engine-b"); await f.engine("engine-b");
+      let invalidatedToken = tokens.access_token;
+      if (action === "console-revoke") assert.equal((await f.consoleCall(`oauth/${app.client_id}`, undefined, "DELETE")).response.status, 200);
+      if (action === "token-revoke") assert.equal((await f.form("/oauth/revoke", { client_id: app.client_id, token: tokens.access_token })).status, 200);
+      if (action === "refresh-replay") {
+        const refreshed = await (await f.form("/oauth/token", { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: app.client_id })).json() as any;
+        invalidatedToken = refreshed.access_token;
+        assert.equal((await f.form("/oauth/token", { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: app.client_id })).status, 400);
+      }
+      assert.equal((await fetch(`${f.base}/mcp`, { method: "POST", headers: { ...mcpHeaders, authorization: `Bearer ${invalidatedToken}` }, body: JSON.stringify(initialize) })).status, 401);
+      await f.waitFor(async () => (await f.ownerStatus()).status === "none");
+      if (action === "refresh-replay") assert.ok(engine.closes() >= 2, "cleanup retries after the first close is unacknowledged");
+      assert.equal((await f.ownerStatus("engine-b")).status, "ready");
+      assert.equal((await otherClient.call({ jsonrpc: "2.0", id: 9, method: "ping" })).status, 200);
+      assert.equal((await f.form("/oauth/token", { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: app.client_id })).status >= 400, true);
+    } finally { await f.close(); }
+  });
+}
 
 test("anonymous OAuth traffic cannot crowd out an approval in progress", async () => {
   const f = await fixture();

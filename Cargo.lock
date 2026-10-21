@@ -352,6 +352,7 @@ version = "0.3.1"
 dependencies = [
  "regex",
  "rustix",
+ "rustls",
  "serde",
  "serde_json",
  "sha2",

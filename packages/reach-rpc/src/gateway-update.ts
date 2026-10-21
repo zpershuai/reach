@@ -1,6 +1,8 @@
 import { readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { GATEWAY_VERSION } from "./version.js";
+import { fetchRelease } from "./release-fetch.js";
+import { ConfigurationError } from "./diagnostics.js";
 
 export interface UpdateConfig {
   repo: string;
@@ -14,23 +16,23 @@ export function parseUpdateConfig(env: NodeJS.ProcessEnv): UpdateConfig | undefi
   if (env.REACH_UPDATE_ENABLED !== "1" && env.REACH_UPDATE_ENABLED !== "true") return undefined;
   const repo = env.REACH_UPDATE_REPO ?? "";
   if (!/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repo) || repo.split("/").some(part => part === "." || part === "..")) {
-    throw new Error("REACH_UPDATE_REPO must be owner/repo");
+    throw new ConfigurationError("REACH_UPDATE_REPO must be owner/repo");
   }
   const interval = env.REACH_UPDATE_INTERVAL_SECS ?? "3600";
   const seconds = Number(interval);
   if (!/^[0-9]+$/.test(interval) || !Number.isSafeInteger(seconds) || seconds < 60 || seconds * 1000 > 2_147_483_647) {
-    throw new Error("REACH_UPDATE_INTERVAL_SECS must be an integer >= 60 within the timer range");
+    throw new ConfigurationError("REACH_UPDATE_INTERVAL_SECS must be an integer >= 60 within the timer range");
   }
   const backend = env.REACH_UPDATE_BACKEND ?? "host";
-  if (backend !== "host" && backend !== "compose") throw new Error("REACH_UPDATE_BACKEND must be host or compose");
+  if (backend !== "host" && backend !== "compose") throw new ConfigurationError("REACH_UPDATE_BACKEND must be host or compose");
   const requestDir = env.REACH_UPDATE_REQUEST_DIR;
-  if (!requestDir?.trim()) throw new Error("REACH_UPDATE_REQUEST_DIR is required for Gateway updates");
+  if (!requestDir?.trim()) throw new ConfigurationError("REACH_UPDATE_REQUEST_DIR is required for Gateway updates");
   if (env.REACH_UPDATE_GITHUB_TOKEN !== undefined && env.REACH_UPDATE_GITHUB_TOKEN_FILE !== undefined) {
-    throw new Error("Set only one GitHub token source");
+    throw new ConfigurationError("Set only one GitHub token source");
   }
   const token = env.REACH_UPDATE_GITHUB_TOKEN ?? (env.REACH_UPDATE_GITHUB_TOKEN_FILE === undefined
     ? undefined : readFileSync(env.REACH_UPDATE_GITHUB_TOKEN_FILE, "utf8").trim());
-  if (token !== undefined && (!token || /\s|[\x00-\x1f\x7f]/.test(token))) throw new Error("Invalid GitHub token");
+  if (token !== undefined && (!token || /\s|[\x00-\x1f\x7f]/.test(token))) throw new ConfigurationError("Invalid GitHub token");
   return { repo, intervalMs: seconds * 1000, backend, requestDir, token };
 }
 
@@ -135,7 +137,7 @@ export class GatewayUpdater {
       Accept: binary ? "application/octet-stream" : "application/vnd.github+json",
     };
     if (this.config.token) headers.Authorization = `Bearer ${this.config.token}`;
-    const response = await this.fetchRelease(url, { headers, signal: AbortSignal.timeout(30_000) });
+    const response = await fetchRelease(url, headers, this.fetchRelease);
     if (!response.ok) throw new Error(`GitHub HTTP ${response.status}`);
     return response;
   }
@@ -151,9 +153,10 @@ export class GatewayUpdater {
     }
     const release = selectRelease(releases);
     if (!release) return undefined;
-    const sums = release.assets.find(asset => asset.name === "SHA256SUMS");
-    if (!sums || !release.assets.some(asset => asset.name === "gateway-amd64.tgz")) throw new Error("Missing Gateway release assets");
-    const text = await (await this.get(sums.url, true)).text();
+    const sums = release.assets.filter(asset => asset.name === "SHA256SUMS");
+    const packages = release.assets.filter(asset => asset.name === "gateway-amd64.tgz");
+    if (sums.length !== 1 || packages.length !== 1) throw new Error("Missing or duplicate Gateway release assets");
+    const text = await (await this.get(sums[0].url, true)).text();
     const lines = text.split(/\r?\n/).map(line => line.trim().split(/\s+/)).filter(parts => parts[1]?.replace(/^\*/, "") === "gateway-amd64.tgz");
     if (lines.length !== 1 || lines[0].length !== 2 || !/^[a-fA-F0-9]{64}$/.test(lines[0][0])) throw new Error("Invalid Gateway checksum");
     return { component: "gateway", version: release.tag_name.slice(9), asset: "gateway-amd64.tgz", digest: lines[0][0].toLowerCase(), repo: this.config.repo };

@@ -4,11 +4,15 @@ import type { EngineApi } from "./in-process.js";
 import { closeOwnedClients, RemoteMcpServer, type OwnedClients } from "./remote-server.js";
 import type { GatewayEvents } from "../console-api/events.js";
 import { McpNotifications } from "./notifications.js";
+import type { ClientAuthorization } from "../client-authorization.js";
+import { GatewayHttpError } from "./gateway.js";
+import { ConfigurationError } from "../diagnostics.js";
 
 const VERSIONS = ["2025-03-26", "2025-06-18"];
 const MAX_BODY = 64 * 1024;
 
 export interface McpHttpOptions {
+  authorization?: ClientAuthorization;
   events?: GatewayEvents;
   allowedOrigins?: readonly string[];
   sessionIdleMs?: number;
@@ -128,6 +132,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   handle(request: IncomingMessage, response: ServerResponse): Promise<void>;
   shutdown(): void;
   disconnect(label: string): Promise<void>;
+  retirePrincipal(principal: string): Promise<void>;
   clients(): Array<{ label: string; activeSessions: number }>;
   notifyToolsChanged(): void;
 } {
@@ -136,7 +141,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   const maxSessions = options.maxSessions ?? 128;
   const maxQueue = options.maxQueue ?? 16;
   for (const value of [idleMs, budgetMs, maxSessions, maxQueue]) {
-    if (!Number.isSafeInteger(value) || value <= 0) throw new Error("MCP limits must be positive safe integers");
+    if (!Number.isSafeInteger(value) || value <= 0) throw new ConfigurationError("MCP limits must be positive safe integers");
   }
   const sessions = new Map<string, HttpSession>();
   const retired = new Set<HttpSession>();
@@ -243,13 +248,15 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       const expected = controllerToken ? Buffer.from(`Bearer ${controllerToken}`) : undefined;
       const controller = expected !== undefined && actual.length === expected.length && timingSafeEqual(actual, expected);
       const oauthClient = controller ? undefined : options.oauth?.verify(authorization);
-      if (!controller && !oauthClient && (controllerToken || !isLoopback())) {
+      const verified = options.authorization?.authenticate(authorization, isLoopback());
+      if (options.authorization ? !verified : !controller && !oauthClient && (controllerToken || !isLoopback())) {
         // The challenge lets OAuth clients such as ChatGPT discover the authorization server.
         if (options.oauth) response.setHeader("www-authenticate", options.oauth.challenge(authorization !== undefined));
         throw new HttpError(401, controllerToken ? "unauthorized" : "MCP requires authentication on non-loopback listeners");
       }
       // Refreshed OAuth tokens keep the client id, so a session survives token rotation but not another client.
-      const principal = controller ? "controller" : oauthClient ? `oauth:${oauthClient.id}` : "loopback";
+      const principal = verified?.id ?? (controller ? "controller" : oauthClient ? `oauth:${oauthClient.id}` : "loopback");
+      const authorizedEngines = options.authorization ? options.authorization.engines(engines, principal) : engines;
       const origin = request.headers.origin;
       if (origin !== undefined && !options.allowedOrigins?.includes(origin)) throw new HttpError(403, "Origin is not allowed");
       if (!["POST", "GET", "DELETE"].includes(request.method ?? "")) { response.setHeader("allow", "POST, GET, DELETE"); json(response, 405); return; }
@@ -270,7 +277,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         const current = session;
         current.lastUsed = Date.now();
         current.notifications.attach(response, () => sessions.get(current.id) === current &&
-          (!oauthClient || options.oauth?.verify(authorization)?.id === oauthClient.id));
+          (!verified || options.authorization!.valid(verified)) && (!oauthClient || options.oauth?.verify(authorization)?.id === oauthClient.id));
         return;
       }
       if (request.method === "DELETE") {
@@ -316,7 +323,8 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
         const clientLabel = `${client.name} ${client.version}`.replace(/[\x00-\x1f\x7f]/g, "").slice(0, 64).trim() || "MCP client";
         const pool = oauthClient ? attachPool(principal, clientLabel) : undefined;
         session = { id, principal, pool, version: negotiated,
-          server: new RemoteMcpServer(engines, (message) => output.push(message), negotiated, clientLabel, id, pool?.clients), messages: output,
+          server: new RemoteMcpServer(authorizedEngines, (message) => output.push(message), negotiated, clientLabel, id, pool?.clients,
+            verified ? method => options.authorization!.canMethod(principal, method) : undefined, verified?.id), messages: output,
           tail: Promise.resolve(), queued: 0, reading: 0, lastUsed: Date.now(), notifications: new McpNotifications() };
         sessions.set(session.id, session);
         options.events?.emit("client.connected", { caller: session.server.caller });
@@ -327,7 +335,7 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
       }
       if (session.reading + session.queued >= maxQueue) throw new HttpError(429, "MCP session queue is full");
       const current = session;
-      const replies = await bounded(enqueue(current, async () => {
+      const dispatch = async (): Promise<Record<string, unknown>[]> => {
         requireActive(current);
         current.messages.length = 0;
         current.server.deadlineAt = deadline - Math.min(100, budgetMs / 10);
@@ -335,15 +343,21 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
           requireActive(current);
           if (Date.now() >= current.server.deadlineAt) throw new HttpError(408, "MCP response budget exceeded before dispatch");
           if (!current.server.initialized && message.method !== "notifications/initialized" && message.method !== "initialize" && message.method !== "ping") throw new HttpError(400, "Send notifications/initialized before using tools");
+          if (verified && verified.kind !== "owner" && message.method === "tools/call") {
+            const parameters = message.params as { arguments?: { deviceId?: unknown } } | undefined;
+            const deviceId = parameters?.arguments?.deviceId;
+            if (typeof deviceId === "string" && !authorizedEngines.has(deviceId)) throw new HttpError(404, "unknown or unauthorized engine");
+          }
           await current.server.receive(message);
           if (current.server.initialized) current.notifications.ready();
         }
         return current.messages.filter((message) => "id" in message).slice();
-      }), deadline);
+      };
+      const replies = await bounded(enqueue(current, () => verified ? options.authorization!.run(verified, dispatch) : dispatch()), deadline);
       if (!replies.length) json(response, 202);
       else json(response, 200, batch ? replies : replies[0]);
     } catch (cause) {
-      const status = cause instanceof HttpError ? cause.status : 503;
+      const status = cause instanceof HttpError || cause instanceof GatewayHttpError ? cause.status : 503;
       if (status === 408 || status === 413) response.setHeader("connection", "close");
       json(response, status, rpcError(cause instanceof HttpError ? cause.code : -32603, cause instanceof Error ? cause.message : "MCP request failed"));
     } finally {
@@ -354,6 +368,18 @@ export function createMcpHttpHandler(engines: ReadonlyMap<string, EngineApi>, co
   return {
     handle,
     notifyToolsChanged: () => { for (const session of sessions.values()) session.notifications.toolsChanged(); },
+    retirePrincipal: async principal => {
+      const tasks = [...sessions.values()].filter(session => session.principal === principal)
+        .map(session => retire(session, Date.now() + budgetMs, "console"));
+      for (const pool of pools.values()) {
+        if (pool.principal === principal && !pool.sessions) {
+          if (pool.timer) clearTimeout(pool.timer);
+          tasks.push(closePool(pool));
+        }
+      }
+      const results = await Promise.allSettled(tasks);
+      if (results.some(result => result.status === "rejected")) throw new Error("Principal session cleanup requires retry");
+    },
     disconnect: async label => {
       await Promise.all([...sessions.values()].filter(session => session.server.caller.label === label)
         .map(session => retire(session, Date.now() + budgetMs, "console")));

@@ -62,3 +62,7 @@ sh install-engine-openwrt.sh ./engine ./engine.env ./node-v24.21.0-openwrt-x64.t
 ```
 
 `id` 是 MCP 展示的设备名称，`engineId` 是 Gateway 注册的真实身份。省略 `engineId` 时沿用旧版默认设备路由。调用 `list_devices` 查看设备，再用 `list_workspaces({deviceId})` 连接目标并发现实际工作区名称；也可先通过 `pick_device` 连接。`get_versions` 查询所选设备的 Engine 版本和共享 Gateway 版本。
+
+## OpenWrt 安装恢复验证范围
+
+安装器先在私有临时目录校验并准备产物，再停止旧服务、逐文件原子替换和启动；失败恢复原文件、runtime 指针和 supervisor 状态。首次安装失败会移除新目标文件，保留用户工作区；恢复失败保留私有备份供手动恢复，不能据此报告升级成功。OpenWrt 的隔离 supervisor 夹具覆盖 staging、activation、start/health、旧配置保留和首次失败清理；这些测试不等同于真实 LaunchAgent/procd 设备已验收。具体恢复与真实平台验收仍见 [运维指南](operations.md)。

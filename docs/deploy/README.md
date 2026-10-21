@@ -6,19 +6,21 @@
 
 | 文档 | 内容 |
 | --- | --- |
+| [单机首次运行](first-run.md)（英文） | 在一台机器上从源码构建，完成控制台、scoped MCP 客户端、启用脚本、撤销和卸载 |
 | [配置与凭证](configuration.md) | 部署参数、生成私有配置、域名、认证与签名的版本边界 |
 | [Gateway 部署](gateway.md) | 构建、上传、Compose、Caddy、HTTPS 检查 |
 | [Gateway 控制台](console.md) | Owner 设置、设备注册、审计、代理限流与数据备份恢复 |
 | [Engine 部署](engine.md) | Mac 构建、工作区、后台安装、启动与停止 |
 | [Linux Engine](linux.md) | VPS 和家庭 server 安装、systemd 系统与用户服务 |
 | [OpenWrt 与多设备](openwrt.md) | 路由器安装、私有 Node 库、一个 Gateway 管理多个 Engine |
+| [客户端权限](client-access.md) | scoped 身份、权限、凭据生命周期、legacy 复核和回滚 |
 | [MCP 安装](mcp.md) | 远程 HTTP MCP（含 Grok Bot 插件、ChatGPT OAuth）、通用 stdio 安装、客户端配置 |
 | [部署验证](verification.md) | 源码检查、公网 RPC、安装后的 MCP、故障恢复验证 |
 | [运维与回滚](operations.md) | 升级、备份、凭证轮换、日志、回滚与停用 |
 | [脚本任务](processes.md) | process 接口、执行权限、任务生命周期及日志 |
 | [Node runtime](node-runtime.md) | 安装交付策略、JS 启动入口与 Rust Engine 的执行边界 |
-| [组件版本](versions.md) | 独立发布号、版本查询、安装记录与更新方式 |
-| [故障排查](troubleshooting.md) | 网络、认证、会话、文件权限和工具列表问题 |
+| [组件版本](versions.md) | 独立发布号、兼容矩阵与升级顺序、版本查询、安装记录与更新方式 |
+| [故障排查](troubleshooting.md) | 网络、认证、会话、断线恢复、文件权限和工具列表问题 |
 | [部署检查清单](deployment-checklist.md) | 安装、验收、升级与私有记录保管 |
 
 ## 三个组件分别运行在哪里

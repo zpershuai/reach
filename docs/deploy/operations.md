@@ -114,7 +114,7 @@ bash scripts/install-engine-macos.sh .reach/engine-upgrade.env .reach/devices-up
 3. 同步更新 VPS `gateway.env`、各设备 `engine.env`、额外设备注册表、所有客户端设备 JSON，以及验证用的 `.reach/deployment.json`；凭证文件保持 600。容器以 node 用户读取的注册表需具有读取权限，其父目录仅供部署管理员访问。
 4. 重建 Gateway 容器配置，拉起 Engine，重启客户端并进行认证与真实文件验证。
 
-当前没有多个长期 token 并行有效的轮换窗口，也没有按客户端独立撤销的凭证管理；共享 Controller token 的客户端需要一起更新。不要重新执行首次生成示例来覆盖正在使用的配置。
+共享 Owner Controller token 的客户端仍需一起更新；日常使用的 delegated 身份支持独立轮换和撤销，见 [客户端权限](client-access.md)。不要重新执行首次生成示例来覆盖正在使用的配置。
 
 ## 停用组件
 
@@ -137,6 +137,7 @@ Gateway 保持 `read_only: true`、`cap_drop: [ALL]` 和非 root 用户，Docker
 ```bash
 tar -czf /tmp/reach-updater-install.tgz \
   scripts/apply-gateway-release.sh scripts/apply-engine-release.sh scripts/apply-release.py \
+  scripts/release_trust.py scripts/binary_identity.py \
   deploy/reach-gateway-update.service deploy/reach-gateway-update.path
 scp /tmp/reach-updater-install.tgz deploy@gateway.example.com:/tmp/reach-updater-install.tgz
 ```
@@ -151,6 +152,8 @@ sudo install -d -m 755 "$release_root/scripts"
 sudo install -m 755 "$updater_source/scripts/apply-gateway-release.sh" "$release_root/scripts/apply-gateway-release.sh"
 sudo install -m 755 "$updater_source/scripts/apply-engine-release.sh" "$release_root/scripts/apply-engine-release.sh"
 sudo install -m 644 "$updater_source/scripts/apply-release.py" "$release_root/scripts/apply-release.py"
+sudo install -m 644 "$updater_source/scripts/release_trust.py" "$release_root/scripts/release_trust.py"
+sudo install -m 644 "$updater_source/scripts/binary_identity.py" "$release_root/scripts/binary_identity.py"
 sudo install -d -m 750 -o 1000 -g 1000 "$release_root/deploy/update"
 sudo install -m 644 "$updater_source/deploy/reach-gateway-update.service" /etc/systemd/system/reach-gateway-update.service
 sudo install -m 644 "$updater_source/deploy/reach-gateway-update.path" /etc/systemd/system/reach-gateway-update.path
@@ -172,11 +175,11 @@ cd "$release_root/deploy"
 docker compose up -d gateway
 ```
 
-先确认每个 Engine `/session/status` 都是 `none` 再启用 helper。Helper 优先拉取版本化 GHCR 镜像，校验 Release 发布的镜像 digest 和 Gateway `--version`；无法拉取时验证 tarball digest、构建并验证版本后应用。产物准备好后才写 `apply.json`；组件保持已有会话并等待自然空闲，再用匹配 nonce 的 `idle.json` 确认，期间暂缓新 REST/MCP 会话或 Engine 租约。Helper 收到确认后才标记当前镜像和重建；等待确认最多 5 分钟，完成或失败会删除握手文件，helper 崩溃时限制最多 15 分钟后失效。保留 `reach-gateway:previous`，现有 `gateway.env`、`engines.json` 和 Compose 环境/挂载策略继续使用。请求成功后写 `result.json` 并移除 `request.json`；失败保留请求重试，可查看 `journalctl -u reach-gateway-update.service`。不安装 helper 时不会重建容器。
+先确认每个 Engine `/session/status` 都是 `none` 再启用 helper。Helper 优先拉取版本化 GHCR 镜像，校验 Release 发布的镜像 digest 和 Gateway `--version`；无法拉取时验证 tarball digest、构建并验证版本后应用。产物准备好后才写 `apply.json`；组件保持已有会话并等待自然空闲，再用匹配 nonce 的 `idle.json` 确认，期间暂缓新 REST/MCP 会话或 Engine 租约。Helper 收到确认后才标记当前镜像和重建；等待确认最多 5 分钟，完成或失败会删除握手文件，helper 崩溃时限制最多 15 分钟后失效。重建后检查运行容器实际 image ID、运行/health 状态及 Gateway `/healthz`；Engine 则确认当前容器的成功心跳事件。失败恢复 previous 镜像并重新检查，tar fallback 同时恢复旧宿主 payload。回滚失败报告 `UPDATE_ROLLBACK_FAILED` 并保留请求和 previous 标签。保留 `reach-gateway:previous`，现有 `gateway.env`、`engines.json` 和 Compose 环境/挂载策略继续使用。Gateway helper 也生成仅覆盖 image 的 `.reach/gateway-update.override.json`，后续 Compose 命令需沿用该私有 override。请求在启动健康确认后才写 `result.json` 并移除 `request.json`；失败保留请求重试，可查看 `journalctl -u reach-gateway-update.service`。不安装 helper 时不会重建容器。
 
 Compose Engine 使用自己的共享目录，避免与 Gateway 或其他 Engine 共用 `request.json`。复制上述 path/service 模板到独立单位名称，改为调用 `apply-engine-release.sh REQUEST_DIR RELEASE_ROOT`，将 `REACH_UPDATE_COMPOSE_FILE`、服务名与二进制路径放入对应私有 helper env。Helper 从现有 Engine 镜像构建携带新版静态 musl 二进制的镜像，准备完成后通过同一空闲握手，使用仅覆盖 `image` 的 Compose override 重建该服务，保留其 env、命令、网络及工作区挂载。独立 Node runtime 不替换。后续 Compose 运维需沿用生成的 `.reach/engine-update.override.json`，避免误用旧 image。
 
-Host Engine 无需 Docker helper；启用后只在空闲状态原子替换并退出，主管进程再启动新 inode。更新不会通过 `execve` 恢复原会话；Gateway 和 Engine 重启都会丢失内存会话，客户端重新获取租约。
+Host Engine 无需 Docker helper，但必须先用本候选版本安装器更新启动脚本，使其通过私有 Node runtime 运行 `engine-supervisor.mjs`。guard 会设置内部健康检查环境；直接运行 Engine 不会应用 host 更新，诊断为 `HOST_UPDATE_REQUIRES_GUARDED_LAUNCHER`。更新器只在空闲状态准备健康 intent、保留 `engine.prev`、原子替换并退出；服务重启后 guard 等待最多 30 秒的新版本首次成功心跳，使用独立 nonce 验证，不能用旧心跳文件确认。新进程退出或超时则恢复旧 binary 和版本清单，并重新启动旧版本；恢复失败保留私有 intent、backup 和 recovery 标记，报告 `HOST_UPDATE_RECOVERY_REQUIRED`，不宣称升级成功。更新不会通过 `execve` 恢复原会话；Gateway 和 Engine 重启都会丢失内存会话，客户端重新获取租约。
 
 ### 自动更新后的回滚
 
@@ -188,8 +191,49 @@ Gateway 回滚：
 
 ```bash
 docker tag reach-gateway:previous reach-gateway:current
-cd /opt/reach/deploy
-docker compose up -d --no-build --force-recreate gateway
+cd /opt/reach
+docker compose -f deploy/compose.yaml -f .reach/gateway-update.override.json up -d --no-build --force-recreate gateway
 ```
 
 Docker Engine 类似地将 `reach-engine:previous` 标记为 `reach-engine:current`，并用原 Compose 文件和 `.reach/engine-update.override.json` 执行 `up -d --no-build --force-recreate engine`。容器重建失败时 helper 会尝试恢复 previous 镜像；成功重建后的业务健康检查仍按 [验证](verification.md) 执行。
+
+## 下载与摘要信任边界
+
+安装器/updater/helper 只接受经过证书验证的批准 HTTPS origin：GitHub API、github.com、release-assets.githubusercontent.com 与 objects.githubusercontent.com；独立 Node runtime 从 nodejs.org 获取。每次重定向重新检查 origin，跨 origin 去掉 Authorization/Cookie，不会把凭据重新附加到后续跳转。file/明文 HTTP 不作为生产覆盖来源；测试夹具必须显式启用测试模式，不能把测试模式放进实际部署配置。
+
+先核对组件、平台资产唯一性和受保护发布渠道的唯一 SHA256SUMS，再核对 ELF/Mach-O 架构或 Docker image 的 OS/architecture/component，最后才运行 `--version`。版本探测不是激活服务；错误格式、架构、摘要或版本不能安装或替换运行产物。安装验证失败时旧服务尚未停止。
+
+摘要证明 bytes 与所取清单一致，信任仍依赖 HTTPS、仓库写权限和发布保护；能同时替换包和摘要的攻击者可以绕过摘要校验。本轮没有实现发布者签名、SBOM 或可验证来源证明，不能把 SHA-256 描述成签名。
+
+## 各平台安装失败的手动恢复
+
+先停止对应测试/维护中的服务并关闭自动更新，保留原配置、工作区与所有恢复证据。不要用回滚清理整个 `~/.reach`。恢复完成后按原先的运行/启用状态启动，并另行执行 [RPC/MCP 验证](verification.md)；成功存活或一次心跳不是业务验收。
+
+| 路径 | 恢复记录和操作 |
+| --- | --- |
+| Linux systemd | 私有 `~/.reach/backups/linux-*/recovery.json` 保存每个 target/backup 映射，`service-state.json` 保存 active 与 enabled/disabled/enabled-runtime；先停止原服务，恢复各文件和 runtime symlink，daemon-reload 后仅恢复原先的运行/启用状态 |
+| macOS launchd | 私有 `~/.reach/backups/macos-*/recovery.json` 保存文件、原 service label、loaded 和 disabled；先 bootout 原 label，再按映射恢复并恢复 disabled 状态，仅在原先 loaded 时 bootstrap 原 plist，避免创建另一份 label |
+| OpenWrt procd | 私有 `/root/.reach/backups/openwrt-*/targets` 与编号文件/`.link` 保存对应目标和 symlink，`service-state` 保存 active/enabled；先 stop/disable，再逐项恢复，原来不存在的目标应移除，最后仅恢复原有 enable/start 状态 |
+| Host auto-update | 先停止原 supervisor，核对健康 intent 的 previousDigest 与 `engine.prev`，恢复旧 Engine 与 inventory；确认恢复完整后处理 `engine.update-pending.json`、`engine.update-health.json`、`engine.update-recovery.json`，不可通过删除标记强行运行未核验候选 |
+| Compose helper | 保留 previous 镜像、私有 request/override 和未完成的 payload recovery；重新标记上一版并使用原 Compose 加私有 image override，确认启动健康及数据目录挂载后再解除更新暂停 |
+
+Linux/macOS 文件恢复可在仓库根目录用相同的原子恢复函数执行。把 `backup_dir` 替换成自己私有且已核验的那一次备份，服务必须保持停止；不要运行或公开外来 recovery.json：
+
+```bash
+backup_dir="$HOME/.reach/backups/linux-REPLACE_WITH_SELECTED_ID"
+python3 - "$backup_dir/recovery.json" <<'RESTORE_FILES'
+import json
+from pathlib import Path
+import sys
+sys.path.insert(0, 'scripts')
+from install_transaction import restore_file
+record = json.loads(Path(sys.argv[1]).read_text())
+for entry in reversed(record['files']):
+    restore_file(Path(entry['target']), Path(entry['backup']) if entry['backup'] else None)
+print('Files restored; supervisor remains stopped for verification.')
+RESTORE_FILES
+```
+
+再根据该备份的原状态恢复服务；例如 Linux 用户服务使用 `systemctl --user daemon-reload` 与原服务名，原状态为 enabled-runtime 时用 `enable --runtime`，而非永久 enable。macOS 使用备份中的同一 label 和 plist；不要把示例 label 替换成另一份服务。OpenWrt 只在自己的私有维护终端按 targets 编号恢复，symlink 通过 `.link` 内容重建；正常自动回滚执行相同的恢复顺序。
+
+故障夹具验证了文件恢复、原 runtime、禁用/未运行服务、首次安装清理、启动失败和回滚失败保留记录；真实 launchd/procd/systemd、宿主 Docker 和断电恢复的验收范围单独记录，不能把模拟 supervisor 结果标成真实设备已通过。

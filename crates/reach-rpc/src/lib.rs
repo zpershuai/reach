@@ -7,6 +7,7 @@ use std::fmt;
 /// Engine release version, compiled from its package manifest.
 pub const ENGINE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
+pub mod binary_identity;
 pub mod cancel;
 pub mod dispatch;
 pub mod process;

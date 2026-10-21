@@ -1,7 +1,7 @@
 import { WebSocket } from "ws";
 import { processSchemas } from "./process-contract.js";
 import { canonicalizeInvocation } from "./canonical.js";
-import { GrantStore } from "./grants.js";
+import { GrantStore, type GrantAuthority } from "./grants.js";
 import { ContractError, parseFsEditParams, parseFsWriteParams, parseRequestEnvelope, permissionSchema } from "./index.js";
 import type { EngineResult } from "./mcp/in-process.js";
 import { EngineSessionState } from "./gateway-state.js";
@@ -120,7 +120,7 @@ export class SessionRpcForwarder {
     });
   };
 
-  public executeRpc = async (body: unknown, receivedAt: number, caller?: CallerContext): Promise<EngineResult> => {
+  public executeRpc = async (body: unknown, receivedAt: number, caller?: CallerContext, authority?: GrantAuthority): Promise<EngineResult> => {
     // HTTP ingress limits received bytes; expanded internal envelopes use the
     // WebSocket bound in this.forwardToEngine so metadata does not shrink that limit.
     const session = this.state.liveSession;
@@ -169,7 +169,7 @@ export class SessionRpcForwarder {
       const schema = processSchemas[invocation.method];
       if (!schema?.safeParse(invocation.params).success) return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "INVALID_PARAMS" } } };
       if (invocation.method === "process.run" || invocation.method === "process.stop") {
-        processKind = envelope.permission ? this.grants.matchesProcess(envelope.permission.grantId, session.sessionId, invocation.method, invocation.params) : undefined;
+        processKind = envelope.permission ? this.grants.matchesProcess(envelope.permission.grantId, session.sessionId, invocation.method, invocation.params, authority) : undefined;
         if (!processKind) {
           denied("policy", "PERMISSION_DENIED");
           return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };
@@ -186,7 +186,7 @@ export class SessionRpcForwarder {
         const permission = permissionSchema.safeParse(envelope.permission);
         if (
           !permission.success
-          || !this.grants.matches(permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path)
+          || !this.grants.matches(permission.data.grantId, mutation.method, mutation.params.workspace, mutation.params.path, authority)
         ) {
           denied("policy", "PERMISSION_DENIED");
           return { statusCode: 200, payload: { type: "error", requestId: envelope.requestId, error: { code: "PERMISSION_DENIED" } } };

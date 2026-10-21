@@ -3,10 +3,13 @@ import json
 import os
 from pathlib import Path
 import subprocess
+import re
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
 import uuid
+from executable_test_fixture import platform_bytes
 
 spec = importlib.util.spec_from_file_location('linux_installer', Path(__file__).with_name('install-engine-linux.py'))
 installer = importlib.util.module_from_spec(spec)
@@ -24,11 +27,11 @@ class InstallerTests(unittest.TestCase):
         self.scripts.mkdir()
         self.units.mkdir()
         self.engine = self.root / 'new-engine'
-        self.engine.write_text('#!/bin/sh\necho engine-new\n')
+        self.engine.write_bytes(platform_bytes('linux-x64'))
         self.engine.chmod(0o755)
         self.config = self.root / 'new.env'
         self.config.write_text('REACH_ENGINE_ID=fixture\n')
-        for source in ['run-node.sh', 'install-node-runtime.py', 'node-runtime.json']:
+        for source in ['run-node.sh', 'install-node-runtime.py', 'node-runtime.json', 'engine-supervisor.mjs']:
             (self.scripts / source).write_text('fixture')
         engine_dir = self.home / '.local/share/reach'
         config_dir = self.home / '.config/reach'
@@ -36,7 +39,7 @@ class InstallerTests(unittest.TestCase):
         self.targets = [engine_dir / 'engine', config_dir / 'engine.env',
                         engine_dir / 'run-node.sh', engine_dir / 'start-engine.sh',
                         reach_dir / 'versions.json', self.units / installer.SERVICE,
-                        reach_dir / 'runtime/node']
+                        engine_dir / 'engine-supervisor.mjs', reach_dir / 'runtime/node']
         for target in self.targets:
             target.parent.mkdir(parents=True, exist_ok=True)
         for target in self.targets[:-1]:
@@ -66,7 +69,7 @@ class InstallerTests(unittest.TestCase):
             node.write_text('node-new')
             return subprocess.CompletedProcess(command, 0, str(node) + '\n', '')
         if command[0] == str(self.engine):
-            return subprocess.CompletedProcess(command, 0, 'engine-new\n', '')
+            return subprocess.CompletedProcess(command, 0, '1.2.3\n', '')
         if command[0] == '/bin/bash':
             return subprocess.run(command, check=check, **kwargs)
         if command[0] != 'systemctl':
@@ -110,7 +113,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertEqual(self.snapshot(), before)
                 self.assertTrue(self.active)
         versions = self.install(checkpoint)
-        self.assertEqual(versions['engineVersion'], 'engine-new')
+        self.assertEqual(versions['engineVersion'], '1.2.3')
         self.assertTrue(versions['custom'])
         self.assertTrue(self.active)
         self.assertEqual(self.enabled, 'enabled')
@@ -121,7 +124,7 @@ class InstallerTests(unittest.TestCase):
         self.assertFalse(list(self.home.rglob('.reach-install-*')))
 
     def test_each_install_step_rolls_back_all_files_runtime_and_service(self):
-        steps = ['preflight', 'snapshot', 'runtime', 'stop', 'reload', 'enable', 'start', 'health']
+        steps = ['source-identity', 'source-version', 'preflight', 'snapshot', 'runtime', 'stop', 'reload', 'enable', 'start', 'health']
         steps += ['stage:' + target.name for target in self.targets]
         steps += ['activate:' + target.name for target in self.targets]
         for step in steps:
@@ -137,7 +140,7 @@ class InstallerTests(unittest.TestCase):
                 self.assertTrue(self.active)
                 self.assertEqual(self.enabled, 'enabled')
                 self.assertFalse(list(self.home.rglob('.reach-install-*')))
-                if step in ['preflight', 'snapshot', 'runtime'] or step.startswith('stage:'):
+                if step in ['source-identity', 'source-version', 'preflight', 'snapshot', 'runtime'] or step.startswith('stage:'):
                     self.assertNotIn('stop', self.calls)
 
     def test_failed_service_commands_restore_old_installation(self):
@@ -196,6 +199,40 @@ class InstallerTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, 'rollback errors.*recovery backup'):
                 self.install(fail)
         self.assertTrue(list((self.home / '.reach/backups').glob('*/service-state.json')))
+        records = list((self.home / '.reach/backups').glob('*/recovery.json'))
+        self.assertEqual(len(records), 1)
+        record = json.loads(records[0].read_text())
+        self.assertEqual(set(entry['target'] for entry in record['files']), set(str(target) for target in self.targets))
+        self.assertTrue(all(Path(entry['backup']).exists() or Path(entry['backup']).is_symlink() for entry in record['files']))
+
+    def test_runtime_enabled_service_state_is_restored_after_start_failure(self):
+        self.enabled = 'enabled-runtime'
+        def fail(step):
+            if step == 'start': raise OSError('injected start failure')
+        with self.assertRaises(OSError): self.install(fail)
+        self.assertEqual(self.enabled, 'enabled-runtime'); self.assertTrue(self.active)
+
+    def test_identity_failures_leave_existing_service_and_bytes_untouched(self):
+        before = self.snapshot()
+        for data in [b'#!/bin/sh\necho 1.2.3\n', platform_bytes('linux-arm64'), platform_bytes('linux-x64')[:50]]:
+            self.engine.write_bytes(data)
+            with self.assertRaises(ValueError): self.install()
+            self.assertEqual(self.snapshot(), before); self.assertTrue(self.active); self.assertEqual(self.calls, [])
+
+    def test_documented_manual_restore_command_recovers_private_snapshot_without_starting_service(self):
+        before = self.snapshot()
+        def fail(step):
+            if step == 'start': raise OSError('injected start failure')
+        with patch.object(installer, 'restore_file', side_effect=OSError('recovery failure')):
+            with self.assertRaises(RuntimeError): self.install(fail)
+        record = next((self.home / '.reach/backups').glob('*/recovery.json'))
+        self.active = False
+        repo = Path(__file__).resolve().parent.parent
+        document = (repo / 'docs/deploy/operations.md').read_text()
+        command = re.search(r"<<'RESTORE_FILES'\n(.*?)\nRESTORE_FILES", document, re.S).group(1)
+        result = subprocess.run([sys.executable, '-', str(record)], input=command, text=True, capture_output=True, cwd=repo)
+        self.assertEqual(result.returncode, 0, result.stderr); self.assertEqual(self.snapshot(), before); self.assertFalse(self.active)
+        self.assertNotIn(str(self.home), result.stdout)
 
 
 if __name__ == '__main__':

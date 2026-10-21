@@ -212,9 +212,9 @@ impl EngineRuntime {
                 self.transition(RuntimeState::Shutdown);
                 true
             }
-            Some(Err(error)) => {
+            Some(Err(_)) => {
                 self.emit(RuntimeEvent::Message {
-                    line: format!("Reach update failed: {error}"),
+                    line: "UPDATE_CHECK_FAILED: retrying".into(),
                 });
                 false
             }
@@ -276,13 +276,7 @@ impl EngineRuntime {
     /// Drain `Message` lifecycle events to stdout (local-loopback observability).
     fn flush_messages(&mut self) {
         for event in self.drain_events() {
-            match event {
-                RuntimeEvent::Message { line } => println!("{line}"),
-                event => println!(
-                    "{}",
-                    serde_json::to_string(&event).expect("runtime event serializes")
-                ),
-            }
+            println!("{}", event.diagnostic());
         }
     }
 
@@ -337,52 +331,56 @@ impl EngineRuntime {
             RuntimeState::Boot => {
                 self.transition(RuntimeState::Heartbeating);
             }
-            RuntimeState::Heartbeating => match self.heartbeat.heartbeat() {
-                Ok(HeartbeatOutcome::Idle { interval }) => {
-                    self.emit(RuntimeEvent::Heartbeat {
-                        leased: false,
-                        ok: true,
-                        error: None,
-                    });
-                    self.next_heartbeat_ms = self
-                        .clock
-                        .now_ms()
-                        .saturating_add(interval.as_millis() as i64);
-                    return Ok(self.idle_wait(interval));
-                }
-                Ok(HeartbeatOutcome::Lease(lease)) => {
-                    self.emit(RuntimeEvent::Heartbeat {
-                        leased: true,
-                        ok: true,
-                        error: None,
-                    });
-                    match resolve_session_endpoint(&self.config.gateway, &lease.endpoint) {
-                        Ok(url) => {
-                            self.pending = Some((url, lease));
-                            self.transition(RuntimeState::Waiting);
-                        }
-                        Err(error) => {
-                            // Endpoint pinning: reject the lease, do not open a
-                            // connection, apply the heartbeat failure/backoff policy.
-                            self.emit(RuntimeEvent::Message {
-                                line: format!("Reach engine rejected session endpoint: {error}"),
-                            });
-                            self.transition(RuntimeState::Backoff);
+            RuntimeState::Heartbeating => {
+                match self.heartbeat.heartbeat() {
+                    Ok(HeartbeatOutcome::Idle { interval }) => {
+                        report_update_health();
+                        self.emit(RuntimeEvent::Heartbeat {
+                            leased: false,
+                            ok: true,
+                            error: None,
+                        });
+                        self.next_heartbeat_ms = self
+                            .clock
+                            .now_ms()
+                            .saturating_add(interval.as_millis() as i64);
+                        return Ok(self.idle_wait(interval));
+                    }
+                    Ok(HeartbeatOutcome::Lease(lease)) => {
+                        self.emit(RuntimeEvent::Heartbeat {
+                            leased: true,
+                            ok: true,
+                            error: None,
+                        });
+                        match resolve_session_endpoint(&self.config.gateway, &lease.endpoint) {
+                            Ok(url) => {
+                                report_update_health();
+                                self.pending = Some((url, lease));
+                                self.transition(RuntimeState::Waiting);
+                            }
+                            Err(_) => {
+                                // Endpoint pinning: reject the lease, do not open a
+                                // connection, apply the heartbeat failure/backoff policy.
+                                self.emit(RuntimeEvent::Message {
+                                    line: "SESSION_ENDPOINT_REJECTED".into(),
+                                });
+                                self.transition(RuntimeState::Backoff);
+                            }
                         }
                     }
-                }
-                Err(error) => {
-                    self.emit(RuntimeEvent::Heartbeat {
-                        leased: false,
-                        ok: false,
-                        error: Some(error.clone()),
+                    Err(_) => {
+                        self.emit(RuntimeEvent::Heartbeat {
+                            leased: false,
+                            ok: false,
+                            error: Some("HEARTBEAT_FAILED".into()),
+                        });
+                        self.emit(RuntimeEvent::Message {
+                        line: "HEARTBEAT_FAILED: check Gateway connectivity and credentials privately".into(),
                     });
-                    self.emit(RuntimeEvent::Message {
-                        line: format!("Reach engine heartbeat failed: {error}"),
-                    });
-                    self.transition(RuntimeState::Backoff);
+                        self.transition(RuntimeState::Backoff);
+                    }
                 }
-            },
+            }
             RuntimeState::Waiting => {
                 self.transition(RuntimeState::Connecting);
             }
@@ -407,9 +405,9 @@ impl EngineRuntime {
                         self.session_closure = Some((lease.session_id.clone(), reason));
                         self.transition(RuntimeState::Draining);
                     }
-                    Err(error) => {
+                    Err(_) => {
                         self.emit(RuntimeEvent::Message {
-                            line: format!("Reach engine session connect failed: {error}"),
+                            line: "SESSION_CONNECT_FAILED".into(),
                         });
                         self.transition(RuntimeState::Backoff);
                     }
@@ -524,7 +522,7 @@ impl EngineRuntime {
             session_id: lease.session_id.clone(),
         });
         events.borrow_mut().push(RuntimeEvent::Message {
-            line: format!("Reach engine session ready ({})", lease.session_id),
+            line: "Reach engine session ready".into(),
         });
 
         let mut last_activity_ms = self.clock.now_ms();
@@ -601,9 +599,9 @@ impl EngineRuntime {
                             last_activity_ms = last_activity_ms.max(execution.last_activity_ms)
                         }
                         Ok(Flow::Close(reason)) => break 'drive reason,
-                        Err(error) => {
+                        Err(_) => {
                             events.borrow_mut().push(RuntimeEvent::Message {
-                                line: format!("Reach engine session protocol error: {error}"),
+                                line: "SESSION_PROTOCOL_INVALID".into(),
                             });
                             break 'drive SessionClosureReason::PolicyError;
                         }
@@ -640,9 +638,9 @@ impl EngineRuntime {
                     let wait = until_deadline.min(POLL_INTERVAL.as_millis() as i64);
                     (self.sleep)(Duration::from_millis(wait as u64));
                 }
-                Err(error) => {
+                Err(_) => {
                     events.borrow_mut().push(RuntimeEvent::Message {
-                        line: format!("Reach engine session read failed: {error}"),
+                        line: "SESSION_READ_FAILED".into(),
                     });
                     break 'drive SessionClosureReason::Disconnected;
                 }
@@ -728,13 +726,49 @@ fn reload_workspaces(
         }
     }
     workspace.replace_roots(&next);
-    for name in &affected {
+    for _ in &affected {
         events.borrow_mut().push(RuntimeEvent::Message {
-            line: format!("Reach workspace state invalidated: {name}"),
+            line: "WORKSPACE_STATE_INVALIDATED".into(),
         });
     }
     *current = next;
     true
+}
+
+fn report_update_health() {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
+    let (Ok(path), Ok(nonce)) = (
+        std::env::var("REACH_UPDATE_HEALTH_FILE"),
+        std::env::var("REACH_UPDATE_HEALTH_NONCE"),
+    ) else {
+        return;
+    };
+    if nonce.len() != 32 || !nonce.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return;
+    }
+    let path = std::path::PathBuf::from(path);
+    if !path.with_file_name("engine.update-pending.json").exists() {
+        return;
+    }
+    let temporary = path.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> std::io::Result<()> {
+        let mut file = std::fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)?;
+        write!(
+            file,
+            "{}",
+            serde_json::json!({"nonce":nonce,"version":crate::ENGINE_VERSION,"phase":"heartbeat"})
+        )?;
+        file.sync_all()?;
+        std::fs::rename(&temporary, &path)
+    })();
+    if result.is_err() {
+        let _ = std::fs::remove_file(temporary);
+    }
 }
 
 /// Handle one engine-side session message: control messages (`session.renew`,

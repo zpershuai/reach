@@ -25,7 +25,7 @@ esac
 version="${REACH_ENGINE_VERSION:-}"
 if [[ -z "$version" ]]; then
   api="${REACH_RELEASE_API_URL:-https://api.github.com/repos/$repo/releases?per_page=100}"
-  version="$(curl -fsSL "$api" | python3 -c '
+  version="$(python3 "$script_dir/release-download.py" "$api" | python3 -c '
 import json, sys
 for release in json.load(sys.stdin):
     tag = release.get("tag_name", "")
@@ -37,17 +37,26 @@ for release in json.load(sys.stdin):
 fi
 version="${version#engine-v}"
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  echo "Invalid Engine version: $version" >&2
+  echo "Invalid Engine version" >&2
   exit 1
 fi
 
 base="${REACH_RELEASE_BASE_URL:-https://github.com/$repo/releases/download}/engine-v$version"
 work="$(mktemp -d "${TMPDIR:-/tmp}/reach-engine-install.XXXXXX")"
 trap 'rm -rf "$work"' EXIT
-curl -fsSL "$base/$asset" -o "$work/engine"
-curl -fsSL "$base/SHA256SUMS" -o "$work/SHA256SUMS"
+python3 "$script_dir/release-download.py" "$base/$asset" "$work/engine"
+python3 "$script_dir/release-download.py" "$base/SHA256SUMS" "$work/SHA256SUMS"
 
-expected="$(awk -v name="$asset" '$2 == name { print $1 }' "$work/SHA256SUMS")"
+expected="$(python3 - "$work/SHA256SUMS" "$asset" <<'CHECKSUM'
+from pathlib import Path
+import re
+import sys
+rows = [line.split() for line in Path(sys.argv[1]).read_text().splitlines()]
+selected = [row for row in rows if len(row) >= 2 and row[1].lstrip('*') == sys.argv[2]]
+if len(selected) == 1 and len(selected[0]) == 2 and re.fullmatch('[a-fA-F0-9]{64}', selected[0][0]):
+    print(selected[0][0].lower())
+CHECKSUM
+)"
 if [[ ! "$expected" =~ ^[0-9a-f]{64}$ ]]; then
   echo "SHA256SUMS has no single valid digest for $asset." >&2
   exit 1
@@ -61,10 +70,11 @@ if [[ "$actual" != "$expected" ]]; then
   echo "Checksum mismatch for $asset; refusing to install." >&2
   exit 1
 fi
+python3 "$script_dir/binary_identity.py" "$work/engine"
 chmod 755 "$work/engine"
-reported="$("$work/engine" --version)"
+reported="$("$work/engine" --version 2>/dev/null)" || { echo "ENGINE_VERSION_CHECK_FAILED" >&2; exit 1; }
 if [[ "$reported" != "$version" ]]; then
-  echo "Downloaded Engine reports $reported, expected $version; refusing to install." >&2
+  echo "ENGINE_VERSION_MISMATCH: expected $version; refusing to install." >&2
   exit 1
 fi
 echo "Verified $asset $version."

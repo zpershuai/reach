@@ -15,12 +15,18 @@ cleanup() {
 }
 trap cleanup EXIT
 
-bash scripts/package-engine.sh "$work"
-engine="$work/engine-linux-x64-musl"
+bash scripts/package-engine.sh "$work/engine"
+engine="$work/engine/engine-linux-x64-musl"
 image=reach-gateway:verification
-bash scripts/package-gateway.sh "$work" "$image"
+bash scripts/package-gateway.sh "$work/gateway" "$image"
 engine_version="$("$engine" --version)"
-python3 scripts/release-metadata.py checksums "$work" engine-linux-x64-musl gateway-amd64.tgz
+python3 scripts/verify-release-assets.py engine-platform "$work/engine" --asset engine-linux-x64-musl
+python3 scripts/verify-release-assets.py gateway "$work/gateway"
+python3 scripts/test-release-assets.py
+python3 scripts/release-metadata.py checksums "$work/engine" engine-linux-x64-musl engine-linux-x64-musl.NOTICES.txt engine-linux-x64-musl.licenses.tgz LICENSE THIRD_PARTY_NOTICES.txt third-party-licenses.tgz
+python3 scripts/release-metadata.py checksums "$work/gateway" gateway-amd64.tgz LICENSE THIRD_PARTY_NOTICES.txt third-party-licenses.tgz
+(cd "$work/engine" && sha256sum -c SHA256SUMS)
+(cd "$work/gateway" && sha256sum -c SHA256SUMS)
 container="$(docker run -d --read-only --cap-drop=ALL --security-opt=no-new-privileges \
   -e REACH_CONTROLLER_TOKEN="$(printf 'c%.0s' {1..48})" \
   -e REACH_ENGINE_TOKEN="$(printf 'e%.0s' {1..48})" -e REACH_ENGINE_ID=fixture \

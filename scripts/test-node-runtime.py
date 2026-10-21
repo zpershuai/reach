@@ -1,12 +1,16 @@
 import importlib.util
 import io
 import json
+import subprocess
+import sys
 from pathlib import Path
 import tarfile
 import tempfile
 import unittest
 from unittest.mock import patch
 from urllib.error import URLError
+from executable_test_fixture import compile_fixture, platform_bytes
+from binary_identity import host_platform, check_executable
 
 
 spec = importlib.util.spec_from_file_location('node_runtime', Path(__file__).with_name('install-node-runtime.py'))
@@ -21,25 +25,27 @@ class RuntimeInstallationTests(unittest.TestCase):
         self.root = Path(self.temporary.name)
         self.reach = self.root / 'reach home'
         self.version = 'v24.21.0'
-        self.target = 'darwin-arm64'
+        self.target = host_platform()
 
-    def archive(self, version=None, target=None, broken=False):
+    def test_cli_diagnostics_do_not_echo_private_paths_or_exception_text(self):
+        sentinel = 'private-credential-body-args-output-sentinel'
+        result = subprocess.run([sys.executable, str(Path(runtime.__file__)), '--root', str(self.reach),
+                                 '--archive', str(self.root / sentinel)], text=True, capture_output=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('NODE_RUNTIME_INSTALL_FAILED', result.stderr)
+        self.assertNotIn(sentinel, result.stdout + result.stderr)
+
+    def archive(self, version=None, target=None, broken=False, node_bytes=None):
         version = version or self.version
         target = target or self.target
         archive = self.root / f'node-{version}-{target}.tar.gz'
-        script = '#!/bin/sh\n'
-        if broken:
-            script += 'exit 1\n'
-        else:
-            node_target = target[:-5] if target.endswith('-musl') else target
-            script += f'if [ "$1" = --version ]; then echo {version}; else echo {node_target}; fi\n'
+        data = node_bytes if node_bytes is not None else compile_fixture(self.root / 'fixture-node', version, broken=broken)
         with tarfile.open(archive, 'w:gz') as output:
-            for name, content in [('node', script), ('npm', '#!/bin/sh\n'), ('npx', '#!/bin/sh\n')]:
+            for name, content in [('node', data), ('npm', b'#!/bin/sh\n'), ('npx', b'#!/bin/sh\n')]:
                 entry = tarfile.TarInfo(f'node-{version}-{target}/bin/{name}')
                 entry.mode = 0o755
-                data = content.encode()
-                entry.size = len(data)
-                output.addfile(entry, io.BytesIO(data))
+                entry.size = len(content)
+                output.addfile(entry, io.BytesIO(content))
         manifest = {'version': version, 'sha256': {target: runtime.sha256(archive)}}
         return archive, manifest
 
@@ -49,7 +55,7 @@ class RuntimeInstallationTests(unittest.TestCase):
         current = node.parent.parent
         original = current.resolve()
         self.assertTrue(current.is_symlink())
-        with patch.object(runtime.urllib.request, 'urlopen', side_effect=AssertionError('unexpected download')):
+        with patch.object(runtime, 'download', side_effect=AssertionError('unexpected download')):
             self.assertEqual(runtime.install_runtime(self.reach, manifest, self.target), node)
         self.assertEqual(current.resolve(), original)
         metadata = json.loads((current / '.reach-node.json').read_text())
@@ -58,16 +64,14 @@ class RuntimeInstallationTests(unittest.TestCase):
     def test_all_supported_platforms(self):
         for target in ['darwin-arm64', 'darwin-x64', 'linux-arm64', 'linux-x64', 'linux-x64-musl']:
             with self.subTest(target=target):
-                archive, manifest = self.archive(target=target)
-                node = runtime.install_runtime(self.reach, manifest, target, archive)
-                self.assertTrue(node.is_file())
+                check_executable(platform_bytes(target.removesuffix('-musl')), target)
 
     def test_download_uses_pinned_official_url(self):
         archive, manifest = self.archive()
-        with patch.object(runtime.urllib.request, 'urlopen', return_value=io.BytesIO(archive.read_bytes())) as download:
+        with patch.object(runtime, 'download', return_value=archive.read_bytes()) as download:
             runtime.install_runtime(self.reach, manifest, self.target)
         download.assert_called_once_with(
-            f'https://nodejs.org/dist/{self.version}/node-{self.version}-{self.target}.tar.gz', timeout=60,
+            f'https://nodejs.org/dist/{self.version}/node-{self.version}-{self.target}.tar.gz', binary=True, allowed=runtime.NODE_ORIGINS,
         )
 
     def test_failed_upgrade_preserves_current_runtime(self):
@@ -75,7 +79,7 @@ class RuntimeInstallationTests(unittest.TestCase):
         node = runtime.install_runtime(self.reach, manifest, self.target, archive)
         original = node.resolve()
         upgrade, upgraded_manifest = self.archive(version='v24.22.0')
-        with patch.object(runtime.urllib.request, 'urlopen', side_effect=URLError('offline')):
+        with patch.object(runtime, 'download', side_effect=URLError('offline')):
             with self.assertRaises(URLError):
                 runtime.install_runtime(self.reach, upgraded_manifest, self.target)
         self.assertEqual(node.resolve(), original)
@@ -110,6 +114,13 @@ class RuntimeInstallationTests(unittest.TestCase):
         (node.parent.parent / '.reach-node.json').write_text('[]')
         runtime.install_runtime(self.reach, manifest, self.target, archive)
         self.assertEqual(json.loads((node.parent.parent / '.reach-node.json').read_text())['version'], self.version)
+
+    def test_wrong_format_and_truncated_runtime_never_execute_or_activate(self):
+        for data in [b'#!/bin/sh\necho v24.21.0\n', platform_bytes('linux-x64')[:40]]:
+            archive, manifest = self.archive(node_bytes=data)
+            with patch.object(runtime.subprocess, 'check_output', side_effect=AssertionError('must not execute')):
+                with self.assertRaises(ValueError): runtime.install_runtime(self.reach, manifest, self.target, archive)
+            self.assertFalse((self.reach / 'runtime/node').exists())
 
 
 if __name__ == '__main__':

@@ -6,6 +6,9 @@ import type { ConsoleConfig } from "./config.js";
 import type { GatewayEvents } from "./events.js";
 import { PayloadTooLargeError, readJsonBody, sendJson } from "./http.js";
 import type { ConsoleStore } from "./store.js";
+import { loadSetupToken, removeSetupToken } from "./setup-token.js";
+
+const LEFTOVER_SETUP_TOKEN = "CONSOLE_SETUP_TOKEN_NOT_REMOVED: the administrator exists, so the leftover REACH_DATA_DIR/admin-setup-token is unusable; delete it manually";
 
 const idleMs = 12 * 60 * 60 * 1000;
 const absoluteMs = 7 * 24 * 60 * 60 * 1000;
@@ -107,16 +110,16 @@ export class ConsoleAuth {
     private readonly config: ConsoleConfig,
     private readonly events: GatewayEvents,
     private readonly now = Date.now,
-    logger: (message: string) => void = console.log,
+    private readonly logger: (message: string) => void = console.log,
   ) {
     this.credentials = new AdminCredentials(store);
     this.peers = new PeerResolver(config.trustedProxies);
     this.limiter = new AuthRateLimiter(now);
     if (!this.hasAdmin()) {
-      const token = config.setupToken || randomBytes(24).toString("hex");
+      const token = config.setupToken || loadSetupToken(store.directory);
       this.setupDigest = credentialDigest(token);
-      if (!config.setupToken) logger(`Reach console setup token: ${token}`);
-    }
+      if (!config.setupToken) logger("Reach console setup credential: read REACH_DATA_DIR/admin-setup-token privately");
+    } else if (!removeSetupToken(store.directory)) logger(LEFTOVER_SETUP_TOKEN);
   }
 
   private hasAdmin(): boolean { return Boolean(this.store.db.prepare("SELECT id FROM admin WHERE id=1").get()); }
@@ -236,6 +239,7 @@ export class ConsoleAuth {
         if (this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists");
         const recovery = this.credentials.createAdmin(passwordHash, bootstrap!.secret!, step!, this.now());
         this.setupDigest = undefined;
+        if (!removeSetupToken(this.store.directory)) this.logger(LEFTOVER_SETUP_TOKEN);
         this.action("admin.setup");
         this.signIn(request, response, recovery);
       } else if (path === "login") {

@@ -34,16 +34,24 @@ test("main fails before listening for invalid retention, origin and unwritable d
   writeFileSync(file, "not a directory");
   try {
     const env = { ...process.env, GATEWAY_HOST: "127.0.0.1", REACH_CONTROLLER_TOKEN: "c".repeat(48), REACH_ENGINE_TOKEN: "e".repeat(48), REACH_ENGINE_ID: "engine-a" };
-    for (const [overrides, message] of [
-      [{ REACH_DATA_DIR: file }, file],
+    const engines = join(directory, "engines.json");
+    const leaked = "s".repeat(20);
+    writeFileSync(engines, JSON.stringify([{ engineId: "b", engineToken: leaked }]));
+    for (const [overrides, reason] of [
+      [{ REACH_DATA_DIR: file }, "REACH_DATA_DIR"],
       [{ REACH_DATA_DIR: directory, GATEWAY_HOST: "0.0.0.0" }, "REACH_PUBLIC_ORIGIN"],
       [{ REACH_AUDIT_RETENTION_DAYS: "366" }, "1 and 365"],
+      [{ GATEWAY_PORT: "not-a-port" }, "GATEWAY_PORT"],
+      [{ REACH_ENGINES_FILE: engines }, "REACH_ENGINES_FILE"],
     ] as const) {
       const childEnv: NodeJS.ProcessEnv = { ...env, ...overrides };
       delete childEnv.REACH_PUBLIC_ORIGIN;
       const child = spawnSync(process.execPath, [new URL("../gateway-main.js", import.meta.url).pathname], { env: childEnv, encoding: "utf8", timeout: 5000 });
       assert.notEqual(child.status, 0);
-      assert.ok(child.stderr.includes(message), child.stderr);
+      assert.ok(child.stderr.includes("GATEWAY_CONFIGURATION_INVALID"), child.stderr);
+      assert.ok(child.stderr.includes(reason), `startup diagnostics must name the failing setting: ${child.stderr}`);
+      assert.ok(!child.stderr.includes(file) && !child.stderr.includes(directory), "startup diagnostics must not echo private paths");
+      assert.ok(!child.stderr.includes(leaked), "startup diagnostics must not echo file contents");
       assert.ok(!child.stdout.includes("listening"));
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }

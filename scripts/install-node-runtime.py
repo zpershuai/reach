@@ -13,6 +13,9 @@ import sys
 import tempfile
 import urllib.request
 import uuid
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from release_trust import NODE_ORIGINS, download
+from binary_identity import check_executable
 
 
 def sha256(path):
@@ -25,9 +28,10 @@ def sha256(path):
 
 def validate_node(directory, version, target):
     node = directory / 'bin/node'
-    actual_version = subprocess.check_output([str(node), '--version'], text=True, timeout=30).strip()
+    check_executable(node.read_bytes(), target)
+    actual_version = subprocess.check_output([str(node), '--version'], text=True, timeout=30, stderr=subprocess.PIPE).strip()
     actual_target = subprocess.check_output(
-        [str(node), '-p', 'process.platform + "-" + process.arch'], text=True, timeout=30,
+        [str(node), '-p', 'process.platform + "-" + process.arch'], text=True, timeout=30, stderr=subprocess.PIPE,
     ).strip()
     node_target = target[:-5] if target.endswith('-musl') else target
     if (actual_version, actual_target) != (version, node_target):
@@ -60,9 +64,8 @@ def install_runtime(reach_root, manifest, target, archive=None):
         if archive is None:
             archive = staging / f'{distribution}.tar.gz'
             url = f'https://nodejs.org/dist/{version}/{archive.name}'
-            print(f'Downloading Reach Node runtime: {url}', file=sys.stderr)
-            with urllib.request.urlopen(url, timeout=60) as response, archive.open('wb') as output:
-                shutil.copyfileobj(response, output)
+            print('Downloading Reach Node runtime from approved source', file=sys.stderr)
+            archive.write_bytes(download(url, binary=True, allowed=NODE_ORIGINS))
         if sha256(archive) != checksum:
             raise ValueError(f'Node archive SHA-256 mismatch: {archive}')
         subprocess.run(['tar', '-xzf', str(archive), '-C', str(staging)], check=True)
@@ -96,8 +99,8 @@ def main():
     try:
         archive = args.archive.expanduser().resolve() if args.archive else None
         print(install_runtime(args.root.expanduser().resolve(), manifest, target, archive))
-    except (OSError, ValueError, subprocess.SubprocessError) as error:
-        parser.exit(1, f'Reach Node runtime installation failed: {error}\n')
+    except (OSError, ValueError, subprocess.SubprocessError):
+        parser.exit(1, 'NODE_RUNTIME_INSTALL_FAILED: check private configuration and archive integrity\n')
 
 
 if __name__ == '__main__':

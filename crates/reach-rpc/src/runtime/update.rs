@@ -15,6 +15,7 @@ pub struct UpdateConfig {
     pub token: Option<String>,
     pub backend: UpdateBackend,
     pub request_dir: Option<PathBuf>,
+    pub health_guard: bool,
 }
 
 impl std::fmt::Debug for UpdateConfig {
@@ -91,6 +92,7 @@ impl UpdateConfig {
             token,
             backend,
             request_dir,
+            health_guard: lookup("REACH_UPDATE_GUARDED").as_deref() == Some("1"),
         }))
     }
 }
@@ -146,8 +148,9 @@ pub fn checksum(input: &str, asset: &str) -> Result<String, String> {
     let mut found = None;
     for line in input.lines() {
         let fields: Vec<_> = line.split_whitespace().collect();
-        if fields.len() == 2 && fields[1].trim_start_matches('*') == asset {
-            if found.is_some()
+        if fields.len() >= 2 && fields[1].trim_start_matches('*') == asset {
+            if fields.len() != 2
+                || found.is_some()
                 || fields[0].len() != 64
                 || !fields[0].bytes().all(|b| b.is_ascii_hexdigit())
             {
@@ -190,11 +193,51 @@ struct GithubClient {
     config: UpdateConfig,
 }
 
+fn release_origin(url: &str) -> Result<String, String> {
+    if url
+        .chars()
+        .any(|c| c.is_ascii_whitespace() || c.is_control())
+        || url.contains('#')
+    {
+        return Err("Invalid release URL".into());
+    }
+    let parsed: ureq::http::Uri = url.parse().map_err(|_| "Invalid release URL")?;
+    let authority = parsed.authority().ok_or("Invalid release authority")?;
+    let host = authority.host();
+    if parsed.scheme_str() != Some("https")
+        || authority.as_str().contains('@')
+        || authority.port_u16().unwrap_or(443) != 443
+        || ![
+            "api.github.com",
+            "github.com",
+            "release-assets.githubusercontent.com",
+            "objects.githubusercontent.com",
+        ]
+        .contains(&host)
+    {
+        return Err("Unapproved release origin".into());
+    }
+    Ok(format!("https://{host}"))
+}
+
+fn release_redirect(current: &str, target: &str) -> Result<(String, bool), String> {
+    let previous = release_origin(current)?;
+    let next = if target.starts_with('/') && !target.starts_with("//") {
+        format!("{previous}{target}")
+    } else {
+        target.to_owned()
+    };
+    let origin = release_origin(&next)?;
+    Ok((next, previous == origin))
+}
+
 impl GithubClient {
     fn new(config: UpdateConfig) -> Self {
         Self {
             agent: ureq::Agent::config_builder()
                 .timeout_global(Some(Duration::from_secs(60)))
+                .max_redirects(0)
+                .max_redirects_will_error(false)
                 .build()
                 .new_agent(),
             config,
@@ -202,35 +245,52 @@ impl GithubClient {
     }
 
     fn get(&self, url: &str, binary: bool, limit: u64) -> Result<Vec<u8>, String> {
-        if !url.starts_with("https://api.github.com/") {
+        if release_origin(url)? != "https://api.github.com" {
             return Err("Release URL must use GitHub API HTTPS".into());
         }
-        let mut request = self
-            .agent
-            .get(url)
-            .header(
-                "User-Agent",
-                format!("reach-engine/{}", crate::ENGINE_VERSION),
-            )
-            .header(
-                "Accept",
-                if binary {
-                    "application/octet-stream"
-                } else {
-                    "application/vnd.github+json"
-                },
-            );
-        if let Some(token) = &self.config.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
+        let mut current = url.to_owned();
+        let mut authorized = true;
+        for _ in 0..=5 {
+            let mut request = self
+                .agent
+                .get(&current)
+                .header(
+                    "User-Agent",
+                    format!("reach-engine/{}", crate::ENGINE_VERSION),
+                )
+                .header(
+                    "Accept",
+                    if binary {
+                        "application/octet-stream"
+                    } else {
+                        "application/vnd.github+json"
+                    },
+                );
+            if let Some(token) = self.config.token.as_ref().filter(|_| authorized) {
+                request = request.header("Authorization", format!("Bearer {token}"));
+            }
+            let mut response = request
+                .call()
+                .map_err(|_| "GitHub request failed".to_owned())?;
+            if [301, 302, 303, 307, 308].contains(&response.status().as_u16()) {
+                let target = response
+                    .headers()
+                    .get("location")
+                    .and_then(|value| value.to_str().ok())
+                    .ok_or("Invalid release redirect")?;
+                let (next, same_origin) = release_redirect(&current, target)?;
+                authorized &= same_origin;
+                current = next;
+                continue;
+            }
+            return response
+                .body_mut()
+                .with_config()
+                .limit(limit)
+                .read_to_vec()
+                .map_err(|_| "GitHub response failed".into());
         }
-        request
-            .call()
-            .map_err(|_| "GitHub request failed".to_owned())?
-            .body_mut()
-            .with_config()
-            .limit(limit)
-            .read_to_vec()
-            .map_err(|_| "GitHub response failed".into())
+        Err("Too many release redirects".into())
     }
 
     fn releases(&self) -> Result<Vec<Release>, String> {
@@ -290,12 +350,11 @@ fn discover(config: UpdateConfig, executable: &Path) -> Result<Option<PreparedUp
         return Ok(None);
     };
     let asset_url = |name: &str| {
-        release
-            .assets
-            .iter()
-            .find(|a| a.name == name)
-            .map(|a| a.url.as_str())
-            .ok_or_else(|| format!("Missing release asset {name}"))
+        let matches: Vec<_> = release.assets.iter().filter(|a| a.name == name).collect();
+        if matches.len() != 1 {
+            return Err("Missing or duplicate release asset".to_owned());
+        }
+        Ok(matches[0].url.as_str())
     };
     asset_url(asset)?;
     let sums = client.get(asset_url("SHA256SUMS")?, true, 1024 * 1024)?;
@@ -330,9 +389,13 @@ pub fn stage_binary(
     digest: &str,
     version: &str,
 ) -> Result<PathBuf, String> {
+    if Version::parse(version).is_none() {
+        return Err("Invalid Engine update version".into());
+    }
     if format!("{:x}", Sha256::digest(bytes)) != digest {
         return Err("Engine update digest mismatch".into());
     }
+    crate::binary_identity::verify(bytes, std::env::consts::OS, std::env::consts::ARCH)?;
     let path = executable
         .parent()
         .ok_or("Engine has no install directory")?
@@ -371,15 +434,52 @@ fn apply_host(
     prepared: &PreparedUpdate,
     inventory: Option<&Path>,
 ) -> Result<(), String> {
+    use std::io::Write;
+    use std::os::unix::fs::OpenOptionsExt;
     let staged = prepared.staged.as_ref().ok_or("No staged Engine")?;
+    let pending = executable.with_file_name("engine.update-pending.json");
+    if pending.exists() {
+        return Err("Previous host update still requires health confirmation".into());
+    }
     let previous = executable
         .parent()
         .ok_or("Engine has no install directory")?
         .join("engine.prev");
     let backup = previous.with_extension(format!("prev-{}", uuid::Uuid::new_v4()));
     fs::copy(executable, &backup).map_err(|e| e.to_string())?;
-    fs::rename(&backup, previous).map_err(|e| e.to_string())?;
-    fs::rename(staged, executable).map_err(|e| e.to_string())?;
+    fs::rename(&backup, &previous).map_err(|e| e.to_string())?;
+    let inventory_before = inventory
+        .filter(|path| path.exists())
+        .map(|path| fs::read_to_string(path).map(|data| (path.to_string_lossy().to_string(), data)))
+        .transpose()
+        .map_err(|_| "Cannot snapshot version inventory")?;
+    let record = serde_json::json!({"schemaVersion":1,"version":prepared.request.version,
+        "digest":prepared.request.digest,"previousDigest":format!("{:x}", Sha256::digest(fs::read(&previous).map_err(|_| "Cannot read prior Engine")?)),
+        "inventory":inventory_before});
+    let temporary = pending.with_extension(format!("{}.tmp", uuid::Uuid::new_v4()));
+    let result = (|| -> Result<(), String> {
+        let mut file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .mode(0o600)
+            .open(&temporary)
+            .map_err(|_| "Cannot stage host health intent")?;
+        let data = serde_json::to_vec(&record).map_err(|_| "Invalid host health intent")?;
+        if data.len() > 1024 * 1024 {
+            return Err("Host health intent exceeds limit".into());
+        }
+        file.write_all(&data)
+            .and_then(|_| file.sync_all())
+            .map_err(|_| "Cannot persist host health intent")?;
+        fs::rename(&temporary, &pending).map_err(|_| "Cannot activate host health intent")?;
+        if fs::rename(staged, executable).is_err() {
+            let _ = fs::remove_file(&pending);
+            return Err("Cannot activate Engine update".into());
+        }
+        Ok(())
+    })();
+    let _ = fs::remove_file(temporary);
+    result?;
     // Version inventory is advisory: failure here must not prevent supervisor restart.
     if let Some(path) = inventory.filter(|path| path.exists()) {
         if record_version(path, &prepared.request.version).is_err() {
@@ -527,6 +627,9 @@ impl RuntimeUpdater for EngineUpdater {
                 self.next_apply_ms = now_ms.saturating_add(self.retry_secs as i64 * 1000);
                 self.retry_secs = (self.retry_secs * 2).min(60);
                 if self.config.backend == UpdateBackend::Host {
+                    if !self.config.health_guard {
+                        return Err("HOST_UPDATE_REQUIRES_GUARDED_LAUNCHER".into());
+                    }
                     apply_host(&self.executable, prepared, self.inventory.as_deref())?;
                     self.pending = None;
                     return Ok(true);
@@ -581,6 +684,7 @@ mod tests {
             token: None,
             backend,
             request_dir: None,
+            health_guard: true,
         }
     }
     fn request() -> UpdateRequest {
@@ -667,6 +771,11 @@ mod tests {
             "a".repeat(64)
         );
         assert!(checksum(&(line.clone() + &line), "engine-linux-x64-musl").is_err());
+        assert!(checksum(
+            &(line.clone() + line.trim_end() + " extra\n"),
+            "engine-linux-x64-musl"
+        )
+        .is_err());
         assert!(checksum("abcd engine-linux-x64-musl", "engine-linux-x64-musl").is_err());
     }
     #[test]
@@ -674,13 +783,33 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let exe = dir.path().join("engine");
         fs::write(&exe, b"original").unwrap();
-        let bytes = b"#!/bin/sh\necho 0.2.2\n";
-        assert!(stage_binary(&exe, bytes, &"0".repeat(64), "0.2.2").is_err());
-        let digest = format!("{:x}", Sha256::digest(bytes));
-        assert!(stage_binary(&exe, bytes, &digest, "0.2.3").is_err());
+        let build = tempfile::tempdir().unwrap();
+        let source = build.path().join("fixture.c");
+        let binary = build.path().join("fixture");
+        fs::write(
+            &source,
+            b"#include <stdio.h>\nint main(void) { puts(\"0.2.2\"); return 0; }\n",
+        )
+        .unwrap();
+        assert!(Command::new("cc")
+            .arg(&source)
+            .arg("-o")
+            .arg(&binary)
+            .output()
+            .unwrap()
+            .status
+            .success());
+        let bytes = fs::read(binary).unwrap();
+        assert!(stage_binary(&exe, &bytes, &"0".repeat(64), "0.2.2").is_err());
+        let digest = format!("{:x}", Sha256::digest(&bytes));
+        assert!(stage_binary(&exe, &bytes, &digest, "0.2.3").is_err());
         assert_eq!(fs::read(&exe).unwrap(), b"original");
         assert_eq!(fs::read_dir(dir.path()).unwrap().count(), 1);
-        let staged = stage_binary(&exe, bytes, &digest, "0.2.2").unwrap();
+        for invalid in [b"#!/bin/sh\necho 0.2.2\n".to_vec(), bytes[..24].to_vec()] {
+            let digest = format!("{:x}", Sha256::digest(&invalid));
+            assert!(stage_binary(&exe, &invalid, &digest, "0.2.2").is_err());
+        }
+        let staged = stage_binary(&exe, &bytes, &digest, "0.2.2").unwrap();
         let mut prepared = PreparedUpdate {
             request: request(),
             staged: Some(staged),
@@ -720,6 +849,24 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&fs::read(dir.path().join("request.json")).unwrap()).unwrap();
         assert_eq!(value["version"], "0.2.2");
+    }
+
+    #[test]
+    fn host_updates_require_idle_and_a_health_guard_before_activation() {
+        let mut cfg = config(UpdateBackend::Host);
+        cfg.health_guard = false;
+        let mut updater = EngineUpdater::new(cfg).unwrap();
+        updater.pending = Some(PreparedUpdate {
+            request: request(),
+            staged: None,
+        });
+        updater.next_check_ms = 3600000;
+        assert!(!updater.tick(0, false).unwrap());
+        assert_eq!(
+            updater.tick(0, true).unwrap_err(),
+            "HOST_UPDATE_REQUIRES_GUARDED_LAUNCHER"
+        );
+        assert!(updater.pending.is_some());
     }
     #[test]
     fn github_failure_backs_off_worker_only() {
@@ -762,4 +909,30 @@ mod tests {
         fs::remove_file(dir.path().join("apply.json")).unwrap();
         assert!(!updater.admission_paused(0));
     }
+}
+#[test]
+fn release_sources_are_exact_https_origins_and_cross_origin_drops_authority() {
+    for url in [
+        "http://api.github.com/x",
+        "file:///tmp/fixture",
+        "https://api.github.com.evil.example/x",
+        "https://user:secret@api.github.com/x",
+        "https://api.github.com:8443/x",
+        "https://unapproved.example/x",
+        "https://api.github.com/x\nforged",
+    ] {
+        assert!(release_origin(url).is_err());
+    }
+    let current = "https://api.github.com/repos/example/reach";
+    assert!(release_redirect(current, "/same-origin").unwrap().1);
+    assert!(
+        !release_redirect(
+            current,
+            "https://release-assets.githubusercontent.com/fixture"
+        )
+        .unwrap()
+        .1
+    );
+    assert!(release_redirect(current, "http://api.github.com/x").is_err());
+    assert!(release_redirect(current, "https://unapproved.example/x").is_err());
 }

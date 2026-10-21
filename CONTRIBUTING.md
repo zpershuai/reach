@@ -26,7 +26,7 @@ Behavior changes start as an [OpenSpec](https://github.com/Fission-AI/OpenSpec) 
 
 ## Verify before sending a pull request
 
-Requires Node 24 and stable Rust.
+Requires Git, Node.js 24 with npm, a Rust toolchain and Python 3. CI uses the exact versions in [`scripts/toolchain.json`](scripts/toolchain.json); use them if a failure looks toolchain-related. No deployment credentials, secrets or network services are needed: a fresh fork builds and tests with only the commands below.
 
 ```bash
 npm ci --ignore-scripts
@@ -35,6 +35,12 @@ bash scripts/verify.sh
 ```
 
 `verify.sh` runs strict OpenSpec validation, installer tests, `cargo fmt --check`, the Rust and TypeScript test suites (including real Engine integration), the console build, and the MCP distribution smoke test. Packaging checks (`scripts/verify-packaging.sh`) need Docker, `musl-tools` and the Rust musl target; CI runs them on Linux.
+
+For a full local run with authentication, a scoped client and a script, follow [first run](docs/deploy/first-run.md).
+
+## Reporting bugs
+
+Use the issue templates. Issues are public: include component versions, platform, stable error codes and a synthetic reproduction, never tokens, env dumps, private hostnames, file contents or process output. Report vulnerabilities privately as described in [SECURITY.md](SECURITY.md), not in an issue.
 
 ## Keep private deployment details out
 
@@ -55,6 +61,7 @@ By contributing, you agree that your contributions are licensed under the [Apach
 欢迎提交问题、文档改进（尤其是部署文档的英文翻译）和代码。
 
 - 改变既有行为时，先在 `openspec/changes/` 下创建 OpenSpec 变更。
-- 提交前运行 `bash scripts/verify.sh`。
+- 提交前运行 `bash scripts/verify.sh`；不需要任何部署凭证。
+- Issue 是公开的：只提供版本、平台、稳定错误码和脱敏重现步骤；漏洞按 SECURITY.md 私下报告。
 - 示例里只能使用保留域名和文档 IP；真实主机、token 和部署记录只能放在被 Git 忽略的 `.reach/` 目录。
 - 贡献的内容按 Apache-2.0 授权。

@@ -8,7 +8,7 @@ stdio 的 Gateway URL 也必须使用 HTTPS；本地开发仅允许 `localhost`�
 
 ## Grok Bot（remote HTTP）
 
-先构建并更新 Gateway，再在仓库根目录运行 `node scripts/configure-grok-plugin.mjs .reach/deployment.json`，安装生成的 `.reach/grok-bot-plugin/` 私有目录，详见 [插件说明](../../grok-bot-plugin/README.md)。部署 JSON 的 `gatewayUrl` 必须是公网 HTTPS 根 URL，脚本生成完整 `/mcp` 地址；宿主只需通过私有提示框设置 **Controller token**。不用 Engine token，也不需要 `REACH_MCP_DEVICES` 或本地 Node 进程。通用客户端配置：
+先构建并更新 Gateway，再在仓库根目录运行 `node scripts/configure-grok-plugin.mjs .reach/deployment.json`，安装生成的 `.reach/grok-bot-plugin/` 私有目录，详见 [插件说明](../../grok-bot-plugin/README.md)。部署 JSON 的 `gatewayUrl` 必须是公网 HTTPS 根 URL，脚本生成完整 `/mcp` 地址；宿主只需通过私有提示框设置 **客户端 token**（推荐 scoped delegated）。不用 Engine token，也不需要 `REACH_MCP_DEVICES` 或本地 Node 进程。通用客户端配置：
 
 ```json
 {
@@ -16,13 +16,13 @@ stdio 的 Gateway URL 也必须使用 HTTPS；本地开发仅允许 `localhost`�
     "reach": {
       "type": "http",
       "url": "https://reach.example.com/mcp",
-      "headers": { "Authorization": "Bearer <controller-token>" }
+      "headers": { "Authorization": "Bearer <delegated-client-token>" }
     }
   }
 }
 ```
 
-真实凭证只存客户端私有设置。Controller token 可读写全部注册 Engine 工作区。插件 URL 使用完整字面值，只有 Authorization 头使用 token 变量，不依赖宿主支持 URL 插值。仓库内插件使用保留的示例地址，安装生成的私有副本。生成脚本不复制 token，也不覆盖已有副本；更换地址时在私有副本中修改。不要把真实 URL 或 token 提交到仓库。
+真实凭证只存客户端私有设置。先按 [客户端权限](client-access.md) 创建明确资源策略的 delegated token；Controller Owner token 可访问所有资源，日常客户端不应使用它。插件 URL 使用完整字面值，只有 Authorization 头使用 token 变量，不依赖宿主支持 URL 插值。仓库内插件使用保留的示例地址，安装生成的私有副本。生成脚本不复制 token，也不覆盖已有副本；更换地址时在私有副本中修改。不要把真实 URL 或 token 提交到仓库。
 
 HTTP 固定展示 `list_devices`、`get_versions`、`pick_device`、`list_workspaces`、`device_status`、`fs_read`、`fs_write`、`fs_edit`、`fs_list`、`fs_glob`、`fs_stat`、`fs_grep`、`process_run`、`process_status`、`process_logs`、`process_stop`、`process_list`、`session_close`。`list_workspaces`、文件、process 工具和 `session_close` 必须传 `deviceId`，它直接对应 Gateway 注册的 `engineId`。设备列表包含默认 Engine 和额外注册表，不读取客户端设备文件。`lastSeenAt` 是最后心跳时间，历史版本号不代表设备当前在线。
 
@@ -44,7 +44,7 @@ Gateway 声明 `capabilities.tools.listChanged: true`。客户端可使用同一
 
 64 KiB 按收到的 HTTP 请求体计算，Gateway 添加的内部会话、权限和截止时间字段不会减少这份额度。读取请求体、排队和正在执行的请求共同计入每会话请求上限；读取请求体期间不会触发空闲过期，但仍受响应预算约束。
 
-所有方法都检查 Controller token 或 OAuth access token（见下节）；无认证只允许回环监听。默认拒绝带有 `Origin` 的请求，无该头的客户端可正常连接。接入时必须在实际宿主核对该请求头；若发送，在 Gateway 配置 `REACH_MCP_ALLOWED_ORIGINS` 为观察到并批准的完整 Origin，多个值用逗号分隔；若不发送，保留空配置。不要使用通配符或关闭检查，核对时不要记录 Authorization。HTTP 参数见 [configuration.md](configuration.md)，完整验证见 [verification.md](verification.md)。以下方式 A–C 专用于 stdio。
+所有方法都检查 Owner、delegated 或 OAuth access token（见下节）；无认证只允许回环监听。默认拒绝带有 `Origin` 的请求，无该头的客户端可正常连接。接入时必须在实际宿主核对该请求头；若发送，在 Gateway 配置 `REACH_MCP_ALLOWED_ORIGINS` 为观察到并批准的完整 Origin，多个值用逗号分隔；若不发送，保留空配置。不要使用通配符或关闭检查，核对时不要记录 Authorization。HTTP 参数见 [configuration.md](configuration.md)，完整验证见 [verification.md](verification.md)。以下方式 A–C 专用于 stdio。
 
 ## ChatGPT 等 OAuth 客户端（remote HTTP）
 
@@ -60,10 +60,10 @@ ChatGPT 自定义连接器（Developer mode / Apps）不能填写静态 `Authori
 接入步骤：
 
 1. 在 ChatGPT 中新建连接器，MCP 服务器 URL 填 `https://reach.example.com/mcp`，认证方式选 **OAuth**，客户端 ID/密钥留空（由动态注册生成）。
-2. ChatGPT 打开 Gateway 的批准页，显示应用名称和回调域名。输入管理员密码和当前 TOTP 验证码（或一次性恢复码）后点 **Approve**；**Deny** 返回 `access_denied`。每个 TOTP 码只能用一次，刚登录过控制台时请等待下一个验证码。
+2. ChatGPT 打开 Gateway 的批准页，显示应用名称和回调域名。明确选择 Engine、workspace 和 read/write/execute；默认全部不选，未选择不会签发权限。输入管理员密码和当前 TOTP 验证码（或一次性恢复码）后点 **Approve**；**Deny** 返回 `access_denied`。每个 TOTP 码只能用一次，刚登录过控制台时请等待下一个验证码。
 3. 之后 ChatGPT 自动用 refresh token 续期。控制台“Clients → Authorized apps”列出已批准的应用，**Revoke** 立即删除其全部令牌（需近期重新验证密码）。
 
-批准页与控制台登录共享失败限流和审计；批准、撤销分别记录为 `oauth.authorize:<name>`、`oauth.revoke:<id>`。令牌仅以 SHA-256 摘要存于 `reach.db`。匿名注册按客户端地址限流（每小时 20 次）；未批准的注册闲置 1 小时后过期，最多保留 256 个，满额时拒绝新注册而不淘汰正在批准的记录。批准页的待处理请求由 Gateway 签名并随表单提交，不占服务端容量，10 分钟后失效。每个 MCP 会话绑定创建它的身份（Controller token 或某个 OAuth 客户端），换用其他凭证访问该会话返回 404；同一客户端刷新令牌后会话仍可继续使用。若 ChatGPT 访问 `/mcp` 时带有 `Origin`，仍需按下文配置 `REACH_MCP_ALLOWED_ORIGINS`。反向代理需将 `/.well-known/oauth-*` 与 `/oauth/*` 转发到 Gateway（仓库的 Caddy 配置已整站转发）。
+批准页与控制台登录共享失败限流和审计；批准、撤销分别记录为 `oauth.authorize:<name>`、`oauth.revoke:<id>`。令牌仅以 SHA-256 摘要存于 `reach.db`。匿名注册按客户端地址限流（每小时 20 次）；未批准的注册闲置 1 小时后过期，最多保留 256 个，满额时拒绝新注册而不淘汰正在批准的记录。批准页的待处理请求由 Gateway 签名并随表单提交，不占服务端容量，10 分钟后失效。每个 MCP 会话绑定创建它的身份（Owner、delegated 或某个 OAuth 客户端），换用其他凭证访问该会话返回 404；同一客户端刷新令牌后会话仍可继续使用。若 ChatGPT 访问 `/mcp` 时带有 `Origin`，仍需按下文配置 `REACH_MCP_ALLOWED_ORIGINS`。反向代理需将 `/.well-known/oauth-*` 与 `/oauth/*` 转发到 Gateway（仓库的 Caddy 配置已整站转发）。
 
 ## 方式 A：使用已安装的产物
 
@@ -90,7 +90,7 @@ MCP 初始化的 `instructions` 和 `list_devices` 工具的 description 也说�
 
 MCP 的解释器由 `command` 字段选择，不读取 `REACH_NODE_BIN` 来切换 runtime。该变量只用于 [run-node.sh launcher](node-runtime.md)，Rust Engine 不依赖它。
 
-Controller token 存放在独立设备 JSON 中，不需要嵌入上述共享启动配置。确认目标客户端进程能够读取该文件，并能执行指定 Node。纯云端客户端如果不能运行本地 stdio 子进程，无法直接使用此安装方式。
+客户端 token 存放在独立设备 JSON 中，不需要嵌入上述共享启动配置。确认目标客户端进程能够读取该文件，并能执行指定 Node。纯云端客户端如果不能运行本地 stdio 子进程，无法直接使用此安装方式。
 
 ## 方式 B：从源码运行
 
@@ -154,13 +154,13 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
     "id": "engine-a",
     "engineId": "engine-a",
     "gatewayUrl": "https://reach.example.com",
-    "controllerToken": "<当前Gateway的64字符Controller凭证>"
+    "controllerToken": "<仅授权engine-a的delegated-client-token>"
   },
   {
     "id": "engine-b",
     "engineId": "engine-b",
     "gatewayUrl": "https://reach.example.com",
-    "controllerToken": "<同一个Gateway的Controller凭证>"
+    "controllerToken": "<仅授权engine-b的delegated-client-token>"
   }
 ]
 ```
@@ -206,7 +206,7 @@ install -m 600 .reach/devices.json "$HOME/.config/reach/mcp-devices.json"
 }
 ```
 
-这是 `fs.write` 的参数，`mode: create` 要求目标文件尚不存在。`fs.edit` 使用 `oldString`、`newString` 字段。写入与编辑会先自动申请所需路径和方法的 grant，不需要用户手动调用授权 API。
+这是 `fs.write` 的参数，`mode: create` 要求目标文件尚不存在。`fs.edit` 使用 `oldString`、`newString` 字段。写入与编辑会先自动申请所需路径和方法的 grant，不需要手动调用授权 API；自动 grant 不代表人工批准，也无法扩大客户端策略。操作映射、错误形态、会话归属和原子写撤销边界见 [客户端权限](client-access.md)。
 
 若客户端不刷新动态列表，在 `env` 中加入 `"REACH_MCP_TOOL_MODE": "static"` 并重新启动 Connector。静态模式从初始化起展示文件和进程工具，每次文件、进程操作及关闭会话都需要 `deviceId`，例如：
 

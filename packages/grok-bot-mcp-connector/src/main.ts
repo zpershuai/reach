@@ -10,7 +10,7 @@ if (process.argv.includes("--version") || process.argv.includes("-V")) {
 
 try {
   startStdioServer(loadConfig());
-} catch (error) {
-  process.stderr.write(`reach-mcp: ${error instanceof Error ? error.message : String(error)}\n`);
+} catch {
+  process.stderr.write("reach-mcp: CONFIGURATION_INVALID; check private client settings\n");
   process.exitCode = 1;
 }

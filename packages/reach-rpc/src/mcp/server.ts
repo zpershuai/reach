@@ -19,6 +19,11 @@ interface SelectedDevice {
   uncertain?: boolean;
 }
 
+/** Catalog hint only; the Gateway still authenticates and authorizes every call. */
+function scopedCredential(device: DeviceConfig): boolean {
+  return /^reach_(?:ct|at)_/.test(device.controllerToken ?? "");
+}
+
 export class McpServer {
   private readonly protocol: McpProtocol;
   private readonly invoker: GrantAwareInvoker;
@@ -55,8 +60,17 @@ export class McpServer {
   public receive(value: unknown): Promise<void> { return this.protocol.receive(value); }
 
   protected listTools(): readonly Record<string, unknown>[] {
-    if (this.config.toolMode === "static") return [...deviceTools(), ...staticDeviceScopedTools()];
-    return this.selected && !this.selected.uncertain ? [...deviceTools(), ...deviceScopedTools()] : deviceTools();
+    const scoped = this.selected ? scopedCredential(this.selected.device) : this.config.devices.some(scopedCredential);
+    if (scoped && (!this.selected || this.selected.uncertain)) return deviceTools();
+    let tools = deviceTools();
+    if (this.config.toolMode === "static") tools = [...deviceTools(), ...staticDeviceScopedTools()];
+    else if (this.selected && !this.selected.uncertain) tools = [...deviceTools(), ...deviceScopedTools()];
+    if (!scoped) return tools;
+    const methods = new Set(this.selected?.session.methods ?? []);
+    return tools.filter(tool => {
+      const name = String(tool.name);
+      return !name.startsWith("fs.") && !name.startsWith("process.") || methods.has(name);
+    });
   }
 
   protected async callTool(params: unknown): Promise<Record<string, unknown>> {
@@ -65,7 +79,7 @@ export class McpServer {
     if (typeof call.name !== "string") return toolError("tools/call requires a tool name");
     switch (call.name) {
       case "list_devices":
-        return toolText({ devices: this.config.devices.map(({ id }) => ({ id })) });
+        return this.listDevices();
       case "get_versions":
         return this.getVersions(call.arguments);
       case "list_workspaces":
@@ -90,6 +104,19 @@ export class McpServer {
       default:
         return toolError(`Unknown tool: ${call.name}`);
     }
+  }
+
+  private async listDevices(): Promise<Record<string, unknown>> {
+    let incomplete = false;
+    const devices = await Promise.all(this.config.devices.map(async device => {
+      if (!scopedCredential(device)) return { id: device.id };
+      try { await this.gatewayFor(device).status(); return { id: device.id }; }
+      catch (error) {
+        if (!(error instanceof GatewayHttpError && [403, 404].includes(error.status))) incomplete = true;
+        return undefined;
+      }
+    }));
+    return toolText({ devices: devices.filter(device => device !== undefined), ...(incomplete ? { incomplete: true } : {}) });
   }
 
   private async pickDevice(argumentsValue: unknown): Promise<Record<string, unknown>> {
@@ -121,7 +148,7 @@ export class McpServer {
     const deviceId = (args as Record<string, unknown>).deviceId;
     if (deviceId !== undefined && (typeof deviceId !== "string" || !deviceId)) return toolError("deviceId must be a non-empty string");
     const device = deviceId === undefined ? this.selected?.device : this.config.devices.find((candidate) => candidate.id === deviceId);
-    if (deviceId !== undefined && !device) return toolError(`Unknown device: ${deviceId}`);
+    if (deviceId !== undefined && !device) return toolError(this.unknownDevice(deviceId as string));
     try {
       const status = device ? await this.gatewayFor(device).status() : undefined;
       return toolText({
@@ -151,7 +178,7 @@ export class McpServer {
       if (typeof argumentsValue !== "object" || argumentsValue === null || Array.isArray(argumentsValue)) return toolError("Tool arguments must be an object");
       const { deviceId } = argumentsValue as Record<string, unknown>;
       if (typeof deviceId !== "string" || !deviceId) return toolError("Static tool mode requires a string deviceId");
-      if (!this.config.devices.some(device => device.id === deviceId)) return toolError(`Unknown device: ${deviceId}`);
+      if (!this.config.devices.some(device => device.id === deviceId)) return toolError(this.unknownDevice(deviceId));
       if (this.selected?.device.id !== deviceId) return toolText({ closedDeviceId: deviceId, closed: false, owned: false });
     }
     return this.closeSession();
@@ -172,12 +199,13 @@ export class McpServer {
 
   private async selectDevice(deviceId: string, announce: boolean): Promise<SelectedDevice | Error> {
     const device = this.config.devices.find((candidate) => candidate.id === deviceId);
-    if (!device) return new Error(`Unknown device: ${deviceId}`);
+    if (!device) return new Error(this.unknownDevice(deviceId));
     try {
       const previous = this.selected;
       if (previous?.device.id === device.id && !previous.uncertain) {
         const status = await previous.gateway.status();
         if (status.status === "ready" && status.sessionId === previous.session.sessionId) {
+          if (scopedCredential(device) && JSON.stringify(previous.session.methods) !== JSON.stringify(status.methods)) this.pendingToolListChange = true;
           previous.session = status;
           return previous;
         }
@@ -189,12 +217,16 @@ export class McpServer {
       this.selected = { device, gateway, session: {}, uncertain: true };
       const session = await gateway.openAndWait();
       this.selected = { device, gateway, session };
-      if (announce) this.pendingToolListChange = true;
+      if (announce || scopedCredential(device)) this.pendingToolListChange = true;
       return this.selected;
     } catch (cause) {
       await this.releaseAfterFailure();
       return new Error(cause instanceof Error ? cause.message : "Unable to select device");
     }
+  }
+
+  private unknownDevice(deviceId: string): string {
+    return this.config.devices.some(scopedCredential) ? "unknown or unauthorized engine" : `Unknown device: ${deviceId}`;
   }
 
   protected async callDeviceTool(method: string, argumentsValue: unknown): Promise<Record<string, unknown>> {
@@ -243,7 +275,7 @@ export class McpServer {
   }
 
   private clearSelection(): void {
-    if (this.selected && this.config.toolMode === "dynamic") this.pendingToolListChange = true;
+    if (this.selected && (this.config.toolMode === "dynamic" || scopedCredential(this.selected.device))) this.pendingToolListChange = true;
     this.selected = undefined;
   }
 
@@ -251,7 +283,7 @@ export class McpServer {
   private async releaseAfterFailure(): Promise<boolean> {
     const selected = this.selected;
     if (!selected) return true;
-    if (!selected.uncertain && this.config.toolMode === "dynamic") this.pendingToolListChange = true;
+    if (!selected.uncertain && (this.config.toolMode === "dynamic" || scopedCredential(selected.device))) this.pendingToolListChange = true;
     selected.uncertain = true;
     try {
       await selected.gateway.close();
@@ -290,8 +322,8 @@ export function startStdioServer(config: ConnectorConfig): void {
     });
   });
   input.on("close", () => {
-    pending = pending.then(() => server.shutdown()).catch((cause) => {
-      process.stderr.write(`reach-mcp: ${cause instanceof Error ? cause.message : String(cause)}\n`);
+    pending = pending.then(() => server.shutdown()).catch(() => {
+      process.stderr.write("reach-mcp: SESSION_CLEANUP_FAILED; retry connection after Engine cleanup\n");
     });
   });
 }

@@ -11,6 +11,7 @@ import time
 import unittest
 from pathlib import Path
 from unittest.mock import patch
+from executable_test_fixture import platform_bytes
 
 spec = importlib.util.spec_from_file_location('apply_release', Path(__file__).with_name('apply-release.py'))
 helper = importlib.util.module_from_spec(spec)
@@ -26,10 +27,21 @@ if args[:2] == ['image','inspect']:
     if '--format' in args:
         fmt=args[args.index('--format')+1]
         if 'RepoDigests' in fmt: print(json.dumps([os.environ['EXPECTED_IMAGE']]))
+        elif 'json .' in fmt: print(json.dumps({'Os':os.environ.get('IMAGE_OS','linux'),'Architecture':os.environ.get('IMAGE_ARCH','amd64'),'Config':{'Labels':{'io.reach.component':os.environ.get('IMAGE_COMPONENT','engine' if args[2].startswith('reach-engine:') else 'gateway')}}}))
         elif 'Config.User' in fmt: print('1000')
+        elif '.Id' in fmt: print('sha256:'+'d'*64)
 if args[0] == 'run': print(os.environ.get('REPORTED_VERSION', '0.3.2'))
+if args[0] == 'inspect':
+    if '{{.Image}}' in args: print(os.environ.get('RUNNING_IMAGE','sha256:'+'d'*64))
+    else:
+        marker=Path(os.environ['DOCKER_LOG']+'.health-failed')
+        unhealthy=os.environ.get('HEALTH_FAIL_ONCE')=='1' and not marker.exists()
+        if unhealthy: marker.touch()
+        print(json.dumps({'Running':True,'Health':{'Status':'unhealthy' if unhealthy else os.environ.get('HEALTH_STATUS','healthy')}}))
+if args[0] == 'logs': print(json.dumps({'event':'heartbeat','ok':True}))
 if args[0] == 'compose':
-    if 'config' in args: print(json.dumps({'services':{'engine': {'image':'example/engine:installed','env_file':['engine.env'],'volumes':['./workspace:/workspace']}}}))
+    if 'ps' in args: print('a'*64)
+    elif 'config' in args: print(json.dumps({'services':{'engine': {'image':'example/engine:installed','env_file':['engine.env'],'volumes':['./workspace:/workspace']}}}))
     else:
         base = Path(args[args.index('-f')+1])
         assert 'engine.env' in base.read_text() or 'gateway.env' in base.read_text()
@@ -37,7 +49,8 @@ if args[0] == 'compose':
         if args.count('-f') == 2:
             override=Path(args[args.index('-f',args.index('-f')+1)+1])
             value=json.loads(override.read_text())
-            assert set(value['services']['engine']) == {'image'}
+            assert len(value['services']) == 1
+            assert set(next(iter(value['services'].values()))) == {'image'}
         if os.environ.get('UP_FAIL') == '1': sys.exit(1)
 '''
 
@@ -128,14 +141,14 @@ class HelperTests(unittest.TestCase):
         helper.apply_gateway(self.request,self.root,self.image_assets(),self.requests)
         calls=self.calls()
         self.assertIn(['pull','ghcr.io/example/reach-gateway:0.3.2'],calls)
-        self.assertIn(['tag','reach-gateway:current','reach-gateway:previous'],calls)
+        self.assertTrue(any(call[0]=='tag' and call[-1]=='reach-gateway:previous' for call in calls))
         self.assertTrue(any(c[0]=='compose' and c[-1]=='gateway' for c in calls))
         self.assert_preserved()
 
     def test_tarball_fallback_preserves_env_and_compose(self):
         archive=self.archive(); self.request['digest']=hashlib.sha256(archive).hexdigest()
         with patch.dict(os.environ, {'PULL_FAIL':'1'}):
-            assets=self.image_assets(); assets.assets['gateway-amd64.tgz']=archive
+            assets=self.image_assets(); assets.assets['gateway-amd64.tgz']=archive; assets.assets['SHA256SUMS'] += (self.request['digest']+'  gateway-amd64.tgz\n').encode()
             helper.apply_gateway(self.request,self.root,assets,self.requests)
         self.assertTrue(any(c[0]=='build' for c in self.calls()))
         self.assertEqual((self.root/'packages/reach-rpc/dist/gateway-main.js').read_bytes(),b'fixture')
@@ -156,10 +169,59 @@ class HelperTests(unittest.TestCase):
         with patch.dict(os.environ,{'UP_FAIL':'1'}), self.assertRaises(Exception): helper.apply_gateway(self.request,self.root,self.image_assets(),self.requests)
         self.assertIn(['tag','reach-gateway:previous','reach-gateway:current'],self.calls())
 
+    def test_failed_startup_health_restores_previous_image_and_rechecks_it(self):
+        with patch.dict(os.environ, {'HEALTH_FAIL_ONCE':'1'}), self.assertRaises(RuntimeError):
+            helper.apply_gateway(self.request,self.root,self.image_assets(),self.requests)
+        calls=self.calls()
+        self.assertIn(['tag','reach-gateway:previous','reach-gateway:current'],calls)
+        self.assertEqual(sum(call[0]=='compose' and 'up' in call for call in calls),2)
+        self.assertTrue(any(call[0]=='exec' for call in calls)); self.assert_preserved()
+
+    def test_failed_rollback_health_reports_recovery_without_claiming_success(self):
+        with patch.dict(os.environ, {'HEALTH_STATUS':'unhealthy'}), self.assertRaisesRegex(RuntimeError,'UPDATE_ROLLBACK_FAILED'):
+            helper.apply_gateway(self.request,self.root,self.image_assets(),self.requests)
+        self.assertIn(['tag','reach-gateway:previous','reach-gateway:current'],self.calls()); self.assert_preserved()
+
+    def test_tarball_failure_restores_old_payload_files_and_preserves_credentials(self):
+        target=self.root/'packages/reach-rpc/dist/gateway-main.js'; target.parent.mkdir(parents=True); target.write_bytes(b'old payload')
+        archive=self.archive(); self.request['digest']=hashlib.sha256(archive).hexdigest()
+        assets=self.image_assets(); assets.assets['gateway-amd64.tgz']=archive; assets.assets['SHA256SUMS']+=(self.request['digest']+'  gateway-amd64.tgz\n').encode()
+        with patch.dict(os.environ, {'PULL_FAIL':'1','HEALTH_FAIL_ONCE':'1'}), self.assertRaises(RuntimeError):
+            helper.apply_gateway(self.request,self.root,assets,self.requests)
+        self.assertEqual(target.read_bytes(),b'old payload'); self.assert_preserved()
+
+    def test_wrong_image_platform_or_component_is_rejected_before_execution(self):
+        for env in [{'IMAGE_ARCH':'arm64'}, {'IMAGE_OS':'windows'}, {'IMAGE_COMPONENT':'engine'}]:
+            self.log.write_text('')
+            with patch.dict(os.environ,env), self.assertRaises(ValueError):
+                helper.apply_gateway(self.request,self.root,self.image_assets(),self.requests)
+            self.assertFalse(any(call[0] in ['run','tag','compose'] for call in self.calls()))
+
+    def test_bad_engine_format_and_checksum_cannot_reach_docker_build(self):
+        request=dict(self.request,component='engine',version='0.2.2',asset='engine-linux-x64-musl')
+        for data in [b'#!/bin/sh\necho 0.2.2\n', platform_bytes('linux-x64')[:30], platform_bytes('linux-arm64')]:
+            self.log.write_text(''); request['digest']=hashlib.sha256(data).hexdigest()
+            with self.assertRaises(ValueError): helper.apply_engine(request,self.root,Downloads({request['asset']:data, 'SHA256SUMS':(request['digest']+'  '+request['asset']+'\n').encode()}),self.requests)
+            self.assertFalse(any(call[0] in ['build','run','tag'] for call in self.calls()))
+
+    def test_tampered_bytes_with_consistent_published_digest_are_refused(self):
+        # Published SHA256SUMS and the request agree, but the served bytes were altered in transit.
+        request=dict(self.request,component='engine',version='0.2.2',asset='engine-linux-x64-musl')
+        data=platform_bytes('linux-x64'); request['digest']=hashlib.sha256(data).hexdigest()
+        self.log.write_text('')
+        with self.assertRaisesRegex(ValueError,'digest'): helper.apply_engine(request,self.root,Downloads({request['asset']:data+b'\0', 'SHA256SUMS':(request['digest']+'  '+request['asset']+'\n').encode()}),self.requests)
+        self.assertFalse(any(call[0] in ['build','run','tag'] for call in self.calls()))
+        self.log.write_text('')
+        archive=self.archive(); self.request['digest']=hashlib.sha256(archive).hexdigest()
+        assets=self.image_assets(); assets.assets['gateway-amd64.tgz']=archive+b'\0'; assets.assets['SHA256SUMS']+=(self.request['digest']+'  gateway-amd64.tgz\n').encode()
+        with patch.dict(os.environ,{'PULL_FAIL':'1'}), self.assertRaisesRegex(ValueError,'digest'): helper.apply_gateway(self.request,self.root,assets,self.requests)
+        self.assertFalse(any(c[0] in ['build','tag','compose'] for c in self.calls()))
+        self.assert_preserved()
+
     def test_engine_keeps_env_and_workspace_mounts(self):
         request=dict(self.request,component='engine',version='0.2.2',asset='engine-linux-x64-musl')
-        data=b'engine fixture'; request['digest']=hashlib.sha256(data).hexdigest()
-        with patch.dict(os.environ,{'REPORTED_VERSION':'0.2.2'}): helper.apply_engine(request,self.root,Downloads({request['asset']:data}),self.requests)
+        data=platform_bytes('linux-x64'); request['digest']=hashlib.sha256(data).hexdigest()
+        with patch.dict(os.environ,{'REPORTED_VERSION':'0.2.2'}): helper.apply_engine(request,self.root,Downloads({request['asset']:data, 'SHA256SUMS':(request['digest']+'  '+request['asset']+'\n').encode()}),self.requests)
         self.assertEqual((self.root/'deploy/engine.env').read_text(),'engine credentials')
         self.assert_preserved()
         calls=self.calls()
@@ -210,11 +272,11 @@ class HelperTests(unittest.TestCase):
     def test_engine_prepares_but_does_not_recreate_without_idle_ack(self):
         self.ack_enabled=False
         request=dict(self.request,component='engine',version='0.2.2',asset='engine-linux-x64-musl')
-        data=b'engine fixture'; request['digest']=hashlib.sha256(data).hexdigest()
+        data=platform_bytes('linux-x64'); request['digest']=hashlib.sha256(data).hexdigest()
         original=helper.idle_admission
         def short_wait(request,directory): return original(request,directory,timeout=0.05)
         with patch.dict(os.environ,{'REPORTED_VERSION':'0.2.2'}), patch.object(helper,'idle_admission',short_wait), self.assertRaises(TimeoutError):
-            helper.apply_engine(request,self.root,Downloads({request['asset']:data}),self.requests)
+            helper.apply_engine(request,self.root,Downloads({request['asset']:data, 'SHA256SUMS':(request['digest']+'  '+request['asset']+'\n').encode()}),self.requests)
         self.assertTrue(any(c[0]=='build' for c in self.calls()))
         self.assertFalse(any(c[0]=='tag' or (c[0]=='compose' and 'up' in c) for c in self.calls()))
         self.assertFalse((self.requests/'apply.json').exists())

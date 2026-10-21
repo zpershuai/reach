@@ -6,6 +6,7 @@ import { consoleStore } from "./store";
 import type { SensitiveAction } from "./Devices";
 import type { Snapshot } from "./types";
 import { ClientAvatar, EngineStatus, Modal, formatAgo, modelText } from "./ui";
+import { AccessClients } from "./AccessClients";
 
 export function Kpis({ snapshot }: { snapshot: Snapshot }) {
   const { kpis } = snapshot;
@@ -195,6 +196,7 @@ export function ClientsView({
           They attribute activity; they do not prove identity or grant access.
         </div>
       </section>
+      <AccessClients engines={snapshot.engines} sensitive={sensitive} revision={snapshot.activity.find(row => row.action?.startsWith("client.") || row.action?.startsWith("oauth."))?.id ?? 0} />
       <AuthorizedApps
         sensitive={sensitive}
         revision={

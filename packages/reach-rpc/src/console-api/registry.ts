@@ -3,6 +3,7 @@ import type { Server } from "node:http";
 import type { EngineApi } from "../mcp/in-process.js";
 import type { ConsoleStore } from "./store.js";
 import { z } from "zod";
+import { ConfigurationError } from "../diagnostics.js";
 
 export const deviceKinds = ["mac-mini", "mac-studio", "macbook", "imac", "mac", "router", "nas", "raspberry-pi", "server", "unknown"] as const;
 export type DeviceKind = typeof deviceKinds[number];
@@ -69,7 +70,7 @@ export class EngineRegistry {
         lastSeenAt: row.last_seen_at as number | null, engineVersion: row.engine_version as string | null,
       };
       if (!controllerConfigured && registration.id !== "local-engine") {
-        throw new Error("Persisted Engines require Gateway authentication");
+        throw new ConfigurationError("Persisted Engines require Gateway authentication");
       }
       this.attach(registration);
     }

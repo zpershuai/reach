@@ -28,6 +28,23 @@ Gateway `0.4.0` 新增 MCP OAuth 授权，支持动态客户端注册、S256 PKC
 
 `reach-rpc/1.0` 和 MCP 的 `2025-03-26` 是协议版本，分别约束通信格式。组件升级不自动改变协议版本，也不要求两端组件发布号完全相同。Node runtime 的版本由 `scripts/node-runtime.json` 单独维护。
 
+## 兼容矩阵与升级顺序
+
+所有组件都使用 `reach-rpc/1.0` 线协议；新增字段只做可选扩展，旧组件忽略不理解的字段。Gateway 对 Engine 上报的其他协议版本立即关闭会话，`/session/status` 的 `closureReason` 为 `unsupported_protocol`，日志记录 `SESSION_PROTOCOL_UNSUPPORTED`，不会转发任何请求，也不会自动重试。
+
+| 组合 | 状态 | 限制与可见结果 |
+| --- | --- | --- |
+| Gateway 0.7.x + Engine 0.3.x | 支持（当前） | 动态工作区、generation 撤销、执行许可列表全部可用 |
+| Gateway 0.7.x + Engine 0.2.x | 支持，降级 | 文件读写正常；Engine 不上报 generation，只有移除工作区才撤销 grant；不支持工作区文件热重载 |
+| Gateway 0.5–0.6 + Engine 0.3.x | 兼容，不推荐 | 文件读写正常；原名更换根目录后旧写入/执行 grant 最长仍可使用 5 分钟。先升级 Gateway |
+| Gateway < 0.5 | 未测试，不支持 | 缺少 `list_workspaces` 及当前授权模型；先升级 Gateway |
+| Engine 不提供 `process.*`（非 Unix 构建） | 仅文件 | 进程工具返回 `PROCESS_UNSUPPORTED`，Gateway 不转发 |
+| Engine 未上报工作区名称 | 不支持 | stdio Connector 返回 `WORKSPACES_UNAVAILABLE`；升级 Engine |
+| stdio Connector 0.4.x + Gateway ≥ 0.5 | 支持 | Connector 的本地工具列表只是便利，最终权限由 Gateway 检查 |
+| 委派身份/scoped OAuth | 需要当前 Gateway 及 `REACH_DATA_DIR` | 旧 Gateway 不理解新数据库 schema，回滚须成对恢复旧快照，见[客户端权限](client-access.md#升级和回滚) |
+
+升级顺序：备份 Gateway 数据目录 → 升级 Gateway 并确认现有 Engine 仍能 ready → 逐台升级 Engine → 需要时更新 Connector。回滚按相反顺序进行；Engine 可以单独回退到 0.2.x，Gateway 回退需要对应的数据库快照。以上组合由 `mcp.test.ts` 的兼容矩阵测试和基于发布 tag 的跨版本夹具验证；未列出的组合视为未测试。
+
 ## 查看实际产物的版本
 
 以下命令只输出版本号，不启动服务，也不加载私有服务配置：
@@ -80,22 +97,26 @@ npm --prefix packages/grok-bot-mcp-connector version 0.4.0 --no-git-tag-version
 
 ## GitHub Release 发布
 
-提交组件版本及对应 lockfile 后，推送与 manifest 一致的 `engine-vX.Y.Z` 或 `gateway-vX.Y.Z` 标签。标签不匹配、验证失败或缺少必需资产时 workflow 失败；普通 push / pull_request 只验证，不发布 Release 或 GHCR 镜像。
+源码仓库与 Engine/Gateway 二进制分发仓库可以独立。公开二进制不等于完整源码已开源。正式候选必须从**已批准、可匿名读取的公共源码 revision** 构建，`release-manifest.json` 记录该完整 revision 和源码链接；私有历史与公共 revision 的对应只留在私有记录中。当前工作区新增的授权和发布门禁尚未形成新远端发行版，不应由旧版本号推断已有这些能力。
 
-| 组件 | Release 资产 |
+| 组件 | 必需 Release 资产 |
 | --- | --- |
-| Engine | `engine-linux-x64-musl`、`engine-darwin-arm64`、`engine-darwin-x64` |
-| Gateway | `gateway-amd64.tgz`、`gateway-image.txt`（GHCR 镜像 digest） |
-| 两者 | `SHA256SUMS`，覆盖该 Release 的文件资产 |
+| Engine | `engine-linux-x64-musl`、`engine-darwin-arm64`、`engine-darwin-x64`，每个二进制各有 `.NOTICES.txt` 和 `.licenses.tgz` |
+| Gateway | `gateway-amd64.tgz`；配置 GHCR 发布时额外提供 `gateway-image.txt`，内容为完整 image digest 引用 |
+| 两者 | `LICENSE`、`THIRD_PARTY_NOTICES.txt`、`third-party-licenses.tgz`、`release-manifest.json`、`SHA256SUMS` |
 
-Linux x64 Engine 是静态 musl 二进制，同一资产可用于 systemd Linux 和 x86_64 OpenWrt。macOS 使用原生 arm64 与 Intel runner，Intel runner 为 `macos-15-intel`。Gateway tarball 包含 `packages/reach-rpc/dist`、npm manifests、Compose/Dockerfile 和宿主机 helpers，不包含 systemd service/path 模板；首次安装 updater 需按 [运维步骤](operations.md#安装可选-github-release-updater) 从同一发布标签的源码取得模板并安装 helper。Gateway 镜像发布为 `ghcr.io/<owner>/reach-gateway:<X.Y.Z>`，并附组件标签别名。
+原 executable 资产名保持兼容。Engine 的平台声明绑定目标、编译器、组件版本和二进制摘要；公共声明包收集三个平台的声明。Linux x64 Engine 为静态 musl 二进制，用于 systemd Linux 和 x86_64 OpenWrt。macOS 分别使用 arm64 与 Intel runner。Gateway tar 包含构建输出、npm manifests、Compose/Dockerfile、宿主机 helpers 和许可证；镜像也包含同一声明。首次安装可选 updater 的 systemd 模板从对应公共源码取得，见 [运维](operations.md#安装可选-github-release-updater)。
 
-发布说明来自前一个同组件标签之后的提交；没有前一个标签时包含仓库历史。生成器过滤包含 `.reach/`、env 文件名和 SSH 目标的行，发布者仍应确保提交说明不含私有库存或凭证。下载文件后，在资产目录执行 `sha256sum -c SHA256SUMS`（macOS 可用 `shasum -a 256 -c SHA256SUMS`）。
+发布 workflow 把只读 build/verify/candidate 与受 `public-release` environment 保护的 publish 分开。PR/fork 不接收发布凭据；手动 dispatch 只验证，不发布。正式发布要求配置的源码仓库、默认分支上的合法组件 tag、Linux/macOS 验证、Linux packaging、全部平台构建、资产检查与源码/资产/镜像层扫描成功，并批准**这一批确切字节**的 candidate 摘要。跨仓库 token 和可选 GHCR token 仅给 publish。目标仓库、environment protection 与 token 权限需在实际部署环境只读核验，文件中的 workflow 不证明它们已配置。
+
+发布说明采用审阅过的固定内容和公共源码链接，不复制私有提交说明。已有 tag 或 Release 会阻断发布；失败不覆盖或删除已有版本。下载回验必须覆盖全部资产，验证摘要、版本、平台、声明和可选 image digest；任一超时仍为 incomplete。
+
+构建、白名单、权限配置及回验命令见 [发布流程](../dev/releases.md)。本流程使用批准 HTTPS 渠道上的 SHA-256，并未实现发行者签名、SBOM 或来源证明。原有安装与自动更新的信任配置保持独立，不会因文档修改切换仓库或服务。
 
 ## 可选自动更新
 
 自动更新默认关闭；仅 `REACH_UPDATE_ENABLED=1` 或 `true` 启用，并需设置 `REACH_UPDATE_REPO=example/reach`。配置详见 [配置](configuration.md)，宿主机 helper 安装与回滚见 [运维](operations.md)。检查使用分页 GitHub Releases，按组件选择最高稳定 `X.Y.Z`，忽略 draft、prerelease、相等或更旧版本。默认每小时检查，失败时只对更新器退避，不改变心跳或 HTTP 服务。
 
-Engine 在独立后台线程下载和校验 SHA-256、`--version`，只在没有连接中、活动或 draining 会话时替换二进制，保存同目录的 `engine.prev`，退出 0 交给 LaunchAgent/systemd/procd 重新启动。存在的 `~/.reach/versions.json` 同步记录 `engineVersion`。Compose Engine 与 Gateway 则在空闲时写入共享目录的 `request.json`，由宿主机 helper 先下载、校验并准备镜像，再通过共享目录握手等待空闲、暂缓新会话并重建容器；Gateway 要求所有注册 Engine 的会话均为 `none`。未安装 helper 时只保留更新请求与日志，当前进程继续运行。
+Engine 在独立后台线程按批准 HTTPS 来源下载，校验唯一 SHA-256、ELF/Mach-O 平台/架构后才探测 `--version`，只在没有连接中、活动或 draining 会话时替换，保存 `engine.prev` 与私有健康 intent。新版安装器的启动 guard 在 supervisor 重启后等待新进程首次成功心跳；退出或 30 秒超时自动恢复旧 binary 和版本清单。旧启动脚本未安装 guard 时不应用 host 更新，需先在维护环境升级安装器。存在的 `~/.reach/versions.json` 同步记录 `engineVersion`。Compose Engine 与 Gateway 则在空闲时写入共享目录的 `request.json`，由宿主机 helper 先下载、校验并准备镜像，再通过共享目录握手等待空闲、暂缓新会话并重建容器；Gateway 要求所有注册 Engine 的会话均为 `none`。未安装 helper 时只保留更新请求与日志，当前进程继续运行。
 
 自动更新不替换独立 Node runtime，也不更新 MCP Connector。更新失败保留当前运行产物；成功更新会创建全新进程，内存会话、grant 和去重状态不会恢复，客户端需重新打开会话。

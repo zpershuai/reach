@@ -4,6 +4,8 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
+python3 scripts/verify-toolchain.py
+
 if [[ -x "$repo_root/node_modules/.bin/openspec" ]]; then
   openspec_cli="$repo_root/node_modules/.bin/openspec"
 else
@@ -16,15 +18,14 @@ required_openspec="$(node -p 'require("./package.json").devDependencies["@fissio
 }
 "$openspec_cli" validate --all --strict --no-interactive
 
-python3 scripts/test-node-runtime.py
-python3 scripts/test-node-launcher.py
-python3 scripts/test-engine-linux-installer.py
-python3 scripts/test-install-engine.py
-python3 scripts/test-release-metadata.py
-python3 scripts/test-release-helpers.py
-node --test scripts/test-grok-plugin.mjs
+python3 scripts/install-publication-tools.py
+for suite in toolchain public-source publication release-trust node-runtime node-launcher engine-linux-installer engine-macos-installer engine-openwrt-installer install-engine release-metadata package-notices release-assets release-plan release-download release-helpers; do
+  python3 "scripts/test-$suite.py"
+done
+node --test scripts/test-grok-plugin.mjs scripts/test-engine-supervisor.mjs scripts/test-release-workflow.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked
+cargo build --locked -p reach-rpc --bin engine
 npm --prefix packages/gateway-console ci --ignore-scripts
 npm --prefix packages/gateway-console test
 npm --prefix packages/gateway-console run build

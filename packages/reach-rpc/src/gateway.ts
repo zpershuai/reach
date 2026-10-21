@@ -1,4 +1,4 @@
-import { PayloadTooLargeError, readJsonBody, sendJson } from "./console-api/http.js";
+import { InvalidJsonError, PayloadTooLargeError, readJsonBody, sendJson } from "./console-api/http.js";
 export * from "./gateway-policy.js";
 import { GatewayUpdater, updateAdmissionPaused, type UpdateConfig } from "./gateway-update.js";
 import { DEFAULT_HEARTBEAT_INTERVAL_SECONDS, SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, SESSION_TOKEN_TTL_MS, MAX_HTTP_BODY_BYTES, MAX_WEBSOCKET_TEXT_BYTES, SESSION_LEASE_MS, SESSION_IDLE_MS, SESSION_RPC_TIMEOUT_MS, SESSION_CONNECTING_MS, SESSION_ENDPOINT_PATH } from "./gateway-policy.js";
@@ -24,7 +24,11 @@ import { ActivityLog } from "./console-api/activity.js";
 import { ConsoleAuth } from "./console-api/auth.js";
 import { ConsoleServer } from "./console-api/server.js";
 import { OAuthServer } from "./console-api/oauth.js";
+import { ClientAccess } from "./console-api/client-access.js";
+import { ClientAuthorization } from "./client-authorization.js";
+import { GatewayHttpError } from "./mcp/gateway.js";
 import { securityHeaders, serveConsole } from "./console-api/static.js";
+import { ConfigurationError } from "./diagnostics.js";
 import { fileURLToPath } from "node:url";
 import {
   CLOSURE_AGENT_REQUESTED,
@@ -32,6 +36,8 @@ import {
   CLOSURE_SESSION_COMPLETE,
   MESSAGE_CLOSED,
   MESSAGE_READY,
+  PROTOCOL,
+  VERSION,
   parseSessionClosed,
   parseSessionReady,
   sessionReadySchema,
@@ -108,16 +114,16 @@ export interface GatewayServer extends Server { readonly registry: EngineRegistr
 
 export function createGateway(options: GatewayOptions = {}): GatewayServer {
   const authentication = options.authentication;
-  if (options.engines !== undefined && !authentication) throw new Error("Multiple Engines require Gateway authentication");
+  if (options.engines !== undefined && !authentication) throw new ConfigurationError("Multiple Engines require Gateway authentication");
   const engines = authentication ? [authentication, ...(options.engines ?? [])] : [];
   if (new Set(engines.map((engine) => engine.engineId)).size !== engines.length
     || new Set(engines.map((engine) => engine.engineToken)).size !== engines.length) {
-    throw new Error("Engine ids and Engine tokens must be unique");
+    throw new ConfigurationError("Engine ids and Engine tokens must be unique");
   }
   for (const engine of engines) {
     if (authentication!.controllerToken.length < 32 || engine.engineToken.length < 32
       || authentication!.controllerToken === engine.engineToken || !engine.engineId.trim()) {
-      throw new Error("Gateway authentication requires distinct tokens of at least 32 characters and an engine id");
+      throw new ConfigurationError("Gateway authentication requires distinct tokens of at least 32 characters and an engine id");
     }
   }
   const defaultId = authentication?.engineId ?? "local-engine";
@@ -127,7 +133,8 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     try {
       store = new ConsoleStore(options.console.dataDir);
     } catch (error) {
-      throw new Error(`Cannot open console data directory ${options.console.dataDir}`, { cause: error });
+      if (error instanceof ConfigurationError) throw error;
+      throw new ConfigurationError("Cannot open the console data directory (REACH_DATA_DIR)", { cause: error });
     }
   }
   const registry = new EngineRegistry((registration, verifyEngineToken) => createEngineGateway({
@@ -156,14 +163,25 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     return setting ? Number(setting.value) : options.console!.retentionDays;
   }, options.now, options.logger) : undefined;
   const auth = store && options.console && events ? new ConsoleAuth(store, options.console, events, options.now, options.logger) : undefined;
+  const access = store ? new ClientAccess(store, options.now, options.logger) : undefined;
   const gateway = Object.assign(createServer(), { registry, events, audit });
-  const oauth = store && options.console && auth ? new OAuthServer(store, options.console, auth, options.now) : undefined;
-  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events, oauth: oauth ?? options.mcp?.oauth }, () => {
+  const oauth = store && options.console && auth ? new OAuthServer(store, options.console, auth, options.now, access,
+    () => [...registry.apis].map(([engineId, api]) => ({ engineId, workspaces: api.status().workspaces }))) : undefined;
+  const isLoopback = (): boolean => {
     const address = gateway.address();
     return typeof address === "object" && address !== null && ["127.0.0.1", "::1"].includes(address.address);
+  };
+  const authorization = new ClientAuthorization(access, authentication?.controllerToken, token => (oauth ?? options.mcp?.oauth)?.verify(token), events, options.logger);
+  const mcp = createMcpHttpHandler(registry.apis, authentication?.controllerToken, { ...options.mcp, events, oauth: oauth ?? options.mcp?.oauth, authorization }, isLoopback);
+  const unsubscribeAccess = access?.subscribe(change => {
+    authorization.invalidate(change.principalId, registry.apis);
+    void mcp.retirePrincipal(change.principalId).catch(() => {
+      try { (options.logger ?? console.error)("Client transport cleanup requires retry"); } catch { /* Keep data plane authority invalidated. */ }
+    });
+    mcp.notifyToolsChanged();
   });
   const consoleServer = store && options.console && events && audit && activity && auth
-    ? new ConsoleServer(store, options.console, registry, events, audit, activity, auth, mcp, oauth!, options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS, Boolean(options.update), options.now)
+    ? new ConsoleServer(store, options.console, registry, events, audit, activity, auth, mcp, oauth!, access!, options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS, Boolean(options.update), options.now)
     : undefined;
   const selectGateway = (request: IncomingMessage, url: URL): Server | undefined => {
     const selected = url.searchParams.get("engineId");
@@ -175,6 +193,7 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     return gateways.get(selected ?? defaultId)?.server;
   };
   gateway.on("request", (request: IncomingMessage, response: ServerResponse) => {
+    const receivedAt = (options.now ?? Date.now)();
     const rawPath = (request.url ?? "").split("?")[0];
     if (options.console && (rawPath === "/console" || rawPath.startsWith("/console/"))) {
       if (rawPath === "/console") { securityHeaders(response); response.writeHead(302, { location: "/console/" }); response.end(); return; }
@@ -203,6 +222,14 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     });
     if (url.pathname === "/mcp") {
       void mcp.handle(request, response);
+      return;
+    }
+    if (request.method === "GET" && url.pathname === "/healthz") {
+      sendJson(response, 200, { status: "ok", protocol: "reach-rpc/1.0", gatewayVersion: GATEWAY_VERSION });
+      return;
+    }
+    if (["/session-wanted", "/session/open", "/session/status", "/session/renew", "/session/close", "/session/rpc", "/grants"].includes(url.pathname)) {
+      void routeAuthorizedControl(request, response, url, authorization, registry.apis, defaultId, isLoopback(), receivedAt);
       return;
     }
     const target = selectGateway(request, url);
@@ -238,6 +265,9 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     for (const target of gateways.values()) target.server.emit("close");
     audit?.close();
     activity?.close();
+    unsubscribeAccess?.();
+    authorization.close();
+    access?.close();
     store?.close();
   });
   if (options.update) {
@@ -248,6 +278,63 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     gateway.once("close", () => updater.stop());
   }
   return gateway;
+}
+
+async function routeAuthorizedControl(request: IncomingMessage, response: ServerResponse, url: URL, authorization: ClientAuthorization, engines: ReadonlyMap<string, EngineApi>, defaultId: string, loopback: boolean, receivedAt: number): Promise<void> {
+  try {
+    const principal = authorization.authenticate(request.headers.authorization, loopback);
+    if (!principal) { sendJson(response, 401, { error: "unauthorized" }); return; }
+    const api = authorization.engines(engines, principal.id).get(url.searchParams.get("engineId") ?? defaultId);
+    if (!api) { sendJson(response, 404, { error: "unknown or unauthorized engine" }); return; }
+    await authorization.run(principal, () => handleAuthorizedControl(request, response, url.pathname, api, receivedAt));
+  } catch (error) {
+    if (response.headersSent) { response.destroy(); return; }
+    sendJson(response, error instanceof GatewayHttpError ? error.status : 503, { error: error instanceof GatewayHttpError ? error.message : "authorization unavailable" });
+  }
+}
+
+async function handleAuthorizedControl(request: IncomingMessage, response: ServerResponse, path: string, api: EngineApi, receivedAt: number): Promise<void> {
+  try {
+    if (path === "/session/status" && ["GET", "POST"].includes(request.method ?? "")) { sendJson(response, 200, api.status()); return; }
+    if (request.method !== "POST") { sendJson(response, 404, { error: "not found" }); return; }
+    const caller = controllerCaller(request.headers["x-reach-client"]);
+    let result: EngineResult;
+    if (path === "/session/open" || path === "/session-wanted") {
+      const body = await readOptionalJsonBody(request);
+      if (path === "/session-wanted") {
+        const wanted = sessionWantedRequestSchema.parse(body).wanted;
+        const id = api.status().sessionId ?? randomUUID();
+        result = wanted ? api.open(id, caller) : api.close(id);
+        if (wanted && result.statusCode === 200) result = { ...result, payload: { wanted: true, status: "wanted" } };
+      } else {
+        const intent = sessionOpenRequestSchema.parse(body);
+        result = api.open(intent.sessionId ?? api.status().sessionId ?? randomUUID(), caller);
+      }
+    } else if (path === "/session/close" || path === "/session/renew") {
+      const body = sessionControlSchema.parse(await readOptionalJsonBody(request));
+      const id = body.sessionId ?? api.status().sessionId ?? "";
+      result = path === "/session/close" ? api.close(id) : api.renew(id);
+    } else if (path === "/grants") {
+      const body = await readJsonBody(request);
+      if (body && typeof body === "object" && "kind" in body) {
+        const scope = processGrantSchema.parse(body);
+        result = api.processGrant ? api.processGrant(scope.sessionId, scope) : { statusCode: 400, payload: { error: "PROCESS_UNSUPPORTED" } };
+      } else {
+        const grant = grantRequestSchema.parse(body);
+        result = api.grant(api.status().sessionId ?? "", grant.workspace, grant.path, grant.methods);
+      }
+    } else if (path === "/session/rpc") {
+      const body = await readJsonBody(request);
+      if (!body || typeof body !== "object" || Array.isArray(body)) { sendJson(response, 400, { error: "invalid rpc payload" }); return; }
+      result = await api.rpc(body as Record<string, unknown>, caller, undefined, receivedAt);
+    } else { sendJson(response, 404, { error: "not found" }); return; }
+    sendJson(response, result.statusCode, result.payload);
+  } catch (error) {
+    if (error instanceof GatewayHttpError) sendJson(response, error.status, { error: error.message });
+    else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "invalid control request" });
+    else if (error instanceof z.ZodError || error instanceof InvalidJsonError) sendJson(response, 400, { error: "invalid control request" });
+    else sendJson(response, 503, { error: "control request unavailable" });
+  }
 }
 
 /** One isolated state machine per Engine, owned by the listening Gateway. */
@@ -264,7 +351,7 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
   const authentication = options.authentication;
   const heartbeatIntervalSeconds = options.heartbeatIntervalSeconds ?? DEFAULT_HEARTBEAT_INTERVAL_SECONDS;
   if (!Number.isInteger(heartbeatIntervalSeconds) || heartbeatIntervalSeconds <= 0) {
-    throw new Error("heartbeat interval must be a positive integer");
+    throw new ConfigurationError("heartbeat interval must be a positive integer");
   }
   const logger = options.logger ?? console.log;
   const now = options.now ?? Date.now;
@@ -284,27 +371,8 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
   const forwarder = new SessionRpcForwarder(state, grants, now, sessionRpcTimeoutMs, options.events, engineId);
   const sessions = new WebSocketServer({ noServer: true, maxPayload: MAX_WEBSOCKET_TEXT_BYTES });
 
-  const validateControlBinding = async (request: IncomingMessage, response: ServerResponse): Promise<boolean> => {
-    try {
-      const control = sessionControlSchema.parse(await readOptionalJsonBody(request));
-      const currentId = state.liveSession?.sessionId ?? state.pendingSession?.sessionId ?? state.wantedSessionId;
-      if (control.sessionId && control.sessionId !== currentId) {
-        sendJson(response, 409, { error: "session binding mismatch" });
-        return false;
-      }
-      return true;
-    } catch (error) {
-      sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session control payload" });
-      return false;
-    }
-  };
-
+  // The main router owns /healthz and every Controller path; only Engine heartbeats reach this server.
   const gateway = createServer(async (request, response) => {
-    const receivedAt = now();
-    if (request.method === "GET" && request.url === "/healthz") {
-      sendJson(response, 200, { status: "ok", protocol: "reach-rpc/1.0", gatewayVersion: GATEWAY_VERSION });
-      return;
-    }
     if (authentication) {
       const provided = Buffer.from(bearerToken(request));
       const required = Buffer.from(authentication.controllerToken);
@@ -315,133 +383,45 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
         return;
       }
     }
-    if (request.method !== "POST" && request.url !== "/session/status") {
+    if (request.method !== "POST" || request.url !== "/heartbeat") {
       sendJson(response, 404, { error: "not found" });
       return;
     }
 
-    if (request.url === "/heartbeat") {
-      try {
-        const heartbeat = heartbeatRequestSchema.parse(await readJsonBody(request));
-        if (authentication && heartbeat.device.id !== authentication.engineId) {
-          sendJson(response, 403, { error: "engine identity mismatch" });
-          return;
-        }
-        state.engineVersion = heartbeat.device.engineVersion;
-        state.lastSeenAt = isoDate(now());
-        onHeartbeat?.(heartbeat.device.engineVersion, !state.sessionWanted || state.liveSession ? heartbeatIntervalSeconds : SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, heartbeat.device.hardware);
-      } catch (error) {
-        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
+    try {
+      const heartbeat = heartbeatRequestSchema.parse(await readJsonBody(request));
+      if (authentication && heartbeat.device.id !== authentication.engineId) {
+        sendJson(response, 403, { error: "engine identity mismatch" });
         return;
       }
-
-      if (!state.sessionWanted || state.liveSession) {
-        sendJson(response, 200, { intervalSeconds: heartbeatIntervalSeconds });
-        return;
-      }
-
-      if (state.pendingSession && state.pendingSession.expiresAt <= now()) state.pendingSession = undefined;
-      state.pendingSession ??= {
-        token: randomUUID(),
-        expiresAt: now() + SESSION_TOKEN_TTL_MS,
-        sessionId: state.wantedSessionId ?? randomUUID(),
-        leaseExpiresAt: now() + sessionLeaseMs,
-      };
-      state.notify();
-      sendJson(response, 200, {
-        intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
-        endpoint: sessionEndpoint,
-        token: state.pendingSession.token,
-        sessionId: state.pendingSession.sessionId,
-        leaseExpiresAt: isoDate(state.pendingSession.leaseExpiresAt),
-      });
+      state.engineVersion = heartbeat.device.engineVersion;
+      state.lastSeenAt = isoDate(now());
+      onHeartbeat?.(heartbeat.device.engineVersion, !state.sessionWanted || state.liveSession ? heartbeatIntervalSeconds : SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS, heartbeat.device.hardware);
+    } catch (error) {
+      sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid heartbeat payload" });
       return;
     }
 
-    if (request.url === "/session-wanted") {
-      let wanted: boolean;
-      try {
-        wanted = sessionWantedRequestSchema.parse(await readJsonBody(request)).wanted;
-      } catch (error) {
-        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-wanted payload" });
-        return;
-      }
-      const result = wanted ? openSession(undefined, controllerCaller(request.headers["x-reach-client"])) : state.requestClose();
-      sendJson(response, result.statusCode, result.payload);
+    if (!state.sessionWanted || state.liveSession) {
+      sendJson(response, 200, { intervalSeconds: heartbeatIntervalSeconds });
       return;
     }
 
-    if (request.url === "/session/open") {
-      let intent: z.infer<typeof sessionOpenRequestSchema>;
-      try {
-        intent = sessionOpenRequestSchema.parse(await readOptionalJsonBody(request));
-      } catch (error) {
-        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid session-open payload" });
-        return;
-      }
-      const result = openSession(intent.sessionId, controllerCaller(request.headers["x-reach-client"]));
-      sendJson(response, result.statusCode, { ...result.payload, ...(result.statusCode === 200 ? { sessionId: state.wantedSessionId } : {}) });
-      return;
-    }
-
-    if (request.url === "/session/renew") {
-      if (!await validateControlBinding(request, response)) return;
-      const result = state.renewSession();
-      sendJson(response, result.statusCode, result.payload);
-      return;
-    }
-
-    if (request.url === "/session/status") {
-      sendJson(response, 200, state.sessionStatus());
-      return;
-    }
-
-    if (request.url === "/session/close") {
-      if (!await validateControlBinding(request, response)) return;
-      const result = state.requestClose();
-      sendJson(response, result.statusCode, result.payload);
-      return;
-    }
-
-    if (request.url === "/grants") {
-      let body: unknown;
-      try { body = await readJsonBody(request); } catch (error) { sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid grant payload" }); return; }
-      if (typeof body === "object" && body !== null && "kind" in body) {
-        const parsed = processGrantSchema.safeParse(body);
-        if (!parsed.success || parsed.data.sessionId !== state.liveSession?.sessionId || !state.liveSession?.ready || state.liveSession.closed) { sendJson(response, 400, { error: "invalid process grant scope" }); return; }
-        try { sendJson(response, 200, grants.issueProcess(parsed.data)); }
-        catch { sendJson(response, 400, { error: "invalid process grant payload" }); }
-        return;
-      }
-      let grantRequest: z.infer<typeof grantRequestSchema>;
-      try {
-        grantRequest = grantRequestSchema.parse(body);
-      } catch (error) {
-        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid grant payload" });
-        return;
-      }
-
-      const normalizedPath = normalizeWorkspacePath(grantRequest.path);
-      if (!normalizedPath) {
-        sendJson(response, 400, { error: "invalid grant payload" });
-        return;
-      }
-
-      sendJson(response, 200, grants.issue(grantRequest.workspace, normalizedPath, grantRequest.methods));
-      return;
-    }
-
-    if (request.url === "/session/rpc") {
-      try {
-        const result = await forwarder.executeRpc(await readJsonBody(request), receivedAt, controllerCaller(request.headers["x-reach-client"]));
-        sendJson(response, result.statusCode, result.payload);
-      } catch (error) {
-        sendJson(response, error instanceof PayloadTooLargeError ? 413 : 400, { error: "invalid rpc payload" });
-      }
-      return;
-    }
-
-    sendJson(response, 404, { error: "not found" });
+    if (state.pendingSession && state.pendingSession.expiresAt <= now()) state.pendingSession = undefined;
+    state.pendingSession ??= {
+      token: randomUUID(),
+      expiresAt: now() + SESSION_TOKEN_TTL_MS,
+      sessionId: state.wantedSessionId ?? randomUUID(),
+      leaseExpiresAt: now() + sessionLeaseMs,
+    };
+    state.notify();
+    sendJson(response, 200, {
+      intervalSeconds: SESSION_WANTED_HEARTBEAT_INTERVAL_SECONDS,
+      endpoint: sessionEndpoint,
+      token: state.pendingSession.token,
+      sessionId: state.pendingSession.sessionId,
+      leaseExpiresAt: isoDate(state.pendingSession.leaseExpiresAt),
+    });
   });
 
   gateway.on("upgrade", (request, socket, head) => {
@@ -522,7 +502,7 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
     }, sessionConnectingMs);
 
     webSocket.on("error", (error) => {
-      logger(`Reach session socket error: ${error instanceof Error ? error.message : String(error)}`);
+      logger("SESSION_SOCKET_ERROR: session transport failed");
     });
 
     webSocket.on("message", (data, isBinary) => {
@@ -542,6 +522,19 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
         value = JSON.parse(text.toString()) as unknown;
       } catch {
         webSocket.send(JSON.stringify({ type: "error", error: { code: "INVALID_PARAMS" } }));
+        return;
+      }
+
+      const declared = typeof value === "object" && value !== null ? value as Record<string, unknown> : undefined;
+      if (declared?.type === MESSAGE_READY && typeof declared.protocol === "string" && typeof declared.version === "string"
+        && (declared.protocol !== PROTOCOL || declared.version !== VERSION)) {
+        // Fail fast with a stable reason instead of waiting for the connecting timeout.
+        logger("SESSION_PROTOCOL_UNSUPPORTED: Engine protocol version is not supported by this Gateway");
+        // Only the socket that owns the live session may end it; a stale socket just closes itself.
+        if (state.liveSession?.socket === webSocket) {
+          state.lastClosureReason = "unsupported_protocol";
+          state.closeLiveSession(1008, "unsupported protocol");
+        } else webSocket.close(1008, "unsupported protocol");
         return;
       }
 
@@ -700,19 +693,21 @@ function createEngineGateway(options: EngineGatewayOptions, verifyEngineToken: (
     },
     renew: (sessionId) => binding(sessionId) ? state.renewSession() : mismatch(),
     close: (sessionId) => binding(sessionId) ? state.requestClose() : mismatch(),
-    grant: (sessionId, workspace, path, method) => {
-      if (!binding(sessionId)) return mismatch();
-      const parsed = grantRequestSchema.safeParse({ workspace, path, methods: [method] });
+    grant: (sessionId, workspace, path, method, authority) => {
+      if (sessionId && !binding(sessionId)) return mismatch();
+      const methods = typeof method === "string" ? [method] : method;
+      const parsed = grantRequestSchema.safeParse({ workspace, path, methods });
       const normalized = normalizeWorkspacePath(path);
       if (!parsed.success || !normalized) return { statusCode: 400, payload: { error: "invalid grant payload" } };
-      return { statusCode: 200, payload: grants.issue(workspace, normalized, [method]) };
+      return { statusCode: 200, payload: grants.issue(workspace, normalized, parsed.data.methods, authority) };
     },
-    processGrant: (sessionId, scope) => {
+    processGrant: (sessionId, scope, authority) => {
       if (!binding(sessionId) || !state.liveSession?.ready || state.liveSession.closed) return mismatch();
-      try { return { statusCode: 200, payload: grants.issueProcess({ ...scope, sessionId }) }; }
+      try { return { statusCode: 200, payload: grants.issueProcess({ ...scope, sessionId }, authority) }; }
       catch { return { statusCode: 400, payload: { error: "invalid process grant payload" } }; }
     },
-    rpc: (body, caller) => forwarder.executeRpc(body, now(), caller),
+    rpc: (body, caller, authority, receivedAt) => forwarder.executeRpc(body, receivedAt ?? now(), caller, authority),
+    revokePrincipal: principalId => grants.revokePrincipal(principalId),
   };
   const retire = (): void => {
     state.requestClose();

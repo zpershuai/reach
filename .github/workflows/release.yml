@@ -3,37 +3,44 @@ name: Release Reach component
 on:
   push:
     tags: ['engine-v*', 'gateway-v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Component tag to verify without publishing
+        required: true
+        type: string
 
 permissions:
   contents: read
 
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   version:
-    runs-on: ubuntu-latest
+    if: github.repository == vars.REACH_SOURCE_REPOSITORY
+    runs-on: ubuntu-24.04
     outputs:
       component: ${{ steps.tag.outputs.component }}
       version: ${{ steps.tag.outputs.version }}
+      tag: ${{ steps.tag.outputs.tag }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
       - id: tag
         env:
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: python3 scripts/release-metadata.py tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python3 scripts/release-metadata.py tag "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          echo "tag=$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+          git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"
 
   verify:
     needs: version
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
-        with:
-          components: rustfmt
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 24
-      - run: npm ci --ignore-scripts
-      - run: npm --prefix packages/reach-rpc ci --ignore-scripts
-      - run: bash scripts/verify.sh
+    uses: ./.github/workflows/verify.yml
 
   engine:
     needs: [version, verify]
@@ -42,7 +49,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: ubuntu-latest
+          - os: ubuntu-24.04
             asset: engine-linux-x64-musl
           - os: macos-14
             asset: engine-darwin-arm64
@@ -50,88 +57,184 @@ jobs:
             asset: engine-darwin-x64
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14.5'
+      - run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
       - if: runner.os == 'Linux'
         run: |
           rustup target add x86_64-unknown-linux-musl
           sudo apt-get update && sudo apt-get install -y musl-tools
       - run: bash scripts/package-engine.sh .reach/release
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ${{ matrix.asset }}
-          path: .reach/release/${{ matrix.asset }}
+          path: |
+            .reach/release/${{ matrix.asset }}
+            .reach/release/${{ matrix.asset }}.NOTICES.txt
+            .reach/release/${{ matrix.asset }}.licenses.tgz
           if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
 
   gateway:
     needs: [version, verify]
     if: needs.version.outputs.component == 'gateway'
-    runs-on: ubuntu-latest
-    permissions:
-      contents: read
-      packages: write
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 24
+          node-version: '24.21.0'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14.5'
       - run: npm --prefix packages/reach-rpc ci --ignore-scripts
-      - id: image
-        env:
-          OWNER: ${{ github.repository_owner }}
-          VERSION: ${{ needs.version.outputs.version }}
-        run: echo "name=ghcr.io/${OWNER,,}/reach-gateway:$VERSION" >> "$GITHUB_OUTPUT"
-      - env:
-          IMAGE: ${{ steps.image.outputs.name }}
-        run: bash scripts/package-gateway.sh .reach/release "$IMAGE"
-      - uses: docker/login-action@v3
+      - run: bash scripts/package-gateway.sh .reach/release reach-gateway:candidate
+      - run: docker save --output .reach/gateway-image-build.tar reach-gateway:candidate
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - env:
-          IMAGE: ${{ steps.image.outputs.name }}
-          RELEASE_TAG: ${{ github.ref_name }}
-        run: |
-          docker push "$IMAGE"
-          docker tag "$IMAGE" "${IMAGE%:*}:$RELEASE_TAG"
-          docker push "${IMAGE%:*}:$RELEASE_TAG"
-          docker image inspect "$IMAGE" --format '{{index .RepoDigests 0}}' > .reach/release/gateway-image.txt
-      - uses: actions/upload-artifact@v4
-        with:
-          name: gateway-amd64
-          path: .reach/release/*
+          name: gateway-assets
+          path: |
+            .reach/release/gateway-amd64.tgz
+            .reach/release/LICENSE
+            .reach/release/THIRD_PARTY_NOTICES.txt
+            .reach/release/third-party-licenses.tgz
           if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: gateway-image-build
+          path: .reach/gateway-image-build.tar
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
 
-  publish:
+  candidate:
     needs: [version, verify, engine, gateway]
     if: >-
       always() && needs.version.result == 'success' && needs.verify.result == 'success' &&
       ((needs.version.outputs.component == 'engine' && needs.engine.result == 'success') ||
        (needs.version.outputs.component == 'gateway' && needs.gateway.result == 'success'))
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
+    runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - run: rustup toolchain install 1.96.0 --profile minimal && rustup default 1.96.0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          fetch-depth: 0
-      - uses: actions/download-artifact@v4
+          node-version: '24.21.0'
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
         with:
+          python-version: '3.14.5'
+      - if: needs.version.outputs.component == 'engine'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: engine-*
           path: .reach/release
           merge-multiple: true
+      - if: needs.version.outputs.component == 'gateway'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gateway-assets
+          path: .reach/release
+      - if: needs.version.outputs.component == 'gateway'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gateway-image-build
+          path: .reach
+      - if: needs.version.outputs.component == 'engine'
+        run: python3 scripts/merge-engine-notices.py .reach/release
+      - env:
+          RELEASE_TAG: ${{ needs.version.outputs.tag }}
+          SOURCE_REPOSITORY: ${{ vars.REACH_SOURCE_REPOSITORY }}
+        run: |
+          python3 scripts/release-metadata.py manifest "$RELEASE_TAG" .reach/release --source-repository "$SOURCE_REPOSITORY" --source-revision "$GITHUB_SHA" --toolchain scripts/toolchain.json
+          python3 scripts/verify-release-assets.py complete .reach/release
+          python3 scripts/install-publication-tools.py
+          python3 scripts/prepare-public-source.py --revision "$GITHUB_SHA" --output .reach/public-candidate --record .reach/publication/source-export.json
       - env:
           COMPONENT: ${{ needs.version.outputs.component }}
-          RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          if [[ "$COMPONENT" == engine ]]; then
-            python3 scripts/release-metadata.py checksums .reach/release engine-linux-x64-musl engine-darwin-arm64 engine-darwin-x64
-          else
-            python3 scripts/release-metadata.py checksums .reach/release gateway-amd64.tgz gateway-image.txt
-          fi
-          python3 scripts/release-metadata.py notes "$RELEASE_TAG" .reach/release-notes.md
-      - uses: softprops/action-gh-release@v2
+          image_args=()
+          if [[ "$COMPONENT" == gateway ]]; then image_args=(--image-archive .reach/gateway-image-build.tar); fi
+          python3 scripts/release-plan.py prepare .reach/release --record .reach/candidate.json --source .reach/public-candidate "${image_args[@]}"
+          python3 scripts/publish-release.py .reach/release --record .reach/candidate.json "${image_args[@]}"
+      - if: needs.version.outputs.component == 'engine'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
-          body_path: .reach/release-notes.md
-          files: .reach/release/*
-          fail_on_unmatched_files: true
+          name: approved-candidate
+          path: |
+            .reach/candidate.json
+            .reach/release/engine-linux-x64-musl
+            .reach/release/engine-linux-x64-musl.NOTICES.txt
+            .reach/release/engine-linux-x64-musl.licenses.tgz
+            .reach/release/engine-darwin-arm64
+            .reach/release/engine-darwin-arm64.NOTICES.txt
+            .reach/release/engine-darwin-arm64.licenses.tgz
+            .reach/release/engine-darwin-x64
+            .reach/release/engine-darwin-x64.NOTICES.txt
+            .reach/release/engine-darwin-x64.licenses.tgz
+            .reach/release/LICENSE
+            .reach/release/THIRD_PARTY_NOTICES.txt
+            .reach/release/third-party-licenses.tgz
+            .reach/release/release-manifest.json
+            .reach/release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+      - if: needs.version.outputs.component == 'gateway'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: approved-candidate
+          path: |
+            .reach/candidate.json
+            .reach/release/gateway-amd64.tgz
+            .reach/release/LICENSE
+            .reach/release/THIRD_PARTY_NOTICES.txt
+            .reach/release/third-party-licenses.tgz
+            .reach/release/release-manifest.json
+            .reach/release/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+          include-hidden-files: true
+
+  publish:
+    needs: [version, verify, candidate]
+    if: >-
+      github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
+      github.repository == vars.REACH_SOURCE_REPOSITORY &&
+      needs.version.result == 'success' && needs.verify.result == 'success' && needs.candidate.result == 'success'
+    environment: public-release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.14.5'
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: approved-candidate
+          path: .reach
+      - if: needs.version.outputs.component == 'gateway'
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: gateway-image-build
+          path: .reach
+      - env:
+          COMPONENT: ${{ needs.version.outputs.component }}
+          REACH_APPROVED_CANDIDATE_SHA256: ${{ vars.REACH_APPROVED_CANDIDATE_SHA256 }}
+          REACH_ENGINE_RELEASE_REPOSITORY: ${{ vars.REACH_ENGINE_RELEASE_REPOSITORY }}
+          REACH_GATEWAY_RELEASE_REPOSITORY: ${{ vars.REACH_GATEWAY_RELEASE_REPOSITORY }}
+          REACH_GATEWAY_IMAGE_REPOSITORY: ${{ vars.REACH_GATEWAY_IMAGE_REPOSITORY }}
+          GH_TOKEN: ${{ secrets.REACH_PUBLIC_RELEASE_TOKEN }}
+          REACH_GHCR_TOKEN: ${{ secrets.REACH_GHCR_PUBLISH_TOKEN }}
+          REACH_GHCR_USER: ${{ vars.REACH_GHCR_USER }}
+        run: |
+          image_args=()
+          if [[ "$COMPONENT" == gateway ]]; then image_args=(--image-archive .reach/gateway-image-build.tar); fi
+          python3 scripts/release-plan.py approve .reach/release --record .reach/candidate.json "${image_args[@]}"
+          python3 scripts/publish-release.py .reach/release --record .reach/candidate.json "${image_args[@]}" --publish

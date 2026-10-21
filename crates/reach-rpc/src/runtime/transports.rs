@@ -18,7 +18,7 @@ use tungstenite::{
 use crate::runtime::{config::GatewayConfig, config::Origin};
 
 /// A parsed session lease from the Gateway heartbeat.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct Lease {
     pub token: String,
     pub session_id: String,
@@ -28,6 +28,18 @@ pub struct Lease {
     pub lease_expires_at_ms: i64,
     /// Heartbeat interval requested alongside the lease.
     pub interval: Duration,
+}
+
+impl std::fmt::Debug for Lease {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Lease")
+            .field("token", &"[REDACTED]")
+            .field("session_id", &"[REDACTED]")
+            .field("endpoint", &"[REDACTED]")
+            .field("lease_expires_at_ms", &self.lease_expires_at_ms)
+            .field("interval", &self.interval)
+            .finish()
+    }
 }
 
 impl Lease {
@@ -174,7 +186,7 @@ fn resolve_addresses(
     let addresses: Vec<SocketAddr> = (bare, port)
         .to_socket_addrs()
         .map(|addrs| addrs.collect())
-        .map_err(|error| format!("cannot resolve host {host}: {error}"))?;
+        .map_err(|_| "cannot resolve host".to_owned())?;
     if addresses.is_empty()
         || (loopback_only && addresses.iter().any(|address| !address.ip().is_loopback()))
     {
@@ -207,6 +219,10 @@ fn connect_try_all(addresses: &[SocketAddr], timeout: Duration) -> Result<TcpStr
 
 use serde::Deserialize;
 
+#[cfg(test)]
+#[path = "tls_tests.rs"]
+mod tls_tests;
+
 /// Heartbeat adapter using verified TLS remotely and raw HTTP on loopback.
 pub struct LocalHttpHeartbeatTransport {
     config: GatewayConfig,
@@ -216,6 +232,8 @@ pub struct LocalHttpHeartbeatTransport {
     /// heartbeat. A stalled or hostile Gateway cannot park the resident Engine
     /// on a single heartbeat.
     io_timeout: Duration,
+    #[cfg(test)]
+    test_tls: Option<ureq::tls::TlsConfig>,
 }
 
 impl LocalHttpHeartbeatTransport {
@@ -229,6 +247,8 @@ impl LocalHttpHeartbeatTransport {
             device_id: device_id.to_owned(),
             hardware: None,
             io_timeout,
+            #[cfg(test)]
+            test_tls: None,
         }
     }
 
@@ -251,11 +271,15 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
         }
         let request_body = request.to_string();
         if self.config.origin.scheme == "https" {
-            let agent = ureq::Agent::config_builder()
+            let agent_config = ureq::Agent::config_builder()
                 .timeout_global(Some(self.io_timeout))
-                .max_redirects(0)
-                .build()
-                .new_agent();
+                .max_redirects(0);
+            #[cfg(test)]
+            let agent_config = match &self.test_tls {
+                Some(tls) => agent_config.tls_config(tls.clone()),
+                None => agent_config,
+            };
+            let agent = agent_config.build().new_agent();
             let mut request = agent
                 .post(self.config.heartbeat_url())
                 .header("Content-Type", "application/json");
@@ -264,15 +288,15 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
             }
             let mut response = request
                 .send(request_body.as_str())
-                .map_err(|error| format!("HTTPS heartbeat failed: {error}"))?;
+                .map_err(|_| "HTTPS heartbeat failed".to_owned())?;
             let body = response
                 .body_mut()
                 .with_config()
                 .limit(MAX_HEARTBEAT_RESPONSE_BYTES as u64)
                 .read_to_string()
-                .map_err(|error| format!("HTTPS heartbeat response failed: {error}"))?;
+                .map_err(|_| "HTTPS heartbeat response failed".to_owned())?;
             let parsed: HeartbeatResponse = serde_json::from_str(&body)
-                .map_err(|error| format!("gateway heartbeat body was invalid: {error}"))?;
+                .map_err(|_| "gateway heartbeat body was invalid".to_owned())?;
             return parsed.to_outcome();
         }
         let origin = &self.config.origin;
@@ -282,13 +306,13 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
         // address within one shared budget), write, and read.
         let addresses = resolve_addresses(&origin.host, origin.port, true)?;
         let mut stream = connect_try_all(&addresses, self.io_timeout)
-            .map_err(|error| format!("heartbeat connect failed: {error}"))?;
+            .map_err(|_| "heartbeat connect failed".to_owned())?;
         stream
             .set_write_timeout(Some(self.io_timeout))
-            .map_err(|error| format!("heartbeat write timeout setup failed: {error}"))?;
+            .map_err(|_| "heartbeat write timeout setup failed".to_owned())?;
         stream
             .set_read_timeout(Some(self.io_timeout))
-            .map_err(|error| format!("heartbeat read timeout setup failed: {error}"))?;
+            .map_err(|_| "heartbeat read timeout setup failed".to_owned())?;
         let authorization = self
             .config
             .engine_token
@@ -300,7 +324,7 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
             "POST {path} HTTP/1.1\r\nHost: {authority}\r\n{authorization}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{request_body}",
             request_body.len()
         )
-        .map_err(|error| format!("heartbeat write failed: {error}"))?;
+        .map_err(|_| "heartbeat write failed".to_owned())?;
         stream.shutdown(std::net::Shutdown::Write).ok();
 
         let mut response = Vec::new();
@@ -316,7 +340,7 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
                 }
                 // The read timeout bounds a Gateway that accepts but never
                 // responds; the size cap bounds one that streams forever.
-                Err(error) => return Err(format!("heartbeat read failed: {error}")),
+                Err(_) => return Err("HEARTBEAT_READ_FAILED".into()),
             }
         }
         let response = String::from_utf8(response)
@@ -325,10 +349,10 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
             .split_once("\r\n\r\n")
             .ok_or("gateway returned a malformed HTTP response")?;
         if !headers.starts_with("HTTP/1.1 200") {
-            return Err(format!("gateway heartbeat failed: {headers}"));
+            return Err("HEARTBEAT_STATUS_REJECTED".into());
         }
         let parsed: HeartbeatResponse = serde_json::from_str(body)
-            .map_err(|error| format!("gateway heartbeat body was invalid: {error}"))?;
+            .map_err(|_| "gateway heartbeat body was invalid".to_owned())?;
         parsed.to_outcome()
     }
 }
@@ -338,7 +362,6 @@ impl HeartbeatTransport for LocalHttpHeartbeatTransport {
 /// and rotation deadlines while no message is pending.
 pub struct LocalWebSocketSessionTransport {
     socket: WebSocket<tungstenite::stream::MaybeTlsStream<TcpStream>>,
-    peer: String,
 }
 
 impl LocalWebSocketSessionTransport {
@@ -353,7 +376,7 @@ impl LocalWebSocketSessionTransport {
         };
         stream
             .set_nonblocking(enabled)
-            .map_err(|error| format!("failed to set session socket non-blocking: {error}"))
+            .map_err(|_| "failed to set session socket non-blocking".to_owned())
     }
 }
 
@@ -375,20 +398,20 @@ impl SessionTransport for LocalWebSocketSessionTransport {
             {
                 Ok(SessionIncoming::WouldBlock)
             }
-            Err(error) => Err(format!("session read failed on {}: {error}", self.peer)),
+            Err(_) => Err("SESSION_READ_FAILED".to_owned()),
         }
     }
 
     fn send(&mut self, text: &str) -> Result<(), String> {
         self.socket
             .send(Message::Text(text.into()))
-            .map_err(|error| format!("session send failed on {}: {error}", self.peer))
+            .map_err(|_| "SESSION_SEND_FAILED".to_owned())
     }
 
     fn send_pong(&mut self, payload: &[u8]) -> Result<(), String> {
         self.socket
             .send(Message::Pong(payload.to_vec().into()))
-            .map_err(|error| format!("session pong failed on {}: {error}", self.peer))
+            .map_err(|_| "SESSION_PONG_FAILED".to_owned())
     }
 
     fn close(&mut self, code: u16, reason: &str) -> Result<(), String> {
@@ -398,7 +421,7 @@ impl SessionTransport for LocalWebSocketSessionTransport {
         };
         self.socket
             .close(Some(frame))
-            .map_err(|error| format!("session close failed on {}: {error}", self.peer))
+            .map_err(|_| "SESSION_CLOSE_FAILED".to_owned())
     }
 }
 
@@ -413,40 +436,45 @@ impl SessionTransportFactory for LocalWebSocketSessionTransportFactory {
         token: &str,
         connection_timeout: Duration,
     ) -> Result<Box<dyn SessionTransport>, String> {
-        let origin = Origin::parse_ws_endpoint(url)?;
-        // Try every resolved address within the one connection budget, so the
-        // session connect agrees with the heartbeat on dual-stack hosts where
-        // `localhost` resolves to both `::1` and `127.0.0.1`.
-        let addresses = resolve_addresses(&origin.host, origin.port, origin.scheme == "ws")?;
-        let stream = connect_try_all(&addresses, connection_timeout).map_err(|error| {
-            format!("session connect to {} failed: {error}", origin.authority())
-        })?;
-        // Bound the HTTP upgrade read too; a stalled Gateway cannot hang us.
-        stream
-            .set_read_timeout(Some(connection_timeout))
-            .map_err(|error| format!("failed to set session read timeout: {error}"))?;
-        stream
-            .set_write_timeout(Some(connection_timeout))
-            .map_err(|error| format!("failed to set session write timeout: {error}"))?;
-
-        let separator = if url.contains('?') { '&' } else { '?' };
-        let session_url = format!("{url}{separator}token={token}");
-        let request = session_url
-            .into_client_request()
-            .map_err(|error| format!("invalid session URL: {error}"))?;
-        let (socket, response) = tungstenite::client_tls_with_config(request, stream, None, None)
-            .map_err(|error| format!("session upgrade failed: {error}"))?;
-        // A successful WebSocket upgrade is HTTP 101 Switching Protocols, not
-        // a 2xx response.
-        if response.status().as_u16() != 101 {
-            return Err(format!("session upgrade rejected: {}", response.status()));
-        }
-        LocalWebSocketSessionTransport::set_nonblocking(&socket, true)?;
-        Ok(Box::new(LocalWebSocketSessionTransport {
-            socket,
-            peer: origin.authority(),
-        }))
+        connect_session(url, token, connection_timeout, None)
     }
+}
+
+fn connect_session(
+    url: &str,
+    token: &str,
+    connection_timeout: Duration,
+    connector: Option<tungstenite::Connector>,
+) -> Result<Box<dyn SessionTransport>, String> {
+    let origin = Origin::parse_ws_endpoint(url)?;
+    // Try every resolved address within the one connection budget, so the
+    // session connect agrees with the heartbeat on dual-stack hosts where
+    // `localhost` resolves to both `::1` and `127.0.0.1`.
+    let addresses = resolve_addresses(&origin.host, origin.port, origin.scheme == "ws")?;
+    let stream = connect_try_all(&addresses, connection_timeout)
+        .map_err(|_| "SESSION_CONNECT_FAILED".to_owned())?;
+    // Bound the HTTP upgrade read too; a stalled Gateway cannot hang us.
+    stream
+        .set_read_timeout(Some(connection_timeout))
+        .map_err(|_| "failed to set session read timeout".to_owned())?;
+    stream
+        .set_write_timeout(Some(connection_timeout))
+        .map_err(|_| "failed to set session write timeout".to_owned())?;
+
+    let separator = if url.contains('?') { '&' } else { '?' };
+    let session_url = format!("{url}{separator}token={token}");
+    let request = session_url
+        .into_client_request()
+        .map_err(|_| "invalid session URL".to_owned())?;
+    let (socket, response) = tungstenite::client_tls_with_config(request, stream, None, connector)
+        .map_err(|_| "session upgrade failed".to_owned())?;
+    // A successful WebSocket upgrade is HTTP 101 Switching Protocols, not
+    // a 2xx response.
+    if response.status().as_u16() != 101 {
+        return Err(format!("session upgrade rejected: {}", response.status()));
+    }
+    LocalWebSocketSessionTransport::set_nonblocking(&socket, true)?;
+    Ok(Box::new(LocalWebSocketSessionTransport { socket }))
 }
 
 #[cfg(test)]
@@ -482,6 +510,72 @@ mod tests {
                 assert!(lease.is_valid());
             }
             other => panic!("expected lease, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn lease_debug_never_discloses_credentials_or_token_bearing_endpoints() {
+        let secret = "PRIVATE_SENTINEL\nFORGED_LOG".repeat(1000);
+        let lease = Lease {
+            token: secret.clone(),
+            session_id: secret.clone(),
+            endpoint: secret.clone(),
+            lease_expires_at_ms: 1,
+            interval: Duration::from_secs(1),
+        };
+        for debug in [
+            format!("{lease:?}"),
+            format!("{:?}", HeartbeatOutcome::Lease(lease)),
+        ] {
+            assert!(!debug.contains("PRIVATE_SENTINEL"));
+            assert!(!debug.contains('\n'));
+            assert!(debug.len() < 300);
+        }
+    }
+
+    #[test]
+    fn heartbeat_status_and_websocket_rejection_do_not_echo_peer_headers_or_bodies() {
+        for websocket in [false, true] {
+            let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let peer = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(Duration::from_secs(2)))
+                    .unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0; 4096];
+                loop {
+                    let n = stream.read(&mut buffer).unwrap();
+                    if n == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..n]);
+                    if websocket && request.windows(4).any(|value| value == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = "private-body-sentinel";
+                write!(stream, "HTTP/1.1 403 Forbidden\r\nX-Private: private-token-sentinel\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            });
+            let error = if websocket {
+                LocalWebSocketSessionTransportFactory
+                    .connect(
+                        &format!("ws://{address}/session"),
+                        "private-token-sentinel",
+                        Duration::from_secs(2),
+                    )
+                    .err()
+                    .unwrap()
+            } else {
+                heartbeat_transport(loopback_gateway_config(address), Duration::from_secs(2))
+                    .heartbeat()
+                    .unwrap_err()
+            };
+            peer.join().unwrap();
+            assert!(!error.contains("sentinel"));
+            assert!(!error.contains('\n'));
+            assert!(error.len() < 128);
         }
     }
 

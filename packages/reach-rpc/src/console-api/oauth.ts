@@ -6,6 +6,11 @@ import type { ConsoleConfig } from "./config.js";
 import { credentialDigest } from "./credentials.js";
 import { MAX_HTTP_BODY_BYTES } from "../gateway-policy.js";
 import type { ConsoleStore } from "./store.js";
+import type { ClientAccess } from "./client-access.js";
+import { parseClientPermissions, type ClientPermission } from "../client-policy.js";
+
+/** Resource rows on the consent page; the parser rejects anything beyond it rather than dropping it. */
+const MAX_CONSENT_ROWS = 128;
 
 const accessTtlMs = 60 * 60 * 1000;
 const refreshTtlMs = 30 * 24 * 60 * 60 * 1000;
@@ -31,7 +36,9 @@ interface AuthorizationRequest {
   expiresAt: number;
 }
 
-interface AuthorizationCode { clientId: string; redirectUri: string; challenge: string; expiresAt: number }
+interface AuthorizationCode { clientId: string; redirectUri: string; challenge: string; expiresAt: number; revision: number }
+
+export interface OAuthResource { engineId: string; workspaces?: readonly string[] }
 
 class OAuthError extends Error {
   constructor(readonly status: number, readonly error: string, description: string, readonly retryAfter?: number) { super(description); }
@@ -112,6 +119,8 @@ export class OAuthServer {
     config: ConsoleConfig,
     private readonly auth: ConsoleAuth,
     private readonly now = Date.now,
+    private readonly access?: ClientAccess,
+    private readonly resources: () => readonly OAuthResource[] = () => [],
   ) {
     this.issuer = config.publicOrigin;
     this.resource = `${config.publicOrigin}/mcp`;
@@ -129,7 +138,7 @@ export class OAuthServer {
     if (!/^reach_at_[A-Za-z0-9_-]{43}$/.test(token)) return undefined;
     const row = this.store.db.prepare(`SELECT c.id, c.name, c.last_used_at FROM oauth_tokens t JOIN oauth_clients c ON c.id = t.client_id
       WHERE t.digest=? AND t.kind='access' AND t.expires_at > ?`).get(credentialDigest(token), this.now());
-    if (!row) return undefined;
+    if (!row || !this.active(String(row.id))) return undefined;
     if (this.now() - Number(row.last_used_at ?? 0) >= 60_000) this.store.db.prepare("UPDATE oauth_clients SET last_used_at=? WHERE id=?").run(this.now(), row.id);
     return { id: String(row.id), name: String(row.name) };
   }
@@ -146,7 +155,15 @@ export class OAuthServer {
   /** Removes a client registration and every token it holds; returns false when unknown. */
   revoke(clientId: string): boolean {
     for (const [key, code] of this.codes) if (code.clientId === clientId) this.codes.delete(key);
-    return this.store.db.prepare("DELETE FROM oauth_clients WHERE id=?").run(clientId).changes === 1;
+    if (this.access && this.store.db.prepare("SELECT id FROM client_principals WHERE oauth_client_id=?").get(clientId)) this.access.revoke(`oauth:${clientId}`);
+    const removed = this.store.db.prepare("DELETE FROM oauth_clients WHERE id=?").run(clientId).changes === 1;
+    this.access?.invalidate();
+    return removed;
+  }
+
+  private active(clientId: string): boolean {
+    if (!this.access) return false;
+    try { return this.access.get(`oauth:${clientId}`).revokedAt === null; } catch { return false; }
   }
 
   async handle(url: URL, request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -226,6 +243,7 @@ export class OAuthServer {
       // Registration is anonymous: only idle, never-approved registrations expire, and a full table refuses
       // new ones instead of evicting a registration whose owner may be mid-approval.
       this.store.db.prepare("DELETE FROM oauth_clients WHERE approved_at IS NULL AND coalesce(last_used_at, created_at) <= ?").run(issuedAt - unapprovedTtlMs);
+      this.access?.invalidate();
       const unapproved = Number(this.store.db.prepare("SELECT count(*) AS n FROM oauth_clients WHERE approved_at IS NULL").get()!.n);
       if (unapproved >= maxUnapprovedClients) return false;
       this.store.db.prepare("INSERT INTO oauth_clients(id,name,redirect_uris,auth_method,secret_digest,created_at) VALUES (?,?,?,?,?,?)")
@@ -310,10 +328,39 @@ export class OAuthServer {
       this.consent(response, signed, client, pending.redirectUri, "Password or authentication code is incorrect. Each code works once; wait for the next one if you just signed in.");
       return;
     }
+    let permissions: ClientPermission[];
+    try {
+      const rows: unknown[] = [];
+      const indexes = new Set<number>();
+      for (const key of Object.keys(body)) {
+        const match = /^permission\.(\d{1,4})\.(?:engineId|workspace|read|write|execute)$/.exec(key);
+        if (key.startsWith("permission.") && !match) throw new Error("Unknown permission field");
+        if (match) indexes.add(Number(match[1]));
+      }
+      // Every posted row is considered; a row beyond what the page can render is an error, never dropped.
+      if ([...indexes].some(index => index >= MAX_CONSENT_ROWS)) throw new Error("Too many resource rows");
+      for (const index of [...indexes].sort((a, b) => a - b)) {
+        const prefix = `permission.${index}.`;
+        if (!["read", "write", "execute"].some(operation => body[prefix + operation] === "on")) continue;
+        rows.push({ engineId: body[prefix + "engineId"], workspace: body[prefix + "workspace"],
+          read: body[prefix + "read"] === "on", write: body[prefix + "write"] === "on", execute: body[prefix + "execute"] === "on" });
+      }
+      permissions = parseClientPermissions(rows);
+      const resources = this.resources();
+      if (!permissions.length || permissions.some(permission => {
+        const resource = resources.find(resource => resource.engineId === permission.engineId);
+        return !resource || resource.workspaces && !resource.workspaces.includes(permission.workspace);
+      })) throw new Error("Invalid resource selection");
+    } catch {
+      this.consent(response, signed, client, pending.redirectUri, "Select registered Engines, workspace names and permissions. No access is selected by default.", 400);
+      return;
+    }
+    if (!this.access) throw new OAuthError(503, "temporarily_unavailable", "Client policy storage unavailable");
+    const approved = this.access.approveOAuth(client.id, client.name, permissions);
     this.store.db.prepare("UPDATE oauth_clients SET approved_at=coalesce(approved_at, ?) WHERE id=?").run(this.now(), client.id);
     for (const [key, value] of this.codes) if (value.expiresAt <= this.now()) this.codes.delete(key);
     const code = randomBytes(32).toString("base64url");
-    this.codes.set(credentialDigest(code), { clientId: client.id, redirectUri: pending.redirectUri, challenge: pending.challenge, expiresAt: this.now() + codeTtlMs });
+    this.codes.set(credentialDigest(code), { clientId: client.id, redirectUri: pending.redirectUri, challenge: pending.challenge, expiresAt: this.now() + codeTtlMs, revision: approved.policyRevision });
     this.auth.action(`oauth.authorize:${client.name}`);
     redirect(response, this.callback(pending.redirectUri, { code, state: pending.state }));
   }
@@ -370,7 +417,8 @@ export class OAuthServer {
       const digest = credentialDigest(code);
       const grant = this.codes.get(digest);
       this.codes.delete(digest);
-      if (!grant || grant.expiresAt <= this.now() || grant.clientId !== client.id) throw new OAuthError(400, "invalid_grant", "Authorization code is invalid or expired");
+      if (!grant || grant.expiresAt <= this.now() || grant.clientId !== client.id || !this.active(client.id)
+        || this.access!.get(`oauth:${client.id}`).policyRevision !== grant.revision) throw new OAuthError(400, "invalid_grant", "Authorization code is invalid or expired");
       if (body.redirect_uri !== undefined && body.redirect_uri !== grant.redirectUri) throw new OAuthError(400, "invalid_grant", "redirect_uri does not match");
       const verifier = typeof body.code_verifier === "string" ? body.code_verifier : "";
       if (!/^[A-Za-z0-9._~-]{43,128}$/.test(verifier) || !equal(createHash("sha256").update(verifier).digest("base64url"), grant.challenge)) {
@@ -380,19 +428,23 @@ export class OAuthServer {
       return;
     }
     if (body.grant_type === "refresh_token") {
+      if (!this.active(client.id)) throw new OAuthError(400, "invalid_grant", "Client authorization is revoked");
       const token = typeof body.refresh_token === "string" ? body.refresh_token : "";
+      let replayed = false;
       const result = this.store.transaction(() => {
         const row = this.store.db.prepare("SELECT * FROM oauth_tokens WHERE digest=? AND kind='refresh'").get(credentialDigest(token));
         if (!row || row.client_id !== client.id || Number(row.expires_at) <= this.now()) return undefined;
         if (row.used_at !== null) {
           // A rotated refresh token was replayed: revoke the whole grant family.
           this.store.db.prepare("DELETE FROM oauth_tokens WHERE family=?").run(row.family);
+          replayed = true;
           return undefined;
         }
         this.store.db.prepare("UPDATE oauth_tokens SET used_at=? WHERE digest=?").run(this.now(), row.digest);
         this.store.db.prepare("DELETE FROM oauth_tokens WHERE family=? AND kind='access'").run(row.family);
         return this.issue(client.id, String(row.family));
       });
+      if (replayed) this.access?.invalidateOAuth(client.id);
       if (!result) throw new OAuthError(400, "invalid_grant", "Refresh token is invalid, expired or revoked");
       send(response, 200, result);
       return;
@@ -405,19 +457,34 @@ export class OAuthServer {
     const client = this.authenticateClient(request, body);
     if (typeof body.token === "string") {
       const row = this.store.db.prepare("SELECT family FROM oauth_tokens WHERE digest=? AND client_id=?").get(credentialDigest(body.token), client.id);
-      if (row) this.store.db.prepare("DELETE FROM oauth_tokens WHERE family=?").run(row.family);
+      if (row) {
+        this.store.db.prepare("DELETE FROM oauth_tokens WHERE family=?").run(row.family);
+        this.access?.invalidateOAuth(client.id);
+      }
     }
     send(response, 200, {});
   }
 
-  private consent(response: ServerResponse, id: string, client: ClientRow, redirectUri: string, error?: string): void {
+  private consent(response: ServerResponse, id: string, client: ClientRow, redirectUri: string, error?: string, status = 401): void {
     const host = new URL(redirectUri).host;
-    this.page(response, error ? 401 : 200, "Connect to Reach Gateway", `
-      <p><strong>${escapeHtml(client.name)}</strong> wants to use this Gateway's MCP tools, including reading and changing files and running processes on registered Engines.</p>
+    let index = 0;
+    const rows = this.resources().flatMap(resource => (resource.workspaces ?? ["", "", ""]).map(workspace => ({ resource, workspace })));
+    const truncated = rows.length > MAX_CONSENT_ROWS;
+    const choices = rows.slice(0, MAX_CONSENT_ROWS).map(({ resource, workspace }) => {
+      const prefix = `permission.${index++}.`;
+      return `<fieldset><legend>${escapeHtml(resource.engineId)}</legend>
+        <input type="hidden" name="${prefix}engineId" value="${escapeHtml(resource.engineId)}">
+        <label>Workspace<input name="${prefix}workspace" value="${escapeHtml(workspace)}"${workspace ? " readonly" : ""} placeholder="Configured workspace name"></label>
+        ${["read", "write", "execute"].map(operation => `<label class="choice"><input type="checkbox" name="${prefix}${operation}"> ${operation}</label>`).join("")}</fieldset>`;
+    }).join("") + (truncated ? `<p class="muted">Only the first ${MAX_CONSENT_ROWS} resource rows are shown. Approve with these, then add other resources from the console's Clients page.</p>` : "");
+    this.page(response, error ? status : 200, "Connect to Reach Gateway", `
+      <p><strong>${escapeHtml(client.name)}</strong> wants to use this Gateway's MCP tools. Select each Engine, workspace and operation you trust this application to use.</p>
+      <p>Execute runs trusted Node scripts with the Engine account's operating system privileges. It is not a sandbox. File write permission can change scripts that another trusted client may execute.</p>
       <p class="muted">After approval you will return to <code>${escapeHtml(host)}</code>.</p>
       ${error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : ""}
       <form method="post" action="/oauth/authorize">
         <input type="hidden" name="request" value="${escapeHtml(id)}">
+        ${choices || "<p>No registered Engines. Register an Engine in the console first.</p>"}
         <label>Administrator password<input type="password" name="password" autocomplete="current-password" required autofocus></label>
         <label>Authentication code or recovery code<input name="code" autocomplete="one-time-code" inputmode="text" required></label>
         <div class="actions">
@@ -434,6 +501,7 @@ body{font:15px/1.5 system-ui,sans-serif;background:#f6f6f4;color:#1c1c1a;margin:
 main{max-width:420px;margin:0 auto;background:#fff;border:1px solid #e3e3df;border-radius:12px;padding:28px}
 h1{font-size:20px;margin:0 0 12px}.muted{color:#66665f}.error{color:#b42318}
 label{display:block;margin:14px 0 0;font-weight:500}input{display:block;width:100%;box-sizing:border-box;margin-top:4px;padding:9px 10px;border:1px solid #cfcfc9;border-radius:8px;font:inherit}
+fieldset{margin-top:16px;border:1px solid #cfcfc9;border-radius:8px}.choice{display:inline-block;margin-right:12px}.choice input{display:inline;width:auto}
 .actions{display:flex;gap:8px;margin-top:20px}button{flex:1;padding:10px;border-radius:8px;border:1px solid #1c1c1a;background:#1c1c1a;color:#fff;font:inherit;cursor:pointer}
 button.secondary{background:#fff;color:#1c1c1a}code{font-size:13px}
 </style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`;

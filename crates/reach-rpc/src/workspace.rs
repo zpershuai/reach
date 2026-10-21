@@ -740,6 +740,66 @@ mod tests {
     }
 
     #[test]
+    fn rejects_parent_and_absolute_paths_outside_the_workspace() {
+        let outer = tempfile::tempdir().unwrap();
+        let root = outer.path().join("workspace");
+        fs::create_dir(&root).unwrap();
+        fs::create_dir(root.join("sub")).unwrap();
+        fs::write(outer.path().join("secret.txt"), "outside").unwrap();
+        let workspace = WorkspaceFilesystem::new(HashMap::from([("fixture".into(), root)]));
+        let absolute = outer
+            .path()
+            .join("secret.txt")
+            .to_string_lossy()
+            .into_owned();
+        for path in [
+            "../secret.txt",
+            "sub/../../secret.txt",
+            "./../secret.txt",
+            absolute.as_str(),
+        ] {
+            let read: FsReadParams =
+                serde_json::from_value(serde_json::json!({"workspace": "fixture", "path": path}))
+                    .unwrap();
+            assert_eq!(
+                workspace.read(&read).unwrap_err().code,
+                WORKSPACE_ACCESS_DENIED,
+                "{path}"
+            );
+            for mode in [FsWriteMode::Create, FsWriteMode::Overwrite] {
+                let written = workspace.write(&FsWriteParams {
+                    workspace: "fixture".into(),
+                    path: path.into(),
+                    content: "unsafe".into(),
+                    mode,
+                    if_match: None,
+                });
+                assert_eq!(written.unwrap_err().code, WORKSPACE_ACCESS_DENIED, "{path}");
+            }
+        }
+        let escaped = outer
+            .path()
+            .join("escaped.txt")
+            .to_string_lossy()
+            .into_owned();
+        for path in ["../escaped.txt", escaped.as_str()] {
+            let written = workspace.write(&FsWriteParams {
+                workspace: "fixture".into(),
+                path: path.into(),
+                content: "unsafe".into(),
+                mode: FsWriteMode::Create,
+                if_match: None,
+            });
+            assert_eq!(written.unwrap_err().code, WORKSPACE_ACCESS_DENIED, "{path}");
+        }
+        assert_eq!(
+            fs::read_to_string(outer.path().join("secret.txt")).unwrap(),
+            "outside"
+        );
+        assert!(!outer.path().join("escaped.txt").exists());
+    }
+
+    #[test]
     fn rejects_symlink_path_components_on_write() {
         let (dir, workspace) = fixture();
         let outside = tempfile::tempdir().unwrap();

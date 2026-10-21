@@ -1,5 +1,6 @@
 import { canonicalizeInvocation } from "../canonical.js";
 import type { GatewayEvent, GatewayEventFields, GatewayEvents } from "./events.js";
+import { eventMetadata } from "./events.js";
 import type { ConsoleStore } from "./store.js";
 
 export function methodClass(method: string): NonNullable<GatewayEventFields["methodClass"]> {
@@ -19,12 +20,12 @@ export function auditInvocation(method: string, params: Record<string, unknown>)
   for (const key of keys) {
     if (typeof leaf.params[key] === "string") fields[key] = leaf.params[key];
   }
-  return fields;
+  return eventMetadata(fields);
 }
 
 const persistedEvents = new Set(["rpc.finished", "rpc.denied", "auth.failed", "client.connected", "client.disconnected", "admin.action"]);
 const columns = {
-  ts: "ts", eventType: "event_type", requestId: "request_id", engineId: "engine_id", clientLabel: "client_label", clientType: "client_type",
+  ts: "ts", eventType: "event_type", requestId: "request_id", engineId: "engine_id", clientLabel: "client_label", clientType: "client_type", principalId: "principal_id",
   method: "method", methodClass: "method_class", workspace: "workspace", path: "path", script: "script", processId: "process_id", launchId: "launch_id",
   outcome: "outcome", code: "code", stage: "stage", latencyMs: "latency_ms", responseBytes: "response_bytes",
 } as const;
@@ -115,6 +116,7 @@ export interface AuditRecord {
   engineId?: string;
   clientLabel?: string;
   clientType?: string;
+  principalId?: string;
   method?: string;
   methodClass?: string;
   workspace?: string;
@@ -131,9 +133,10 @@ export interface AuditRecord {
 
 /** Rebuild the record explicitly so extra event or request fields never persist. */
 export function auditRecord(event: GatewayEvent): AuditRecord {
+  event = { ...eventMetadata(event), id: event.id, ts: event.ts, type: event.type };
   return {
     ts: event.ts, eventType: event.type, requestId: event.requestId, engineId: event.engineId,
-    clientLabel: event.caller?.label, clientType: event.caller?.type,
+    clientLabel: event.caller?.label, clientType: event.caller?.type, principalId: event.caller?.principalId,
     method: event.method ?? event.action, methodClass: event.methodClass,
     workspace: event.workspace, path: event.path, script: event.script, processId: event.processId, launchId: event.launchId,
     outcome: event.outcome, code: event.code, stage: event.stage, latencyMs: event.latencyMs, responseBytes: event.responseBytes,

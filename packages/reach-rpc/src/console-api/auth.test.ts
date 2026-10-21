@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { once } from "node:events";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -81,14 +81,17 @@ test("setup requires its token, confirms TOTP, hashes sessions, and refuses a se
   } finally { await f.close(); }
 });
 
-test("generated setup tokens are logged once and work only before administrator creation", async () => {
+test("generated setup tokens use a private file, never logs, and disappear after setup", async () => {
   const f = await fixture("");
   try {
-    const tokens = f.logs.filter(line => line.startsWith("Reach console setup token: "));
-    assert.equal(tokens.length, 1);
-    const token = tokens[0].slice("Reach console setup token: ".length);
+    const path = join(f.directory, "admin-setup-token");
+    const token = readFileSync(path, "utf8").trim();
     assert.equal(token.length, 48);
+    assert.equal(statSync(path).mode & 0o777, 0o600);
+    assert.ok(!f.logs.join("\n").includes(token));
+    assert.equal((await f.call("setup", { token: "0".repeat(48) })).response.status, 403, "previous log-only bootstrap credentials are not accepted");
     await f.setup(token);
+    assert.equal(existsSync(path), false);
     assert.equal((await f.call("setup", { token })).response.status, 409);
   } finally { await f.close(); }
 });
@@ -135,6 +138,57 @@ test("sensitive mutations require reauthentication after ten minutes", async () 
     assert.equal((await f.call("engines/engine-b", {}, {}, "DELETE")).response.status, 200);
     assert.equal((await f.call("settings", { retentionDays: 90 }, {}, "PATCH")).response.status, 200);
     assert.equal((await f.call("settings")).data.retentionDays, 90);
+  } finally { await f.close(); }
+});
+
+test("access-client management protects authority, returns secrets once and rejects partial policy writes", async () => {
+  const f = await fixture();
+  try {
+    await f.setup();
+    const permissions = [{ engineId: "engine-a", workspace: "docs", read: true, write: false, execute: false }];
+    const input = { name: "Scoped fixture", expiresAt: f.now() + 3_600_000, permissions };
+    const created = await f.call("access-clients", input);
+    assert.equal(created.response.status, 201);
+    assert.match(created.data.token, /^reach_ct_[A-Za-z0-9_-]{43}$/);
+    const id = created.data.client.id as string;
+    const path = `access-clients/${encodeURIComponent(id)}`;
+    const listed = await f.call("access-clients");
+    assert.ok(!JSON.stringify(listed.data).includes(created.data.token));
+    assert.ok(!JSON.stringify(listed.data).includes("digest"));
+    const detail = await f.call(path);
+    assert.deepEqual(detail.data.client.permissions, permissions);
+    assert.ok(!("token" in detail.data));
+    const before = detail.data.client;
+    const rejectedHeaders: Record<string, string>[] = [{ origin: "https://foreign.example.com" }, { "x-csrf-token": "wrong" }];
+    for (const headers of rejectedHeaders) {
+      assert.equal((await f.call(`${path}/policy`, { permissions: [] }, headers, "PATCH")).response.status, 403);
+    }
+    assert.equal((await f.call(`${path}/policy`, { permissions: [...permissions, ...permissions] }, {}, "PATCH")).response.status, 400);
+    assert.deepEqual((await f.call(path)).data.client, before);
+    const count = listed.data.clients.length;
+    assert.equal((await f.call("access-clients", { ...input, legacyGlobal: true })).response.status, 400);
+    assert.equal((await f.call("access-clients", { ...input, permissions: [{ ...permissions[0], engineId: "*" }] })).response.status, 400);
+    assert.equal((await f.call("access-clients", { ...input, permissions: null })).response.status, 400);
+    assert.equal((await f.call("access-clients", { ...input, expiresAt: f.now() })).response.status, 400);
+    assert.equal((await f.call(`${path}/review-global`, { confirm: true })).response.status, 409);
+    assert.equal((await f.call("access-clients")).data.clients.length, count);
+    for (const token of [f.controllerToken, "e".repeat(48), created.data.token]) {
+      const response = await fetch(`${f.base}/api/console/access-clients`, { method: "POST", headers: { authorization: `Bearer ${token}`, origin: f.origin, "content-type": "application/json" }, body: JSON.stringify(input) });
+      assert.equal(response.status, 401);
+    }
+    f.advance(10 * 60_000);
+    assert.equal((await f.call(`${path}/rotate`, { expiresAt: f.now() + 3_600_000 })).response.status, 403);
+    assert.deepEqual((await f.call(path)).data.client, before);
+    assert.equal((await f.call("reauth", { password: "a long owner password" })).response.status, 200);
+    const rotated = await f.call(`${path}/rotate`, { expiresAt: f.now() + 3_600_000 });
+    assert.equal(rotated.response.status, 200);
+    assert.notEqual(rotated.data.token, created.data.token);
+    assert.equal((await f.call(`${path}/policy`, { permissions: [] }, {}, "PATCH")).response.status, 200);
+    assert.equal((await f.call(path, {}, {}, "DELETE")).response.status, 200);
+    assert.equal((await f.call(path)).data.client.revokedAt, f.now());
+    const actions = f.gateway.events!.replay(0).filter(event => event.type === "admin.action").map(event => event.action);
+    for (const action of ["create", "rotate", "policy", "revoke"]) assert.ok(actions.includes(`client.${action}:${id}`));
+    assert.ok(!JSON.stringify(f.logs).includes(created.data.token));
   } finally { await f.close(); }
 });
 

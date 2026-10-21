@@ -20,10 +20,10 @@ export interface ActivityFilters {
 export interface ActivityRow extends AuditRecord { id: number }
 
 const selectColumns = `id, ts, event_type AS eventType, request_id AS requestId, engine_id AS engineId,
-  client_label AS clientLabel, client_type AS clientType, method, method_class AS methodClass,
+  client_label AS clientLabel, client_type AS clientType, principal_id AS principalId, method, method_class AS methodClass,
   workspace, path, script, process_id AS processId, launch_id AS launchId, outcome, code, stage,
   latency_ms AS latencyMs, response_bytes AS responseBytes`;
-const exportColumns: Array<keyof ActivityRow> = ["id", "ts", "eventType", "requestId", "engineId", "clientLabel", "clientType", "method", "methodClass", "workspace", "path", "script", "processId", "launchId", "outcome", "code", "stage", "latencyMs", "responseBytes"];
+const exportColumns: Array<keyof ActivityRow> = ["id", "ts", "eventType", "requestId", "engineId", "clientLabel", "clientType", "principalId", "method", "methodClass", "workspace", "path", "script", "processId", "launchId", "outcome", "code", "stage", "latencyMs", "responseBytes"];
 
 export function csvCell(value: unknown): string {
   const text = value === null || value === undefined ? "" : String(value);

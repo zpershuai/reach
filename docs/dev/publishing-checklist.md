@@ -1,45 +1,131 @@
 # Publishing checklist
 
-Use this checklist before you make the repository public or push it to a new public remote. It complements the rules in [AGENTS.md](../../AGENTS.md): the working tree may be clean while **older commits** still contain private deployment details.
+Prepare and review a clean source snapshot before creating a public repository. Preserve the original private history and existing installations. This procedure does not publish, push tags, rewrite history, rotate credentials or restart services.
 
-## 1. Scan the working tree
+Read [AGENTS.md](../../AGENTS.md). Real inventories, findings, exceptions, private revision mappings and verification reports belong only in ignored `.reach/` or outside the repository. Do not paste raw findings into public issues or CI logs. Tracked examples use reserved domains and addresses.
 
-```bash
-git grep -nE '<your-domain>|<your-server-ip>|/Users/<you>|/home/<you>'
-```
-
-Replace the placeholders with the real values you used while deploying. Everything in the tree should use `example.com`, documentation IP ranges and placeholder paths.
-
-## 2. Scan the full history
+## 1. Install the pinned scanner
 
 ```bash
-# Secret patterns across every reachable commit.
-gitleaks detect --source . --log-opts=--all
-
-# Domains and IPv4 addresses that are not reserved examples.
-git log -p --all | grep -oE '[a-z0-9.-]+\.[a-z]{2,}' | sort | uniq -c | sort -rn | less
-git log -p --all | grep -oE '\b([0-9]{1,3}\.){3}[0-9]{1,3}\b' | sort | uniq -c | sort -rn
-
-# Which commits introduced a specific value.
-git log --all --format='%h %ad %s' --date=short -S '<value>'
+python3 scripts/install-publication-tools.py
 ```
 
-Also review home directory paths, SSH targets, account names and any token-like strings.
+The installer verifies the platform package against `scripts/publication-tools.json` before installing Gitleaks 8.30.1 under `.reach/tools/`. For a previously downloaded upstream package, use `--archive /path/to/package.tar.gz`; its checksum is still verified. Tool updates require a reviewed pin change. HTTPS plus checksums does not imply publisher signatures.
 
-## 3. Choose how to publish
+## 2. Export a selected committed revision
 
-**A. Fresh public history (recommended if anything turned up).** Keep the private repository as it is. Then create the public repository from a clean snapshot:
+Review source and attribution before selecting a commit. Uncommitted changes are not exported. An optional `--include-list` points to a private JSON array of approved repository-relative files; required attribution cannot be omitted.
 
 ```bash
-git archive --format=tar HEAD | (mkdir ../reach-public && tar -x -C ../reach-public)
-cd ../reach-public && git init && git add -A && git commit -m "Initial public release"
+source_revision="$(git rev-parse HEAD)"
+python3 scripts/prepare-public-source.py \
+  --revision "$source_revision" \
+  --output .reach/public-candidate \
+  --record .reach/publication/source-export.json
 ```
 
-**B. Rewrite history.** Use `git filter-repo --replace-text replacements.txt`, with one `literal==>replacement` pair per line. Then force-push every branch and tag. Every existing clone, fork and open pull request must be re-cloned, and GitHub may keep cached views of old commits until they are garbage-collected.
+The output must be empty or absent. Export rejects included symlinks/submodules and excludes `.git/`, `.reach/`, private deployment configuration, logs, dependency trees and generated outputs. LICENSE and attribution remain. Exclusion alone does not prove the remaining source is safe.
 
-## 4. After publishing
+Review all retained files, including archived planning material, scripts, documentation, examples and build inputs. If material is unsuitable, fix and commit the reusable source changes, select the new revision and export to a new empty directory. Do not modify a running installation for documentation cleanup.
 
-- Run the scans from steps 1 and 2 again on the public repository.
-- Rotate any credential that ever appeared in history, even if it was removed later.
-- Check that `.reach/`, `deploy/*.env`, `deploy/engines.json` and `deploy/data/` are still ignored.
-- Check the repository description, topics and Release notes for private details.
+## 3. Enumerate the entire publication surface
+
+Create `.reach/publication/inventory.json`. Every category is required and every scoped ID needs exactly one item:
+
+| Category | Required scope |
+| --- | --- |
+| `candidate` | Approved source tree |
+| `git-ref` | Every branch/tag whose history will be public |
+| `release-asset` | Every attachment or distribution that will remain public |
+| `image` | Every continuing public image and all its historical layers |
+| `build-context` | Every public build context |
+
+Enumerate remote assets/references first; completeness cannot be inferred from successful downloads. Record unknowns and failures. Empty categories require reviewed reasons. A new snapshot does not inherit private branches/tags.
+
+Example structure (replace values only in the private inventory):
+
+```json
+{
+  "schemaVersion": 1,
+  "scope": {
+    "candidate": ["source"],
+    "git-ref": [],
+    "release-asset": [],
+    "image": [],
+    "build-context": []
+  },
+  "items": [
+    {
+      "id": "source",
+      "kind": "candidate",
+      "path": "../public-candidate",
+      "sha256": "REPLACE_WITH_CANDIDATE_DIGEST"
+    }
+  ]
+}
+```
+
+Paths are relative to the inventory directory. Git items use `path` for a local repository and `revision` for a reference; fingerprints include all reachable objects and annotated tag messages. Assets use a local `path` or approved HTTPS `url`. Set `format: "archive"` for archives; recognizable archives are expanded even if mislabeled as files. Images use Docker-save or OCI archives. Each referenced layer is scanned separately, so later deletion cannot hide earlier contents. Missing layers or unsupported archives remain incomplete.
+
+Calculate local fingerprints and plan bindings without approving anything:
+
+```bash
+python3 scripts/verify-publication.py --fingerprint .reach/public-candidate
+python3 scripts/verify-publication.py --fingerprint /path/to/image.tar
+python3 scripts/verify-publication.py --fingerprint /path/to/candidate-repo --revision candidate-tag
+python3 scripts/verify-publication.py .reach/publication/inventory.json --plan-sha256
+```
+
+File, tree and Git-reference fingerprints have different meanings. Include sidecar licenses, manifest files and every continuing distribution; one timeout still blocks acceptance.
+
+## 4. Scan and review the exact bytes
+
+```bash
+python3 scripts/verify-publication.py .reach/publication/inventory.json \
+  --report .reach/publication/report.json
+```
+
+Exit 1 means not ready, including the expected first run without human review/P0 evidence. stdout contains a sanitized summary. Reports use mode 0600; in-repository destinations must be ignored under `.reach/`. Scanner version/configuration digest are recorded. Inline `gitleaks:allow` comments and ambient ignore files cannot suppress findings.
+
+Also review hostnames, accounts, topology, logs and backup details manually. Secret-pattern detection does not identify every deployment detail. Add an item's `review` after reviewing its exact bytes:
+
+```json
+{
+  "status": "approved",
+  "sha256": "EXACT_ITEM_DIGEST",
+  "reviewer": "PRIVATE_REVIEWER_IDENTIFIER",
+  "reviewedAt": "ACTUAL_ISO8601_TIME_WITH_TIMEZONE",
+  "exceptions": []
+}
+```
+
+Only confirmed **non-secret** findings can be excepted, using the private report's stable `Fingerprint`, `kind: "non-secret"` and a substantive `reason`. The digest-bound item review covers these exceptions. Do not except real credentials, unexplained findings, missing scans or timeouts.
+
+If a valid credential was exposed, remove it from the candidate and revoke/rotate it through the appropriate private operational process. Deleting content alone does not resolve the incident. Keep invalidation evidence private.
+
+## 5. Attach scope, incident, legacy and P0 evidence
+
+Use `--plan-sha256` for `scopeSha256` below. It binds categories, locations, revisions, formats and expected bytes, excluding later review/evidence records to avoid circular hashes.
+
+- `scopeReview`: `status: "approved"`, `scopeSha256`, `reviewer`, `reviewedAt`, and `omittedReasons` mapping each empty category to its actual reason.
+- `credentialReview`: the same review fields plus `incidents`. An empty list explicitly confirms no known unresolved exposure in the scope. Each confirmed incident requires `status: "revoked"` or `"rotated"` and an `evidence` reference.
+- `legacyReview`: the same review fields plus `clients`. Each legacy client needs its own review fields and `authority: "scoped"`, `"revoked"` or `"owner-approved-global"`. Global clients remain trusted Owner equivalents, without resource isolation.
+- `gates.security` and `gates.release`: references such as `{"path":"private-evidence.json","sha256":"EXACT_EVIDENCE_FILE_HASH"}`. Credential invalidation uses the same reference format.
+
+Each private evidence file is JSON with `status: "passed"`, matching `scopeSha256`, and a `checks` object. All required check names must have value `"passed"`. Missing, pending, failed, stale or changed evidence blocks readiness.
+
+| Gate | Required checks |
+| --- | --- |
+| security | `unauthenticated`, `expiry`, `revocation`, `cross-principal`, `cross-engine`, `cross-workspace`, `read-only`, `workspace-containment`, `process-opt-in`, `restricted-execution`, `tls`, `log-redaction`, `package-integrity`, `recovery` |
+| release | `licenses`, `source-provenance`, `platforms`, `checksums`, `workflow-isolation` |
+| credential-disposition | `credential-invalidated` |
+
+Include actual commits, tool/environment versions, dates, results and private supporting report links in the evidence files. Never label an unrun check as passed. Run the verifier again after adding reviews. Changed scope/content/evidence requires new matching verification.
+
+## 6. Review before publication, then verify after publication
+
+Passing this local gate means **ready for publication review**, not already public. Preserve the original private history. Creating a new repository/clean history, pushing references, publishing official releases, changing production services and rotating credentials are separate explicit operational steps. Do not toggle the private-history repository to public as a shortcut.
+
+Before publishing, identify the approved public source revision and bind builds to it; keep the original private-to-public mapping private. Preserve Apache-2.0, attribution and actual third-party notices. Do not publish unreviewed extra branches, tags, attachments or build contexts. Retaining/rewriting old history requires a separate reviewed plan.
+
+After publication, verify anonymous access to intended source/history and the private security-reporting channel. Download **every** release asset and verify each image digest against the approved build manifest, including version/platform/notices. Unavailable or mismatching items remain incomplete. Do not delete or silently overwrite published versions to make acceptance appear successful.
