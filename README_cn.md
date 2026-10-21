@@ -101,7 +101,7 @@ curl -sS -X POST http://127.0.0.1:8787/session/close -H 'content-type: applicati
    bash scripts/install-engine.sh /path/to/engine.env
    ```
 
-   脚本会下载适合当前平台的最新 `engine-v*` Release 二进制，用 Release 的 `SHA256SUMS` 和 `--version` 校验，然后安装为 LaunchAgent 或 systemd 服务。用 `REACH_ENGINE_VERSION=0.3.1` 可以固定版本。OpenWrt 和源码构建见 [Engine](docs/deploy/engine.md)、[Linux](docs/deploy/linux.md)、[OpenWrt](docs/deploy/openwrt.md)。
+   脚本会下载适合当前平台的最新 `engine-v*` Release 二进制，用 Release 的 `SHA256SUMS` 和 `--version` 校验，然后安装为 LaunchAgent 或 systemd 服务。用 `REACH_ENGINE_VERSION=0.3.2` 可以固定版本。OpenWrt 和源码构建见 [Engine](docs/deploy/engine.md)、[Linux](docs/deploy/linux.md)、[OpenWrt](docs/deploy/openwrt.md)。
 4. **创建限定范围的客户端并连接 MCP。** 在控制台创建 delegated 客户端，只授予它需要的 Engine、工作区和读/写/执行权限（见[客户端权限](docs/deploy/client-access.md)）。远程客户端用该 token 连接 `https://<你的 Gateway>/mcp`；不能设置静态请求头的宿主可以用 OAuth，并在批准时明确选择资源。桌面客户端也可以改用 stdio Connector。Owner Controller token 只用于管理。详见 [MCP 安装](docs/deploy/mcp.md)。
 
 | 客户端 | 接入方式 | 状态 |

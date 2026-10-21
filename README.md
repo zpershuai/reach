@@ -101,7 +101,7 @@ A write without a matching grant returns `PERMISSION_DENIED`. Stop both processe
    bash scripts/install-engine.sh /path/to/engine.env
    ```
 
-   The script downloads the latest `engine-v*` Release binary for your platform, verifies it against the Release `SHA256SUMS` and its `--version`, then installs a LaunchAgent or systemd service. Pin a version with `REACH_ENGINE_VERSION=0.3.1`. OpenWrt and source builds are covered in [Engine](docs/deploy/engine.md), [Linux](docs/deploy/linux.md) and [OpenWrt](docs/deploy/openwrt.md).
+   The script downloads the latest `engine-v*` Release binary for your platform, verifies it against the Release `SHA256SUMS` and its `--version`, then installs a LaunchAgent or systemd service. Pin a version with `REACH_ENGINE_VERSION=0.3.2`. OpenWrt and source builds are covered in [Engine](docs/deploy/engine.md), [Linux](docs/deploy/linux.md) and [OpenWrt](docs/deploy/openwrt.md).
 4. **Create a scoped client and connect MCP.** In the console, create a delegated client with only the Engines, workspaces and read/write/execute permissions it needs ([client access](docs/deploy/client-access.md)). Point a remote client at `https://<your-gateway>/mcp` with that token, or approve an OAuth client with an explicit selection for hosts that cannot send static headers. Desktop clients can use the stdio Connector instead. Keep the Owner Controller token for administration. See [MCP installation](docs/deploy/mcp.md).
 
 | Client | How it connects | Status |

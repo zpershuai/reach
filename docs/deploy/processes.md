@@ -33,7 +33,7 @@ Engine 0.3.0 支持 `REACH_WORKSPACES_FILE` 指定的工作区 JSON，或者在�
 
 文件模式每 2 秒轮询，Unix `SIGHUP` 也可触发重载；配置只在请求之间替换。启动时无效会退出，运行中无效 JSON、不可读或删除的文件则保留最后有效配置，记录 `WORKSPACE_RELOAD_FAILED`，不回显文件内容。环境模式不热重载。
 
-移除、更换工作区根目录或关闭执行许可时，Engine 使用正常终止流程停止其中当前会话拥有的进程，`process.status` 仍能查询终止记录，新 `process.run` 被拒绝。即使个别进程未能在宽限期内结束，工作区变更也照常生效，残留进程按 session 清理失败规则保留所有权并在 session 结束时继续清理。其他工作区的进程继续运行。根目录移除/更换同时使对应文件游标失效。刷新 ready 后，Gateway 0.7.1 撤销受影响的执行 grant；关闭执行不会撤销文件写入 grant。仅按 processId 绑定的控制 grant 保留到过期。
+移除、更换工作区根目录或关闭执行许可时，Engine 使用正常终止流程停止其中当前会话拥有的进程，`process.status` 仍能查询终止记录，新 `process.run` 被拒绝。即使个别进程未能在宽限期内结束，工作区变更也照常生效，残留进程按 session 清理失败规则保留所有权并在 session 结束时继续清理。其他工作区的进程继续运行。根目录移除/更换同时使对应文件游标失效。刷新 ready 后，Gateway 0.7.2 撤销受影响的执行 grant；关闭执行不会撤销文件写入 grant。仅按 processId 绑定的控制 grant 保留到过期。
 
 应先升级 Gateway 再升级 Engine。旧 Gateway 更换根目录后仍可能接受旧 grant，直到 5 分钟到期；在旧 Gateway 上请使用新工作区名称。格式、来源优先级和迁移步骤见 [Engine](engine.md) 和 [组件版本](versions.md)。
 

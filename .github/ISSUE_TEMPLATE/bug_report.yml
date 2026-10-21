@@ -13,7 +13,7 @@ body:
     attributes:
       label: Versions
       description: Output of `--version` (or `get_versions`) for each component involved.
-      placeholder: "Gateway 0.7.1, Engine 0.3.1, Connector 0.4.0"
+      placeholder: "Gateway 0.7.2, Engine 0.3.2, Connector 0.4.0"
     validations:
       required: true
   - type: dropdown
