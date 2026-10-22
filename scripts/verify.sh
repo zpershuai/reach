@@ -19,7 +19,7 @@ required_openspec="$(node -p 'require("./package.json").devDependencies["@fissio
 "$openspec_cli" validate --all --strict --no-interactive
 
 python3 scripts/install-publication-tools.py
-for suite in toolchain public-source publication release-trust node-runtime node-launcher engine-linux-installer engine-macos-installer engine-openwrt-installer install-engine release-metadata package-notices release-assets release-plan release-download release-helpers; do
+for suite in toolchain tls-fixture public-source publication release-trust node-runtime node-launcher engine-linux-installer engine-macos-installer engine-openwrt-installer install-engine release-metadata package-notices release-assets release-plan release-download release-helpers; do
   python3 "scripts/test-$suite.py"
 done
 node --test scripts/test-grok-plugin.mjs scripts/test-engine-supervisor.mjs scripts/test-release-workflow.mjs

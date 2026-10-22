@@ -15,11 +15,28 @@ def generate(directory):
         subprocess.run(['openssl', *map(str, args)], cwd=directory, check=True,
                        stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=30)
 
+    # Never inherit req/x509 extensions from a runner's system openssl.cnf.
+    # Some OpenSSL versions append -addext to those defaults, creating duplicate
+    # OIDs that strict certificate verifiers correctly reject.
+    request_config = directory / 'request.cnf'
+    request_config.write_text('''[req]
+distinguished_name=subject
+[subject]
+CN=localhost
+[root]
+basicConstraints=critical,CA:TRUE
+keyUsage=critical,keyCertSign,cRLSign
+[untrusted]
+basicConstraints=critical,CA:FALSE
+keyUsage=critical,digitalSignature,keyEncipherment
+extendedKeyUsage=serverAuth
+subjectAltName=DNS:localhost,IP:127.0.0.1
+''')
     openssl('req', '-x509', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'ca.key',
             '-out', 'ca.crt', '-subj', '/CN=Reach Ephemeral Test CA', '-days', '2',
-            '-addext', 'basicConstraints=critical,CA:TRUE', '-addext', 'keyUsage=critical,keyCertSign,cRLSign')
+            '-config', request_config, '-extensions', 'root')
     openssl('req', '-new', '-newkey', 'rsa:2048', '-nodes', '-keyout', 'leaf.key',
-            '-out', 'leaf.csr', '-subj', '/CN=localhost')
+            '-out', 'leaf.csr', '-subj', '/CN=localhost', '-config', request_config)
     for index, (name, san) in enumerate([('trusted', 'DNS:localhost,IP:127.0.0.1'), ('wrong-host', 'DNS:wrong.example.com')], 1):
         extensions = directory / f'{name}.ext'
         extensions.write_text(f'basicConstraints=critical,CA:FALSE\nkeyUsage=critical,digitalSignature,keyEncipherment\nextendedKeyUsage=serverAuth\nsubjectAltName={san}\n')
@@ -50,8 +67,8 @@ subjectAltName=DNS:localhost,IP:127.0.0.1
 ''')
     openssl('ca', '-batch', '-notext', '-config', config, '-in', 'leaf.csr', '-out', 'expired.crt',
             '-startdate', '20000101000000Z', '-enddate', '20010101000000Z')
-    openssl('req', '-x509', '-key', 'leaf.key', '-out', 'untrusted.crt', '-days', '2',
-            '-subj', '/CN=localhost', '-addext', 'subjectAltName=DNS:localhost,IP:127.0.0.1')
+    openssl('req', '-new', '-x509', '-key', 'leaf.key', '-out', 'untrusted.crt', '-days', '2',
+            '-subj', '/CN=localhost', '-config', request_config, '-extensions', 'untrusted')
     for name in ['ca', 'trusted', 'wrong-host', 'expired', 'untrusted']:
         openssl('x509', '-in', f'{name}.crt', '-outform', 'DER', '-out', f'{name}.der')
     openssl('pkcs8', '-topk8', '-nocrypt', '-in', 'leaf.key', '-outform', 'DER', '-out', 'leaf-key.der')
