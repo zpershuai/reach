@@ -19,6 +19,22 @@ bash scripts/package-engine.sh "$work/engine"
 engine="$work/engine/engine-linux-x64-musl"
 image=reach-gateway:verification
 bash scripts/package-gateway.sh "$work/gateway" "$image"
+docker run --rm --read-only --cap-drop=ALL --security-opt=no-new-privileges "$image" node --input-type=module -e '
+  import assert from "node:assert/strict";
+  import { existsSync, statSync } from "node:fs";
+  import { userInfo } from "node:os";
+  assert.equal(process.getuid(), 1000);
+  assert.equal(userInfo().username, "node");
+  const data = statSync("/var/lib/reach");
+  assert.equal(data.uid, 1000);
+  assert.equal(data.mode & 0o777, 0o700);
+  assert.ok(statSync("/usr/local/LICENSE").size > 0);
+  assert.ok(statSync("/etc/ssl/certs/ca-certificates.crt").size > 0);
+  for (const path of ["/root/.npm", "/var/cache/apk", "/usr/local/lib/node_modules/npm", "/usr/local/lib/node_modules/corepack", "/usr/local/include/node", "/app/node_modules/zod/src/v4/mini/tests"]) assert.equal(existsSync(path), false, path);
+  await import("ws");
+  const { z } = await import("zod");
+  assert.equal(z.string().parse("runtime-fixture"), "runtime-fixture");
+'
 engine_version="$("$engine" --version)"
 python3 scripts/verify-release-assets.py engine-platform "$work/engine" --asset engine-linux-x64-musl
 python3 scripts/verify-release-assets.py gateway "$work/gateway"

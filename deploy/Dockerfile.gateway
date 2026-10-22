@@ -1,11 +1,27 @@
-FROM node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1
+FROM node:24.21.0-alpine@sha256:ebfe2f90462722a7a4de65e91990e97fe0d401c70e0e762c5b53302f905ec1c1 AS build
 WORKDIR /app
-LABEL io.reach.component="gateway"
 COPY packages/reach-rpc/package.json packages/reach-rpc/package-lock.json ./
-RUN npm ci --omit=dev --ignore-scripts
+RUN npm ci --omit=dev --ignore-scripts \
+    && find node_modules/zod/src -type d -name tests -prune -exec rm -rf {} +
 COPY packages/reach-rpc/dist ./dist
 RUN mkdir -p /var/lib/reach && chown node:node /var/lib/reach && chmod 700 /var/lib/reach
+
+# Keep the exact pinned Node/musl runtime, not its build tools, package caches,
+# headers or dependency test fixtures. No build-stage layer enters this image.
+FROM scratch
+WORKDIR /app
+LABEL io.reach.component="gateway"
+COPY --from=build /usr/local/bin/node /usr/local/bin/node
+COPY --from=build /usr/local/LICENSE /usr/local/LICENSE
+COPY --from=build /lib/ld-musl-x86_64.so.1 /lib/libc.musl-x86_64.so.1 /lib/
+COPY --from=build /usr/lib/libstdc++.so.6* /usr/lib/libgcc_s.so.1 /usr/lib/
+COPY --from=build /etc/passwd /etc/group /etc/
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=build /app/package.json /app/package-lock.json ./
+COPY --from=build /app/node_modules ./node_modules
+COPY --from=build /app/dist ./dist
+COPY --from=build --chown=1000:1000 /var/lib/reach /var/lib/reach
 USER node
-ENV GATEWAY_HOST=0.0.0.0 GATEWAY_PORT=8787
+ENV PATH=/usr/local/bin:/usr/bin:/bin GATEWAY_HOST=0.0.0.0 GATEWAY_PORT=8787
 EXPOSE 8787
 CMD ["node", "dist/gateway-main.js"]

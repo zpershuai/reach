@@ -21,6 +21,17 @@ fixtures = load('asset_fixtures', 'test-release-assets.py')
 
 
 class PlanTests(unittest.TestCase):
+    def test_candidate_scan_summary_never_logs_match_contents_or_private_paths(self):
+        report = {'coverage': 'complete', 'items': [{'id': 'source', 'status': 'findings', 'findings': [{'Secret': 'never-log-this-value', 'File': '/private/fixture', 'Match': 'private-match'}]}]}
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary); release = root / 'release'; release.mkdir()
+            source = root / 'source'; source.mkdir()
+            with patch.object(publisher.plan.publication, 'scan_inventory', return_value=report), patch.object(publisher.plan.publication, 'write_private_report'), contextlib.redirect_stdout(io.StringIO()) as output, self.assertRaises(ValueError):
+                publisher.plan.scan(release, source)
+            text = output.getvalue()
+            for private in ['never-log-this-value', '/private/fixture', 'private-match']: self.assertNotIn(private, text)
+            self.assertEqual(json.loads(text.removeprefix('candidate-scan='))['items'][0]['findings'], 1)
+
     def official_fixture(self, root, component):
         if component == 'engine':
             fixtures.AssetTests().fixture(root)

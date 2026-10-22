@@ -53,6 +53,11 @@ def scan(directory, source, image_archive=None):
     inventory = {'schemaVersion': 1, 'scope': scope, 'items': items}
     result = publication.scan_inventory(inventory, Path('/'))
     publication.write_private_report(Path('.reach/publication/candidate-scan.json'), result, metadata.ROOT)
+    # CI logs may be public: expose coverage, not matches, values or file paths.
+    print('candidate-scan=' + json.dumps({'coverage': result['coverage'], 'items': [
+        {'id': item['id'], 'status': item['status'], 'code': item.get('code'),
+         'findings': len(item.get('findings', []))} for item in result['items']
+    ]}, sort_keys=True))
     if result['coverage'] != 'complete' or any(item['status'] != 'scanned' for item in result['items']):
         raise ValueError('Candidate scanning failed or is incomplete; inspect the private report')
 
