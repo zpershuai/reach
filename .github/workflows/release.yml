@@ -207,7 +207,10 @@ jobs:
 
   publish:
     needs: [version, verify, candidate]
+    # The other component build is skipped; override implicit success() while
+    # still refusing cancellation and requiring every publication gate to pass.
     if: >-
+      always() && !cancelled() &&
       github.event_name == 'push' && startsWith(github.ref, 'refs/tags/') &&
       github.repository == 'zpershuai/reach' &&
       needs.version.outputs.test_only == 'false' &&

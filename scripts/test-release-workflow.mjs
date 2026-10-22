@@ -25,7 +25,7 @@ test('fork and PR verification has no release secrets or write authority', () =>
 
 test('only trusted tags with every gate and exact approval reach the protected publisher', () => {
   const job = release.jobs.publish;
-  for (const condition of ["github.event_name == 'push'", "startsWith(github.ref, 'refs/tags/')", "github.repository == 'zpershuai/reach'", "needs.version.outputs.test_only == 'false'", "needs.version.result == 'success'", "needs.verify.result == 'success'", "needs.candidate.result == 'success'"]) {
+  for (const condition of ["always()", "!cancelled()", "github.event_name == 'push'", "startsWith(github.ref, 'refs/tags/')", "github.repository == 'zpershuai/reach'", "needs.version.outputs.test_only == 'false'", "needs.version.result == 'success'", "needs.verify.result == 'success'", "needs.candidate.result == 'success'"]) {
     assert.ok(job.if.includes(condition), condition);
   }
   assert.equal(job.environment, 'public-release');
