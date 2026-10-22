@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { once } from "node:events";
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -40,15 +41,21 @@ test("concurrent bootstrap creation publishes only a complete credential and no 
   const directory = mkdtempSync(join(tmpdir(), "reach-setup-concurrent-"));
   const module = new URL("./setup-token.js", import.meta.url).href;
   try {
-    const results = await Promise.all(Array.from({ length: 8 }, async () => {
-      const program = `import { loadSetupToken } from ${JSON.stringify(module)}; import { createHash } from 'node:crypto'; const token = loadSetupToken(process.argv[1]); process.stdout.write(createHash('sha256').update(token).digest('hex'));`;
+    const results = await Promise.all(Array.from({ length: 8 }, async (_, index) => {
+      // One writer outlives its direct parent so exit cannot imply drained stdio.
+      const emit = index === 0
+        ? `const { spawn } = await import('node:child_process'); const writer = spawn(process.execPath, ['-e', 'setTimeout(() => process.stdout.write(process.argv[1]), 25)', digest], { stdio: ['ignore', 1, 2] }); writer.unref();`
+        : `process.stdout.write(digest);`;
+      const program = `import { loadSetupToken } from ${JSON.stringify(module)}; import { createHash } from 'node:crypto'; const token = loadSetupToken(process.argv[1]); const digest = createHash('sha256').update(token).digest('hex'); ${emit}`;
       const child = spawn(process.execPath, ["--input-type=module", "-e", program, directory], { stdio: ["ignore", "pipe", "pipe"] });
       let stdout = "", stderr = "";
       child.stdout.on("data", data => { stdout += data; }); child.stderr.on("data", data => { stderr += data; });
-      const [code] = await once(child, "exit"); assert.equal(code, 0, stderr); return { stdout, stderr };
+      const [code] = await once(child, "close"); assert.equal(code, 0, stderr); return { stdout, stderr };
     }));
     const token = readFileSync(join(directory, "admin-setup-token"), "utf8").trim();
+    const expected = createHash("sha256").update(token).digest("hex");
     assert.equal(new Set(results.map(result => result.stdout)).size, 1);
+    assert.ok(results.every(result => /^[a-f0-9]{64}$/.test(result.stdout) && result.stdout === expected));
     assert.ok(results.every(result => !result.stdout.includes(token) && !result.stderr.includes(token)));
     assert.deepEqual(readdirSync(directory), ["admin-setup-token"]);
     removeSetupToken(directory); assert.equal(existsSync(join(directory, "admin-setup-token")), false);
