@@ -68,7 +68,9 @@ class HelperTests(unittest.TestCase):
         compose = (repo/'deploy/compose.yaml').read_text()
         for required in ['read_only: true', 'cap_drop: [ALL]', 'no-new-privileges:true', './data:/var/lib/reach:rw', 'REACH_DATA_DIR: /var/lib/reach']:
             self.assertIn(required, compose)
-        self.assertIn('chown node:node /var/lib/reach', (repo/'deploy/Dockerfile.gateway').read_text())
+        dockerfile = (repo/'deploy/Dockerfile.gateway').read_text()
+        self.assertIn('chown node:node /runtime-data/reach && chmod 700 /runtime-data/reach', dockerfile)
+        self.assertIn('COPY --from=build --chown=1000:1000 /runtime-data/ /var/lib/', dockerfile)
 
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory()

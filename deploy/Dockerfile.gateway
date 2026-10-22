@@ -4,7 +4,7 @@ COPY packages/reach-rpc/package.json packages/reach-rpc/package-lock.json ./
 RUN npm ci --omit=dev --ignore-scripts \
     && find node_modules/zod/src -type d -name tests -prune -exec rm -rf {} +
 COPY packages/reach-rpc/dist ./dist
-RUN mkdir -p /var/lib/reach && chown node:node /var/lib/reach && chmod 700 /var/lib/reach
+RUN mkdir -p /runtime-data/reach && chown node:node /runtime-data/reach && chmod 700 /runtime-data/reach
 
 # Keep the exact pinned Node/musl runtime, not its build tools, package caches,
 # headers or dependency test fixtures. No build-stage layer enters this image.
@@ -20,7 +20,9 @@ COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
 COPY --from=build /app/package.json /app/package-lock.json ./
 COPY --from=build /app/node_modules ./node_modules
 COPY --from=build /app/dist ./dist
-COPY --from=build --chown=1000:1000 /var/lib/reach /var/lib/reach
+# Copy reach as a child directory, preserving its 0700 mode. Copying an empty
+# source directory's contents directly would create the destination as 0755.
+COPY --from=build --chown=1000:1000 /runtime-data/ /var/lib/
 USER node
 ENV PATH=/usr/local/bin:/usr/bin:/bin GATEWAY_HOST=0.0.0.0 GATEWAY_PORT=8787
 EXPOSE 8787
