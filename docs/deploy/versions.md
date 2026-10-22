@@ -117,7 +117,7 @@ npm --prefix packages/grok-bot-mcp-connector version 0.4.0 --no-git-tag-version
 
 ## 可选自动更新
 
-自动更新默认关闭；仅 `REACH_UPDATE_ENABLED=1` 或 `true` 启用，并需设置 `REACH_UPDATE_REPO=example/reach`。配置详见 [配置](configuration.md)，宿主机 helper 安装与回滚见 [运维](operations.md)。检查使用分页 GitHub Releases，按组件选择最高稳定 `X.Y.Z`，忽略 draft、prerelease、相等或更旧版本。默认每小时检查，失败时只对更新器退避，不改变心跳或 HTTP 服务。
+自动更新默认关闭；仅 `REACH_UPDATE_ENABLED=1` 或 `true` 启用，并需设置 `REACH_UPDATE_REPO=zpershuai/reach`。配置详见 [配置](configuration.md)，宿主机 helper 安装与回滚见 [运维](operations.md)。检查使用分页 GitHub Releases，按组件选择最高稳定 `X.Y.Z`，忽略 draft、prerelease、相等或更旧版本。默认每小时检查，失败时只对更新器退避，不改变心跳或 HTTP 服务。
 
 Engine 在独立后台线程按批准 HTTPS 来源下载，校验唯一 SHA-256、ELF/Mach-O 平台/架构后才探测 `--version`，只在没有连接中、活动或 draining 会话时替换，保存 `engine.prev` 与私有健康 intent。新版安装器的启动 guard 在 supervisor 重启后等待新进程首次成功心跳；退出或 30 秒超时自动恢复旧 binary 和版本清单。旧启动脚本未安装 guard 时不应用 host 更新，需先在维护环境升级安装器。存在的 `~/.reach/versions.json` 同步记录 `engineVersion`。Compose Engine 与 Gateway 则在空闲时写入共享目录的 `request.json`，由宿主机 helper 先下载、校验并准备镜像，再通过共享目录握手等待空闲、暂缓新会话并重建容器；Gateway 要求所有注册 Engine 的会话均为 `none`。未安装 helper 时只保留更新请求与日志，当前进程继续运行。
 

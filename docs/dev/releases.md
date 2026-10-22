@@ -1,12 +1,14 @@
 # Component release procedure
 
-This procedure prepares and verifies candidates. Publishing source, creating official tags, configuring credentials and publishing a Release are separate maintainer operations. Keep inventories, reports, review identities and private revision mappings in ignored `.reach/` or outside the repository. Preserve existing installations and private history. Follow the [publication checklist](publishing-checklist.md) before choosing a source snapshot.
+This procedure prepares and verifies candidates. Creating official tags, configuring release approval and publishing a Release are separate maintainer operations. Keep inventories, reports and review identities in ignored `.reach/` or outside the repository. Preserve existing installations. Follow the [publication checklist](publishing-checklist.md) before choosing a source snapshot.
 
 ## Source and distribution identities
 
-A source repository and separate Engine/Gateway distribution repositories may be used. `example/reach-source`, `example/reach-engine` and `example/reach-gateway` below are placeholders, not verified repositories. A binary repository is not a substitute for publicly accessible matching source.
+Source and both components' new releases live in [zpershuai/reach](https://github.com/zpershuai/reach/releases). Engine and Gateway retain separate `engine-vX.Y.Z` and `gateway-vX.Y.Z` tags and asset sets. Do not merge the two components into one Release or use GitHub's repository-wide latest-release shortcut to select a component.
 
-Official metadata generation requires an unchanged checkout whose HEAD equals the supplied full public revision. It anonymously checks the GitHub repository and that exact commit. It refuses private or unavailable source. Do not substitute a private revision or a private-to-public mapping. The tag must match the component manifest. A clean export from the original private repository requires its own approved public commit before this step.
+The old [Engine](https://github.com/zpershuai/reach-engine/releases) and [Gateway](https://github.com/zpershuai/reach-gateway/releases) distribution repositories and their published versions remain available. No history or assets are migrated, overwritten or deleted by this workflow. Existing explicit `REACH_RELEASE_REPO` and `REACH_UPDATE_REPO` settings keep their meaning; change them to `zpershuai/reach` when an installation should follow new releases. Nothing rewrites running installations' configuration.
+
+Official metadata generation requires an unchanged checkout whose HEAD equals the supplied full public revision. It anonymously checks the GitHub repository and that exact commit. It refuses private or unavailable source, including an anonymous API rate limit. The tag must match the component manifest. For publication the existing tag must resolve to that exact revision, including annotated tags; a missing or mismatched tag fails before any Release is created.
 
 Use the exact versions in `scripts/toolchain.json`, npm lockfiles and Cargo.lock. CI pins identify the verification environment, not a promise that every older supported host uses those versions.
 
@@ -38,12 +40,12 @@ docker save --output .reach/gateway-image-build.tar reach-gateway:candidate
 
 Keep build directories, unpacked LICENSES trees and image build archives out of the publishable directory. Exact allowlists reject extra files, not just missing files. Do not combine Engine and Gateway into one component Release.
 
-Generate metadata for the selected component (replace the tag and placeholder repository):
+Generate metadata for the selected component (replace the tag with the manifest version):
 
 ```bash
 public_revision="$(git rev-parse HEAD)"
-python3 scripts/release-metadata.py manifest engine-v0.3.1 .reach/release \
-  --source-repository example/reach-source --source-revision "$public_revision" \
+python3 scripts/release-metadata.py manifest engine-v0.3.2 .reach/release \
+  --source-repository zpershuai/reach --source-revision "$public_revision" \
   --toolchain scripts/toolchain.json
 python3 scripts/verify-release-assets.py complete .reach/release
 ```
@@ -69,38 +71,30 @@ A digest alone is not human approval. Review the exact candidate plus the comple
 
 ## CI configuration and publication permissions
 
-Set repository variables to approved actual targets. Do not put deployment details in these public examples:
+The workflow derives candidate source identity from `github.repository`. It needs no source/target repository variables or cross-repository PAT. Official publication is restricted to `zpershuai/reach`; forks may build candidates but cannot enter the official publisher.
 
-| Variable / secret | Purpose |
+The only write permission declared in the workflow is **`contents: write` on the `publish` job**. All version, verification, build and candidate jobs inherit `contents: read`. The publisher receives the automatic, repository-scoped, short-lived `github.token` as `GH_TOKEN`; it is not a manually stored secret. Checkout does not persist that publishing credential. No Actions, administration, workflow-write or package-write permission is requested, and no broad default workflow permission change is needed. The old source/target variables and dedicated release PAT are no longer used.
+
+Two approval controls remain:
+
+| Control | Purpose |
 | --- | --- |
-| `REACH_SOURCE_REPOSITORY` variable | Exact public source owner/repository; release workflow ignores other repositories |
-| `REACH_ENGINE_RELEASE_REPOSITORY`, `REACH_GATEWAY_RELEASE_REPOSITORY` variables | Exact public binary repositories; no implicit private-source fallback |
-| `REACH_APPROVED_CANDIDATE_SHA256` environment variable | Reviewed digest printed by the candidate gate, bound to exact manifest and optional image archive |
-| `REACH_PUBLIC_RELEASE_TOKEN` environment secret | Fine-grained contents write only for approved distribution repositories; no source administration permission |
-| `REACH_GATEWAY_IMAGE_REPOSITORY` variable | Optional `ghcr.io/<approved-owner>/<approved-image>`; empty disables image publication |
-| `REACH_GHCR_PUBLISH_TOKEN` secret and `REACH_GHCR_USER` variable | Optional package publishing identity limited to the approved image target |
+| `public-release` environment | Required reviewers, component-tag restrictions and no unreviewed administrator bypass |
+| `REACH_APPROVED_CANDIDATE_SHA256` environment variable | Reviewed digest printed by the candidate gate, bound to the exact manifest and optional scanned image archive |
 
-Protect the `public-release` environment with required reviewers, restricted component tags and no unreviewed bypass. Review the actual candidate digest after build before approval. Verify those remote settings and token scopes privately; YAML cannot enforce remote settings or prove credentials exist. Build/verify/candidate jobs use read-only repository permissions and receive no cross-repository or registry credentials. Do not use `pull_request_target` to build untrusted code with secrets.
+Configure the protected environment **before the first official tag run**. Otherwise GitHub can create an unprotected environment automatically. Select an actual trusted reviewer; preventing self-review requires someone other than the run's initiator to approve. Restrict deployment to tags `engine-v*` and `gateway-v*`, rather than branches. Build/verify/candidate jobs never reference the environment or publisher token. YAML alone cannot prove those remote protections exist, and preparing this change does not authorize creating or weakening them.
 
-### Minimal configuration plan (requires separate approval)
+Ordinary pushes/PRs verify only. `workflow_dispatch` builds a candidate and uploads its explicit asset allowlist, but cannot publish a Release. Only a component tag push on the official repository, descended from its default branch, can reach publish after verification, candidate review, the exact digest and environment approval. Changed bytes require a new candidate review and digest. Do not use `pull_request_target` to build untrusted code with write authority.
 
-Preparing this plan does not authorize changing repository settings, creating an environment or storing credentials. Leave the source-repository variable unset until the public source identity and release targets are approved: setting it allows matching future tag pushes to enter the release workflow. A missing variable intentionally skips release jobs; it is not a reason to remove that guard.
+For tag-triggered CI before merging a repair branch, create a **new** tag `engine-vX.Y.Z-ci.N` or `gateway-vX.Y.Z-ci.N`, where the component version matches its manifest and `N` is a unique positive integer (for example a UTC timestamp). The test commit must contain the current default branch. These explicit CI prerelease tags run the same verification, native component builds, packaging and candidate scans, and upload candidate artifacts. Their normalized manifest retains `X.Y.Z`, but `test_only=true` explicitly skips the protected publisher, regardless of credentials or approval settings. The strict official tag parser still rejects prerelease tags. Never move or reuse an existing test tag; use a new suffix for a retry. Ordinary stable tags still require their commit to be contained in the default branch.
 
-1. **Approve public source first.** Export and review a clean snapshot following the [publication checklist](publishing-checklist.md). Keep the original private history private. Identify the actual public source repository and full commit; the manifest generator verifies both anonymously. Pointing the variable at a private repository cannot satisfy this gate.
-2. **Set only target variables on that approved source repository.** Configure `REACH_SOURCE_REPOSITORY`, `REACH_ENGINE_RELEASE_REPOSITORY` and `REACH_GATEWAY_RELEASE_REPOSITORY` to the approved repositories. These identify public source and distribution destinations; they contain no credentials. Do not enable the optional image target for a tarball-only release.
-3. **Create the protected environment on that source repository.** After explicit approval, create `public-release` with required reviewers, prevent self-review and unreviewed bypass where supported, and restrict deployment to `engine-v*` and `gateway-v*` tags. Check that the account plan supports the intended protections before enabling publication. Ordinary branch pushes and PRs must continue to verify without publisher credentials.
-4. **Prepare a dedicated distribution credential.** Use an expiring fine-grained PAT or GitHub App installation token restricted to the two approved distribution repositories, with **Contents: read and write** and the implicit metadata read access. No source-repository access, administration, Actions, secrets or workflow-write permission is required for this publisher's releases targeting each distribution repository's existing default branch. Keep credentials that can change workflow files out of this role. Store the dedicated credential only as the environment secret `REACH_PUBLIC_RELEASE_TOKEN`, after separate approval; never copy a maintainer's broadly scoped CLI token into Actions. The current secret name is `REACH_PUBLIC_RELEASE_TOKEN`, not the old `PUBLIC_RELEASE_TOKEN`.
-5. **Approve exact bytes per candidate.** Build and inspect the candidate and complete publication inventory before setting the environment variable `REACH_APPROVED_CANDIDATE_SHA256` to the reviewed digest. That value grants publication of those exact bytes; it is neither a standing approval for later builds nor a substitute for environment review. Changed bytes require a new review and digest.
+The publisher refuses any existing Release (including drafts), verifies that the existing component tag resolves to the approved source revision, creates a draft with `--verify-tag`, then publishes and independently downloads the exact files. It never creates, moves or deletes a tag, and never replaces old Release assets. Do not rerun an old pre-fix tag to validate current main or move an existing version's tag to include new fixes; choose and review a new component version instead.
 
-Keep `REACH_GATEWAY_IMAGE_REPOSITORY`, `REACH_GHCR_PUBLISH_TOKEN` and `REACH_GHCR_USER` unset for the minimum tarball-only configuration. Container publication needs a separate image/layer and permission review. A fine-grained Contents token is not a GHCR credential: GitHub documents registry authentication separately, including workflow `GITHUB_TOKEN` and PAT (classic) package scopes. The current optional secret-based path must use a dedicated identity and the minimum supported package scope, without broad `repo` or `delete:packages` access. Switching to a workflow token with package write would itself require a separately approved workflow and package-permission change.
+New Gateway releases ship `gateway-amd64.tgz` with the inputs for a local Docker build. The candidate container is still built and every layer scanned, but this workflow does not push to GHCR and needs no registry credentials or `packages: write`. Existing image references, checksums and the legacy download/readback paths remain supported. Container publication would require a separately reviewed change.
 
-Read-only diagnosis may list variable names, target values, environment protection metadata and secret **names**, never secret values. Repository admin/push access does not prove a release credential exists or has the required restricted scope. A missing/inaccessible protected environment, unavailable public source, absent secret or unmatched candidate approval remains incomplete; do not enable permissive defaults to work around it.
+A failure after Release creation can leave a draft or published Release requiring investigation. Do not automatically delete, retag or overwrite it. Diagnose privately and use a reviewed new version if needed. SHA-256 binds the reviewed bytes; publisher signatures remain future work.
 
-Permission references: [Release API token permissions](https://docs.github.com/en/rest/releases/releases#create-a-release) and [Container registry authentication](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry#authenticating-to-the-container-registry).
-
-Ordinary pushes/PRs verify only. `workflow_dispatch` creates a dry-run candidate. Only a trusted tag push on the configured source repository, descended from its default branch, can reach publish after all gates pass. Upload paths are explicit allowlists. The publisher checks candidate approval before network mutations, refuses any existing Release or distribution tag, creates a draft with exact files, then publishes and downloads it again. GHCR is pushed only from the reviewed image archive in the publisher; the final manifest includes its immutable digest reference.
-
-A failure after creation can leave a draft, published Release or image requiring investigation. Do not automatically delete, retag or overwrite it. Diagnose privately and use a reviewed new version if needed. SHA-256 protects against changed bytes within this approved HTTPS/write-access trust channel; publisher signatures remain future work.
+Permission references: [automatic token authentication](https://docs.github.com/en/actions/security-for-github-actions/security-guides/automatic-token-authentication), [Release API permissions](https://docs.github.com/en/rest/releases/releases#create-a-release), and [environment protection](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments).
 
 ## Independent download acceptance
 
@@ -108,10 +102,10 @@ Keep the approved build manifest locally, then run this read-only command withou
 
 ```bash
 python3 scripts/verify-release-download.py .reach/release/release-manifest.json \
-  --repository example/reach-engine --tag engine-v0.3.1 \
+  --repository zpershuai/reach --tag engine-v0.3.2 \
   --report .reach/publication/release-readback.json
 ```
 
-Use the Gateway repository/tag for Gateway. The command enumerates the remote inventory, requires the exact approved file set, downloads every file anonymously, checks byte counts/hashes, validates the embedded versions/platforms/licenses, checks the public source revision, and verifies optional GHCR manifest bytes against their approved digest. A missing/duplicate/extra attachment, wrong content, inaccessible source/image or last-asset timeout remains incomplete. The command never modifies a Release. Loopback HTTP is accepted only with explicit `--test-mode --api-origin` for synthetic tests; it is not an official acceptance result.
+Use the same repository with `gateway-vX.Y.Z` for Gateway. For a retained legacy release, pass its original distribution repository and tag explicitly. The command enumerates the remote inventory, requires the exact approved file set, downloads every file anonymously, checks byte counts/hashes, validates the embedded versions/platforms/licenses, checks the public source revision, and verifies optional GHCR manifest bytes against their approved digest. A missing/duplicate/extra attachment, wrong content, inaccessible source/image or last-asset timeout remains incomplete. The command never modifies a Release. Loopback HTTP is accepted only with explicit `--test-mode --api-origin` for synthetic tests; it is not an official acceptance result.
 
 After publication separately verify anonymous source/history visibility, security reporting and all intended retained distributions. Record actual results privately; preparing a candidate does not mean source has been published.

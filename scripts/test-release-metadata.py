@@ -14,6 +14,28 @@ spec.loader.exec_module(metadata)
 
 
 class ReleaseTests(unittest.TestCase):
+    def test_ci_prerelease_tags_build_real_components_but_are_never_official_tags(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            (root / 'crates/reach-rpc').mkdir(parents=True)
+            (root / 'crates/reach-rpc/Cargo.toml').write_text('version = "1.2.3"\n')
+            (root / 'packages/reach-rpc').mkdir(parents=True)
+            (root / 'packages/reach-rpc/package.json').write_text('{"version":"4.5.6"}')
+            for component, version in [('engine', '1.2.3'), ('gateway', '4.5.6')]:
+                stable = f'{component}-v{version}'
+                self.assertEqual(metadata.workflow_tag(stable, root)['test_only'], 'false')
+                ci = stable + '-ci.20261022040000'
+                self.assertEqual(metadata.workflow_tag(ci, root), {'component': component, 'version': version, 'tag': stable, 'test_only': 'true'})
+                with self.assertRaises(ValueError): metadata.parse_tag(ci, root)
+            for tag in ['engine-v1.2.4-ci.1', 'engine-v1.2.3-ci.01', 'engine-v1.2.3-ci.', 'engine-v1.2.3-rc.1', 'gateway-v1.2.3-ci.1']:
+                with self.subTest(tag=tag), self.assertRaises(ValueError): metadata.workflow_tag(tag, root)
+
+    def test_both_components_use_the_source_repository_despite_legacy_target_variables(self):
+        with patch.dict('os.environ', {'REACH_ENGINE_RELEASE_REPOSITORY': 'example/old-engine', 'REACH_GATEWAY_RELEASE_REPOSITORY': 'example/old-gateway'}):
+            for component in ['engine', 'gateway']:
+                self.assertEqual(metadata.public_repository(component), 'zpershuai/reach')
+        with self.assertRaises(ValueError): metadata.public_repository('unknown')
+
     def manifest(self, directory, component='engine'):
         for name in metadata.required_assets(component): (directory/name).write_bytes(('fixture-'+name).encode())
         source=metadata.public_source('example/reach-source','a'*40,False)

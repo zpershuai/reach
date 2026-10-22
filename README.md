@@ -94,7 +94,7 @@ A write without a matching grant returns `PERMISSION_DENIED`. Stop both processe
 ### B. Deploy for real
 
 1. **Generate credentials and config.** Follow [configuration](docs/deploy/configuration.md) to create a Gateway env file and an Engine env file with separate random tokens.
-2. **Run the Gateway.** Download `gateway-amd64.tgz` from the latest `gateway-v*` [Release](https://github.com/zpershuai/reach/releases), add your `gateway.env`, start it with `docker compose -f deploy/compose.yaml up -d --build`, and put HTTPS in front of it (Caddy example included). A versioned image is also published as `ghcr.io/<owner>/reach-gateway`. See [Gateway deployment](docs/deploy/gateway.md).
+2. **Run the Gateway.** Download `gateway-amd64.tgz` from the latest `gateway-v*` [Release](https://github.com/zpershuai/reach/releases), add your `gateway.env`, start it with `docker compose -f deploy/compose.yaml up -d --build`, and put HTTPS in front of it (Caddy example included). New releases include local Docker build inputs; previously published GHCR images remain available. See [Gateway deployment](docs/deploy/gateway.md).
 3. **Install an Engine on each device.** On macOS (arm64/x64) or Linux x86_64 with systemd, from a checkout of this repository:
 
    ```bash

@@ -5,12 +5,12 @@ import hashlib
 import json
 import re
 import subprocess
-import os
 from pathlib import Path
 from release_trust import download
 
 ROOT = Path(__file__).resolve().parents[1]
 SEMVER = r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)"
+PUBLIC_REPOSITORY = 'zpershuai/reach'
 
 
 def parse_tag(tag, root=ROOT):
@@ -26,6 +26,15 @@ def parse_tag(tag, root=ROOT):
     if version != expected:
         raise ValueError(f"{component} tag version {version} does not match manifest {expected}")
     return component, version
+
+
+def workflow_tag(tag, root=ROOT):
+    """Normalize explicit CI prerelease tags without accepting them as releases."""
+    match = re.fullmatch(rf'((?:engine|gateway)-v{SEMVER})-ci\.([1-9][0-9]*)', tag)
+    canonical = match.group(1) if match else tag
+    component, version = parse_tag(canonical, root)
+    return {'component': component, 'version': version, 'tag': canonical,
+            'test_only': 'true' if match else 'false'}
 
 
 def checksums(directory, assets):
@@ -54,9 +63,7 @@ def required_assets(component, image=False):
 
 def public_repository(component):
     if component not in ('engine','gateway'): raise ValueError('Unknown release component')
-    value=os.environ.get(f'REACH_{component.upper()}_RELEASE_REPOSITORY', '')
-    if not re.fullmatch(r'[A-Za-z0-9_-]+/[A-Za-z0-9_.-]+', value): raise ValueError('Configure the public distribution repository')
-    return value
+    return PUBLIC_REPOSITORY
 
 
 def public_source(repository, revision, verify=True):
@@ -151,6 +158,8 @@ def main():
     sub = parser.add_subparsers(dest="command", required=True)
     tag_parser = sub.add_parser("tag")
     tag_parser.add_argument("tag")
+    workflow_tag_parser = sub.add_parser('workflow-tag')
+    workflow_tag_parser.add_argument('tag')
     checksum_parser = sub.add_parser("checksums")
     checksum_parser.add_argument("directory", type=Path)
     checksum_parser.add_argument("assets", nargs="+")
@@ -165,6 +174,9 @@ def main():
     if args.command == "tag":
         component, version = parse_tag(args.tag)
         print(f"component={component}\nversion={version}")
+    elif args.command == 'workflow-tag':
+        for name, value in workflow_tag(args.tag).items():
+            print(f'{name}={value}')
     elif args.command == "checksums":
         checksums(args.directory, args.assets)
     elif args.command == 'manifest':

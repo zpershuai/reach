@@ -11,7 +11,8 @@ test('fork and PR verification has no release secrets or write authority', () =>
   assert.ok('pull_request' in verify.on);
   assert.ok('workflow_call' in verify.on);
   assert.equal(release.on.pull_request, undefined);
-  assert.equal(release.jobs.version.if, 'github.repository == vars.REACH_SOURCE_REPOSITORY');
+  assert.equal(release.jobs.version.if, undefined);
+  assert.equal(release.permissions.contents, 'read');
   for (const [name, job] of Object.entries(release.jobs)) {
     if (name === 'publish') continue;
     assert.ok(!JSON.stringify(job).includes('secrets.'));
@@ -24,20 +25,35 @@ test('fork and PR verification has no release secrets or write authority', () =>
 
 test('only trusted tags with every gate and exact approval reach the protected publisher', () => {
   const job = release.jobs.publish;
-  for (const condition of ["github.event_name == 'push'", "startsWith(github.ref, 'refs/tags/')", 'github.repository == vars.REACH_SOURCE_REPOSITORY', "needs.version.result == 'success'", "needs.verify.result == 'success'", "needs.candidate.result == 'success'"]) {
+  for (const condition of ["github.event_name == 'push'", "startsWith(github.ref, 'refs/tags/')", "github.repository == 'zpershuai/reach'", "needs.version.outputs.test_only == 'false'", "needs.version.result == 'success'", "needs.verify.result == 'success'", "needs.candidate.result == 'success'"]) {
     assert.ok(job.if.includes(condition), condition);
   }
   assert.equal(job.environment, 'public-release');
-  assert.equal(job.permissions.contents, 'read');
+  assert.deepEqual(job.permissions, { contents: 'write' });
   assert.equal(release.jobs.verify.uses, './.github/workflows/verify.yml');
   const publisher = job.steps.at(-1);
   assert.ok(publisher.run.indexOf('release-plan.py approve') < publisher.run.indexOf('--publish'));
-  assert.equal(publisher.env.GH_TOKEN, '${{ secrets.REACH_PUBLIC_RELEASE_TOKEN }}');
-  assert.ok(publisher.env.REACH_ENGINE_RELEASE_REPOSITORY);
-  assert.ok(publisher.env.REACH_GATEWAY_RELEASE_REPOSITORY);
-  assert.ok(publisher.env.REACH_GATEWAY_IMAGE_REPOSITORY);
+  assert.equal(publisher.env.GH_TOKEN, '${{ github.token }}');
+  assert.equal(job.steps[0].with['persist-credentials'], false);
+  assert.ok(!JSON.stringify(release).includes('secrets.'));
+  for (const oldSetting of ['REACH_SOURCE_REPOSITORY', 'REACH_ENGINE_RELEASE_REPOSITORY', 'REACH_GATEWAY_RELEASE_REPOSITORY', 'REACH_PUBLIC_RELEASE_TOKEN', 'REACH_GHCR_PUBLISH_TOKEN']) assert.ok(!JSON.stringify(release).includes(oldSetting));
+  const metadata = release.jobs.candidate.steps.find(step => step.env?.SOURCE_REPOSITORY);
+  assert.equal(metadata.env.SOURCE_REPOSITORY, '${{ github.repository }}');
   const candidate = JSON.stringify(release.jobs.candidate);
   for (const gate of ['manifest', 'verify-release-assets.py complete', 'install-publication-tools.py', 'prepare-public-source.py', 'release-plan.py prepare']) assert.ok(candidate.includes(gate));
+});
+
+test('explicit CI tags use the real component pipeline and cannot enter publishing', () => {
+  assert.deepEqual(release.on.push.tags, ['engine-v*', 'gateway-v*']);
+  assert.equal(release.jobs.version.outputs.test_only, '${{ steps.tag.outputs.test_only }}');
+  const steps = release.jobs.version.steps;
+  assert.ok(steps.find(step => step.run?.includes('release-metadata.py workflow-tag')));
+  const ancestry = steps.find(step => step.env?.TEST_ONLY);
+  assert.ok(ancestry.run.includes('if [[ "$TEST_ONLY" == true ]]'));
+  assert.ok(ancestry.run.includes('git merge-base --is-ancestor "origin/$DEFAULT_BRANCH" HEAD'));
+  assert.ok(ancestry.run.includes('git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"'));
+  for (const name of ['verify', 'engine', 'gateway', 'candidate']) assert.ok(release.jobs[name]);
+  assert.ok(release.jobs.publish.if.includes("needs.version.outputs.test_only == 'false'"));
 });
 
 test('artifact uploads are explicit allowlists and private reports cannot be uploaded', () => {

@@ -10,7 +10,7 @@ Engine 是 Rust 可执行程序，负责访问设备工作区。它通过 HTTPS 
 bash scripts/install-engine.sh .reach/engine.env
 ```
 
-脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.3.2` 可以固定版本，`REACH_RELEASE_REPO=owner/repo` 可以指定 fork，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
+脚本按 `uname` 选择 `engine-darwin-arm64`、`engine-darwin-x64` 或 `engine-linux-x64-musl`，下载最新的 `engine-v*` Release，用 Release 的 `SHA256SUMS` 和 `engine --version` 校验后，再调用本页的 LaunchAgent 安装器或 [Linux 安装器](linux.md)。校验失败时不会安装。`REACH_ENGINE_VERSION=0.3.2` 可以固定版本，默认从 `zpershuai/reach` 的 Releases 下载；`REACH_RELEASE_REPO=owner/repo` 可以指定 fork 或保留的旧分发仓库，`REACH_INSTALL_DRY_RUN=1` 只下载和校验、不安装。macOS 上传入的第二个参数（MCP 设备 JSON）会原样交给 LaunchAgent 安装器，此时仍需先构建 MCP Connector。
 
 ## 1. 配置与工作区
 

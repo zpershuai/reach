@@ -144,7 +144,7 @@ Gateway 通过 HTTPS 域名提供控制接口，Engine 通过同一 origin 建�
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
 | `REACH_UPDATE_ENABLED` | 关闭 | `1` / `true` 启用；其他值保持关闭 |
-| `REACH_UPDATE_REPO` | 无 | 启用必填，格式 `owner/repo`，例如 `example/reach` |
+| `REACH_UPDATE_REPO` | 无 | 启用必填，格式 `owner/repo`，官方新版本使用 `zpershuai/reach` |
 | `REACH_UPDATE_INTERVAL_SECS` | `3600` | 整数秒，最小 `60`；Gateway 需在 Node timer 范围内 |
 | `REACH_UPDATE_GITHUB_TOKEN` | 无 | 可选 GitHub token，保存在私有 env |
 | `REACH_UPDATE_GITHUB_TOKEN_FILE` | 无 | 与直接 token 二选一，读取私有文件并去除首尾空白 |
@@ -155,7 +155,7 @@ Gateway 容器示例配置（写入本地、忽略的 `gateway.env`）：
 
 ```dotenv
 REACH_UPDATE_ENABLED=true
-REACH_UPDATE_REPO=example/reach
+REACH_UPDATE_REPO=zpershuai/reach
 REACH_UPDATE_BACKEND=compose
 REACH_UPDATE_REQUEST_DIR=/run/reach/update
 ```

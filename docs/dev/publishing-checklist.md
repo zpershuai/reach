@@ -1,6 +1,6 @@
 # Publishing checklist
 
-Prepare and review a clean source snapshot before creating a public repository. Preserve the original private history and existing installations. This procedure does not publish, push tags, rewrite history, rotate credentials or restart services.
+Review a clean source snapshot and the retained publication surface before publishing a component release. The official public source and release repository is `zpershuai/reach`; a new source repository is not required for each release. Preserve existing installations and any private backups. This procedure does not publish, push tags, rewrite history, rotate credentials or restart services.
 
 Read [AGENTS.md](../../AGENTS.md). Real inventories, findings, exceptions, private revision mappings and verification reports belong only in ignored `.reach/` or outside the repository. Do not paste raw findings into public issues or CI logs. Tracked examples use reserved domains and addresses.
 
@@ -124,8 +124,8 @@ Include actual commits, tool/environment versions, dates, results and private su
 
 ## 6. Review before publication, then verify after publication
 
-Passing this local gate means **ready for publication review**, not already public. Preserve the original private history. Creating a new repository/clean history, pushing references, publishing official releases, changing production services and rotating credentials are separate explicit operational steps. Do not toggle the private-history repository to public as a shortcut.
+Passing this local gate means **ready for publication review**, not that a Release has been published. Pushing references, publishing official releases, changing repository visibility or history, changing production services and rotating credentials are separate explicit operational steps. A source export does not remove old public references or platform caches; review retained history and assets explicitly.
 
-Before publishing, identify the approved public source revision and bind builds to it; keep the original private-to-public mapping private. Preserve Apache-2.0, attribution and actual third-party notices. Do not publish unreviewed extra branches, tags, attachments or build contexts. Retaining/rewriting old history requires a separate reviewed plan.
+Before publishing, identify the approved public source revision and bind builds to it. Preserve Apache-2.0, attribution and actual third-party notices. Do not publish unreviewed extra branches, tags, attachments or build contexts. Rewriting old history or migrating historical distributions requires a separate reviewed plan; existing Engine/Gateway distribution repositories remain available.
 
 After publication, verify anonymous access to intended source/history and the private security-reporting channel. Download **every** release asset and verify each image digest against the approved build manifest, including version/platform/notices. Unavailable or mismatching items remain incomplete. Do not delete or silently overwrite published versions to make acceptance appear successful.

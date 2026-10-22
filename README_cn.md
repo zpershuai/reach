@@ -94,7 +94,7 @@ curl -sS -X POST http://127.0.0.1:8787/session/close -H 'content-type: applicati
 ### B. 正式部署
 
 1. **生成凭证和配置。** 按[配置与凭证](docs/deploy/configuration.md)生成 Gateway 和 Engine 两份环境文件，使用两个互不相同的随机 token。
-2. **运行 Gateway。** 从最新的 `gateway-v*` [Release](https://github.com/zpershuai/reach/releases) 下载 `gateway-amd64.tgz`，放入 `gateway.env`，执行 `docker compose -f deploy/compose.yaml up -d --build` 启动，并在前面配置 HTTPS（仓库附带 Caddy 示例）。每个版本也会发布镜像 `ghcr.io/<owner>/reach-gateway`。详见 [Gateway 部署](docs/deploy/gateway.md)。
+2. **运行 Gateway。** 从最新的 `gateway-v*` [Release](https://github.com/zpershuai/reach/releases) 下载 `gateway-amd64.tgz`，放入 `gateway.env`，执行 `docker compose -f deploy/compose.yaml up -d --build` 启动，并在前面配置 HTTPS（仓库附带 Caddy 示例）。新版本包含本地构建 Docker 镜像所需文件；之前发布的 GHCR 镜像仍可继续使用。详见 [Gateway 部署](docs/deploy/gateway.md)。
 3. **在每台设备上安装 Engine。** macOS（arm64/x64）或带 systemd 的 Linux x86_64，在本仓库目录下执行：
 
    ```bash
