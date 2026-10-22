@@ -268,7 +268,9 @@ for (const action of ["revoke", "rotate", "reduce", "expire"] as const) {
       await f.setup();
       const workspace = join(f.directory, "workspace"); mkdirSync(workspace);
       const pidFile = join(workspace, "pids.json");
-      writeFileSync(join(workspace, "job.cjs"), "const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore'}); require('node:fs').writeFileSync('pids.json', JSON.stringify([process.pid, child.pid])); setInterval(() => {}, 1000);\n");
+      // Publish the complete PID list atomically. File existence must not let
+      // the observer read between create/truncate and the JSON payload write.
+      writeFileSync(join(workspace, "job.cjs"), "const child = require('node:child_process').spawn(process.execPath, ['-e', 'setInterval(() => {}, 1000)'], {stdio: 'ignore'}); const fs = require('node:fs'); fs.writeFileSync('pids.json.tmp', JSON.stringify([process.pid, child.pid])); fs.renameSync('pids.json.tmp', 'pids.json'); setInterval(() => {}, 1000);\n");
       const token = f.clients.executor.token;
       await f.post(token, "/session/open", {});
       child = spawn(binary, [f.url], { env: { PATH: process.env.PATH, HOME: f.directory, REACH_ENGINE_ID: "engine-a", REACH_ENGINE_TOKEN: engineTokens["engine-a"], REACH_WORKSPACE_ROOTS: `scripts:${workspace}`, REACH_PROCESS_WORKSPACES: "scripts", REACH_PROCESS_NODE_BIN: process.execPath }, stdio: "ignore" });
