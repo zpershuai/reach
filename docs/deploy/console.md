@@ -89,7 +89,7 @@ Environment/`engines.json` devices are seeds. Their display names/types can chan
 
 See [Engine](engine.md) for reported hardware/type overrides. Device details show workspaces and execution configuration from `session.ready`. Old Engines display not reported rather than guessing permissions from the method list.
 
-Activity stores metadata only, never file contents, search patterns, process arguments or output. Filter by time, device, client, method class and result; export CSV/JSONL, with exports themselves audited. Settings retains 1–365 days, default 30, cleaning daily. Skills is reserved.
+Activity stores metadata only, never file contents, search patterns, process arguments or output. Filter by time, device, client, method class and result, or select Hide unauthenticated requests to exclude authentication failures before pagination. This filter is kept in the URL (`excludeAuthFailed=1`) and also applies to CSV/JSONL exports, with exports themselves audited. Settings retains 1–365 days, default 30, cleaning daily. Skills is reserved.
 
 ## Backup, recovery and rollback
 

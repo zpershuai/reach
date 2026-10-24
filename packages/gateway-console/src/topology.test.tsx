@@ -111,3 +111,49 @@ it("stops scheduling Canvas frames when idle and wakes for received RPC events",
   frame(performance.now() + 4000);
   expect(callbacks.size).toBe(0);
 });
+
+it("stops Canvas frames on narrow screens while keeping device drawers and activity filtering", () => {
+  const raf = vi.fn(() => 1);
+  vi.stubGlobal("requestAnimationFrame", raf);
+  vi.stubGlobal("cancelAnimationFrame", vi.fn());
+  vi.mocked(window.matchMedia).mockImplementation(
+    (query) =>
+      ({
+        matches: query.includes("max-width"),
+        addEventListener: vi.fn(),
+        removeEventListener: vi.fn(),
+      }) as unknown as MediaQueryList,
+  );
+  const data = snapshot();
+  data.activity = [
+    {
+      id: 1,
+      ts: 1000,
+      type: "rpc.finished",
+      method: "fs.read",
+      engineId: "engine-a",
+    },
+    {
+      id: 2,
+      ts: 2000,
+      type: "rpc.finished",
+      method: "fs.write",
+      engineId: "engine-b",
+    },
+  ];
+  const view = render(
+    <TopologyView
+      snapshot={data}
+      events={[]}
+      sensitive={async (action) => action()}
+    />,
+  );
+  expect(raf).not.toHaveBeenCalled();
+  expect(view.container.querySelector("section.kpis")).not.toBeInTheDocument();
+  fireEvent.click(screen.getByText("Example device"));
+  expect(
+    screen.getByRole("dialog", { name: "Device Example device" }),
+  ).toBeVisible();
+  expect(screen.queryByText("fs.write")).not.toBeInTheDocument();
+  expect(view.container.querySelectorAll(".lane-direction")).toHaveLength(2);
+});

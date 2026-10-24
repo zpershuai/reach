@@ -16,7 +16,8 @@ import {
   formatNumber,
   warningText,
 } from "./ui";
-import { AccessClients } from "./AccessClients";
+import { AttentionPanel } from "./Attention";
+import { AccessClients, accessRevision } from "./AccessClients";
 
 export function inSession(engines: Snapshot["engines"]): number {
   return engines.filter((engine) => engine.session.status === "ready").length;
@@ -32,37 +33,41 @@ export const Kpis = memo(function Kpis({
   const { t, lang } = useT();
   return (
     <section className="kpis" aria-label={t("overview.metrics")}>
-      <div className="kpi">
+      <div className={`kpi${kpis.clients === 0 ? " zero" : ""}`}>
         <span className="label">{t("overview.clients")}</span>
         <span className="value">{formatNumber(kpis.clients, lang)}</span>
       </div>
-      <div className="kpi">
+      <div className={`kpi${kpis.onlineEngines === 0 ? " zero" : ""}`}>
         <span className="label">{t("overview.online")}</span>
         <span className="value">
           {formatNumber(kpis.onlineEngines, lang)}/
           {formatNumber(kpis.registeredEngines, lang)}
-          <small>{t("overview.inSession", { count: inSession })}</small>
         </span>
+        <small>{t("overview.inSession", { count: inSession })}</small>
       </div>
-      <div className="kpi">
+      <div className={`kpi${kpis.activeMcpSessions === 0 ? " zero" : ""}`}>
         <span className="label">{t("overview.mcpSessions")}</span>
         <span className="value">
           {formatNumber(kpis.activeMcpSessions, lang)}
         </span>
       </div>
-      <div className="kpi">
+      <div className={`kpi${kpis.requestsPerMinute === 0 ? " zero" : ""}`}>
         <span className="label">{t("overview.requests")}</span>
         <span className="value">
           {formatNumber(kpis.requestsPerMinute, lang)}
         </span>
       </div>
-      <div className="kpi">
+      <div
+        className={`kpi${kpis.errorRate5m === 0 ? " zero" : ""}${kpis.errorRate5m > 0 ? " alert" : ""}`}
+      >
         <span className="label">{t("overview.errorRate")}</span>
         <span className="value">
           {formatNumber(kpis.errorRate5m * 100, lang, 1)}%
         </span>
       </div>
-      <div className="kpi">
+      <div
+        className={`kpi${kpis.policyDenialsToday === 0 ? " zero" : ""}${kpis.policyDenialsToday > 0 ? " alert" : ""}`}
+      >
         <span className="label">{t("overview.denials")}</span>
         <span className="value">
           {formatNumber(kpis.policyDenialsToday, lang)}
@@ -74,10 +79,7 @@ export const Kpis = memo(function Kpis({
 
 export function Overview({ snapshot }: { snapshot: Snapshot }) {
   const { t, lang } = useT();
-  const recent = useMemo(
-    () => snapshot.activity.slice(0, 8),
-    [snapshot.activity],
-  );
+  const recent = useMemo(() => snapshot.activity, [snapshot.activity]);
   return (
     <>
       <Kpis kpis={snapshot.kpis} inSession={inSession(snapshot.engines)} />
@@ -90,11 +92,6 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
         <section className="panel">
           <div className="panel-head">
             <h2>{t("overview.devices")}</h2>
-            <span className="pill">
-              {t("overview.heartbeat", {
-                seconds: snapshot.gateway.heartbeatInterval,
-              })}
-            </span>
           </div>
           {snapshot.engines.map((engine) => (
             <div className="device-row" key={engine.id}>
@@ -116,42 +113,13 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
             <div className="empty">{t("overview.noDevices")}</div>
           )}
         </section>
-        <section className="panel">
-          <div className="panel-head">
-            <h2>{t("overview.versions")}</h2>
-          </div>
-          <div className="panel-body">
-            <dl className="kv">
-              <dt>Gateway</dt>
-              <dd className="mono">v{snapshot.gateway.version}</dd>
-              <dt>MCP</dt>
-              <dd className="mono">v{snapshot.gateway.mcpVersion}</dd>
-              <dt>{t("overview.update")}</dt>
-              <dd>
-                {snapshot.gateway.updateEnabled
-                  ? t("overview.on")
-                  : t("overview.off")}
-              </dd>
-              {snapshot.engines.map((engine) => (
-                <div key={engine.id} style={{ display: "contents" }}>
-                  <dt>{engine.displayName}</dt>
-                  <dd className="mono">
-                    {engine.engineVersion
-                      ? `v${engine.engineVersion}`
-                      : t("overview.notReported")}
-                  </dd>
-                </div>
-              ))}
-            </dl>
-            <div className="reserved">{t("overview.engineUpdates")}</div>
-          </div>
-        </section>
+        <AttentionPanel snapshot={snapshot} />
       </div>
       <section className="panel">
         <div className="panel-head">
           <h2>{t("overview.recent")}</h2>
         </div>
-        <ActivityTable rows={recent} />
+        <ActivityTable rows={recent} collapse maxRows={8} />
       </section>
     </>
   );
@@ -167,6 +135,9 @@ export function ClientsView({
   const { t, lang } = useT();
   const now = useNow();
   const [confirm, setConfirm] = useState("");
+  const showOwnedEngines = snapshot.clients.some(
+    (client) => client.ownedEngines.length > 0,
+  );
   return (
     <>
       <section className="panel">
@@ -175,12 +146,12 @@ export function ClientsView({
           <span className="pill">{t("overview.unverifiedLabels")}</span>
         </div>
         <div className="table-wrap">
-          <table>
+          <table className="client-table">
             <thead>
               <tr>
                 <th>{t("overview.client")}</th>
                 <th className="num">{t("overview.mcpSessions")}</th>
-                <th>{t("overview.sessionDevices")}</th>
+                {showOwnedEngines && <th>{t("overview.sessionDevices")}</th>}
                 <th>{t("overview.lastActivity")}</th>
                 <th className="num">{t("overview.calls")}</th>
                 <th className="num">{t("overview.errors")}</th>
@@ -207,9 +178,11 @@ export function ClientsView({
                   <td className="num">
                     {formatNumber(client.activeSessions, lang)}
                   </td>
-                  <td className="mono">
-                    {client.ownedEngines.join(", ") || "—"}
-                  </td>
+                  {showOwnedEngines && (
+                    <td className="mono">
+                      {client.ownedEngines.join(", ") || "—"}
+                    </td>
+                  )}
                   <td>{formatAgo(client.lastSeenAt, now, lang)}</td>
                   <td className="num">{formatNumber(client.calls24h, lang)}</td>
                   <td className="num">
@@ -219,7 +192,7 @@ export function ClientsView({
                     {client.type === "mcp-http" &&
                       client.activeSessions > 0 && (
                         <button
-                          className="btn small"
+                          className="btn small danger-outline"
                           onClick={() => setConfirm(client.label)}
                         >
                           {t("overview.disconnect")}
@@ -239,13 +212,7 @@ export function ClientsView({
       <AccessClients
         engines={snapshot.engines}
         sensitive={sensitive}
-        revision={
-          snapshot.activity.find(
-            (row) =>
-              row.action?.startsWith("client.") ||
-              row.action?.startsWith("oauth."),
-          )?.id ?? 0
-        }
+        revision={accessRevision(snapshot.activity)}
       />
       <AuthorizedApps
         sensitive={sensitive}
@@ -347,7 +314,10 @@ function AuthorizedApps({
                 </td>
                 <td className="num">{formatNumber(app.activeTokens, lang)}</td>
                 <td>
-                  <button className="btn small" onClick={() => setConfirm(app)}>
+                  <button
+                    className="btn small danger-outline"
+                    onClick={() => setConfirm(app)}
+                  >
                     {t("overview.revoke")}
                   </button>
                 </td>
@@ -403,6 +373,7 @@ export function SettingsView({
   const { t, lang, setLang } = useT();
   const [days, setDays] = useState(snapshot.settings.retentionDays);
   const [theme, setTheme] = useState(snapshot.settings.theme);
+  useEffect(() => setTheme(snapshot.settings.theme), [snapshot.settings.theme]);
   const [heartbeats, setHeartbeats] = useState(
     snapshot.settings.heartbeatDisplay,
   );
@@ -455,60 +426,79 @@ export function SettingsView({
     }
   }
   return (
-    <section className="panel" style={{ maxWidth: 640 }}>
-      <div className="panel-head">
-        <h2>{t("settings.title")}</h2>
-      </div>
+    <section className="settings-view">
+      <h2 className="sr-only">{t("settings.title")}</h2>
       {Boolean(error) && (
         <div className="notice err" role="alert">
           {errorText(error, t)}
         </div>
       )}
-      <form className="panel-body" onSubmit={(event) => void submit(event)}>
-        <label>
-          {t("settings.retention")}
-          <input
-            type="number"
-            min="1"
-            max="365"
-            value={days}
-            onChange={(event) => setDays(Number(event.target.value))}
-            required
-          />
-        </label>
-        <div className="reserved">{t("settings.retentionNote")}</div>
-        <label>
-          {t("common.language")}
-          <select
-            value={lang}
-            onChange={(event) => setLang(event.target.value as Lang)}
-          >
-            <option value="en">English</option>
-            <option value="zh-CN">简体中文</option>
-          </select>
-        </label>
-        <label>
-          {t("settings.theme")}
-          <select
-            value={theme}
-            disabled={themeBusy}
-            onChange={(event) =>
-              void changeTheme(event.target.value as typeof theme)
-            }
-          >
-            <option value="system">{t("settings.system")}</option>
-            <option value="light">{t("settings.light")}</option>
-            <option value="dark">{t("settings.dark")}</option>
-          </select>
-        </label>
-        <label className="checkbox">
-          <input
-            type="checkbox"
-            checked={heartbeats}
-            onChange={(event) => setHeartbeats(event.target.checked)}
-          />
-          {t("settings.heartbeats")}
-        </label>
+      <form className="settings-form" onSubmit={(event) => void submit(event)}>
+        <section className="panel">
+          <div className="panel-head">
+            <h3>{t("settings.activityRetention")}</h3>
+          </div>
+          <div className="panel-body">
+            <label>
+              {t("settings.retention")}
+              <input
+                type="number"
+                min="1"
+                max="365"
+                value={days}
+                onChange={(event) => setDays(Number(event.target.value))}
+                required
+              />
+            </label>
+            <div className="reserved">{t("settings.retentionNote")}</div>
+          </div>
+        </section>
+        <section className="panel">
+          <div className="panel-head">
+            <h3>{t("settings.appearance")}</h3>
+          </div>
+          <div className="panel-body">
+            <label>
+              {t("common.language")}
+              <select
+                value={lang}
+                onChange={(event) => setLang(event.target.value as Lang)}
+              >
+                <option value="en">English</option>
+                <option value="zh-CN">简体中文</option>
+              </select>
+            </label>
+            <label>
+              {t("settings.theme")}
+              <select
+                value={theme}
+                disabled={themeBusy}
+                onChange={(event) =>
+                  void changeTheme(event.target.value as typeof theme)
+                }
+              >
+                <option value="system">{t("settings.system")}</option>
+                <option value="light">{t("settings.light")}</option>
+                <option value="dark">{t("settings.dark")}</option>
+              </select>
+            </label>
+          </div>
+        </section>
+        <section className="panel">
+          <div className="panel-head">
+            <h3>{t("nav.topology")}</h3>
+          </div>
+          <div className="panel-body">
+            <label className="checkbox">
+              <input
+                type="checkbox"
+                checked={heartbeats}
+                onChange={(event) => setHeartbeats(event.target.checked)}
+              />
+              {t("settings.heartbeats")}
+            </label>
+          </div>
+        </section>
         <div className="actions">
           <button className="btn primary">{t("settings.save")}</button>
           {saved && (

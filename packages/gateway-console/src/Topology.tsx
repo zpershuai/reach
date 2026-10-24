@@ -22,7 +22,6 @@ import {
   formatNumber,
   modelText,
 } from "./ui";
-import { Kpis, inSession } from "./Views";
 import { bezier, type Geometry, type Route } from "./topology/geometry";
 import { ClientDrawer, GatewayDrawer } from "./topology/drawers";
 
@@ -57,6 +56,16 @@ export function TopologyView({
   const [selection, setSelection] = useState<Selection | null>(null);
   const [drawer, setDrawer] = useState<Selection | null>(null);
   const [paused, setPaused] = useState(false);
+  const [narrow, setNarrow] = useState(
+    () => window.matchMedia("(max-width: 820px)").matches,
+  );
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 820px)");
+    const update = () => setNarrow(media.matches);
+    update();
+    media.addEventListener?.("change", update);
+    return () => media.removeEventListener?.("change", update);
+  }, []);
   const [geo, setGeo] = useState<Geometry | null>(null);
   const topo = useRef<HTMLDivElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null);
@@ -202,7 +211,7 @@ export function TopologyView({
       element.classList.add(...names);
       highlighted.add(element);
     };
-    const still = reduced || pausedRef.current;
+    const still = reduced || narrow || pausedRef.current;
     for (const event of pending) {
       const heartbeat =
         event.type === "engine.heartbeat" && snapshot.settings.heartbeatDisplay;
@@ -226,14 +235,21 @@ export function TopologyView({
       if (
         (event.type.startsWith("rpc.") && event.type !== "rpc.denied") ||
         heartbeat
-      )
+      ) {
         highlight(
           find("data-id", `egress-${event.engineId}`),
           "event-highlight",
         );
+        highlight(find("data-node", `engine-${event.engineId}`), "hit");
+      }
     }
     renderer.current?.wake();
-    const names = ["event-highlight", "policy-denied", "stage-highlight"];
+    const names = [
+      "event-highlight",
+      "policy-denied",
+      "stage-highlight",
+      "hit",
+    ];
     const timer = setTimeout(() => {
       for (const element of highlighted) element.classList.remove(...names);
     }, 600);
@@ -241,10 +257,10 @@ export function TopologyView({
       clearTimeout(timer);
       for (const element of highlighted) element.classList.remove(...names);
     };
-  }, [lastEvent]);
+  }, [lastEvent, narrow]);
 
   useEffect(() => {
-    if (!canvas.current) return;
+    if (!canvas.current || narrow) return;
     const instance = createRenderer({
       target: canvas.current,
       getGeometry: () => geoRef.current,
@@ -258,7 +274,7 @@ export function TopologyView({
       instance?.dispose();
       renderer.current = undefined;
     };
-  }, []);
+  }, [narrow]);
   useEffect(() => {
     renderer.current?.wake();
   }, [paused]);
@@ -316,7 +332,6 @@ export function TopologyView({
 
   return (
     <>
-      <Kpis kpis={snapshot.kpis} inSession={inSession(snapshot.engines)} />
       <section
         className={`panel${paused ? " paused" : ""}`}
         aria-label={t("topology.routing")}
@@ -420,10 +435,7 @@ export function TopologyView({
                             } as const
                           )[
                             state.className as
-                              | "offline"
-                              | "ready"
-                              | "connecting"
-                              | "idle"
+                              "offline" | "ready" | "connecting" | "idle"
                           ],
                         )}
                       </title>
@@ -494,6 +506,9 @@ export function TopologyView({
                   <div className="lane-empty">{t("topology.emptyClients")}</div>
                 )}
               </div>
+              <div className="lane-direction">
+                {t("topology.clients")} ↓ Gateway
+              </div>
               <div className="lane">
                 <div className="lane-title">
                   <span>Gateway</span>
@@ -538,6 +553,9 @@ export function TopologyView({
                   </div>
                 </div>
               </div>
+              <div className="lane-direction">
+                Gateway ↓ {t("topology.engines")}
+              </div>
               <div className="lane">
                 <div className="lane-title">
                   <span>{t("topology.engines")}</span>
@@ -578,16 +596,6 @@ export function TopologyView({
                               }
                               engine={engine}
                             />
-                            {!displayOnline(
-                              engine,
-                              now,
-                              snapshot.gateway.heartbeatInterval,
-                            ) &&
-                              engine.lastSeenAt !== null && (
-                                <span>
-                                  {formatAgo(engine.lastSeenAt, now, lang)}
-                                </span>
-                              )}
                             {displayOnline(
                               engine,
                               now,
@@ -635,7 +643,7 @@ export function TopologyView({
             )}
           </div>
         </div>
-        <ActivityTable rows={activity} tall />
+        <ActivityTable rows={activity} tall collapse />
         <div className="note">{t("topology.particlesNote")}</div>
       </section>
       {device && (

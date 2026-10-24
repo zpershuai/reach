@@ -1,9 +1,10 @@
 import { useT, i18n } from "./i18n";
 import { useEffect, useId, useState } from "react";
+import { useNow } from "./clock";
 import { api, errorText } from "./api";
 import type { SensitiveAction } from "./Devices";
-import type { Engine } from "./types";
-import { CopyButton, Modal } from "./ui";
+import type { Activity, Engine } from "./types";
+import { CopyButton, Modal, formatAgo } from "./ui";
 
 const operationKeys = {
   read: "clients.read",
@@ -29,6 +30,8 @@ export interface AccessClient {
   id: string;
   kind: "delegated" | "oauth";
   name: string;
+  approvedAt: number;
+  lastUsedAt: number | null;
   revokedAt: number | null;
   expiresAt: number | null;
   policyRevision: number;
@@ -59,6 +62,17 @@ function credentialStatus(client: AccessClient): string {
   return i18n.t("clients.oauthLifecycle");
 }
 
+// Access identities change only through client and OAuth admin actions, so the
+// newest such action id tells views when to reload them.
+export function accessRevision(activity: Activity[]): number {
+  return (
+    activity.find(
+      (row) =>
+        row.action?.startsWith("client.") || row.action?.startsWith("oauth."),
+    )?.id ?? 0
+  );
+}
+
 export function AccessClients({
   engines,
   sensitive,
@@ -68,7 +82,8 @@ export function AccessClients({
   sensitive: SensitiveAction;
   revision?: number;
 }) {
-  const { t } = useT();
+  const { t, lang } = useT();
+  const now = useNow();
   const suggestionsId = useId();
   const [clients, setClients] = useState<AccessClient[]>([]);
   const [error, setError] = useState<unknown>();
@@ -170,16 +185,29 @@ export function AccessClients({
                   <small>
                     {client.kind === "oauth" ? "OAuth" : t("clients.delegated")}
                   </small>
-                  <code>{client.id}</code>
+                  <div className="identity-id">
+                    <code title={client.id}>{client.id.slice(0, 8)}…</code>
+                    <CopyButton value={client.id} />
+                  </div>
+                  <small>
+                    {t("overview.approved")}:{" "}
+                    {formatAgo(client.approvedAt ?? null, now, lang)}
+                  </small>
+                  <small>
+                    {t("overview.lastUsed")}:{" "}
+                    {client.lastUsedAt != null
+                      ? formatAgo(client.lastUsedAt, now, lang)
+                      : t("clients.usageUnavailable")}
+                  </small>
                 </td>
                 <td>
                   {client.legacyGlobal ? (
-                    <div className="notice warn">
+                    <span className="pill warn">
                       {t("clients.global")}{" "}
                       {client.reviewRequired
                         ? t("clients.reviewRequired")
                         : t("clients.reviewed")}
-                    </div>
+                    </span>
                   ) : (
                     client.permissions.map((permission) => (
                       <div
@@ -229,12 +257,6 @@ export function AccessClients({
                           {t("clients.rotate")}
                         </button>
                       )}
-                      <button
-                        className="btn small danger"
-                        onClick={() => start({ kind: "revoke", client })}
-                      >
-                        {t("clients.revoke")}
-                      </button>
                       {client.legacyGlobal && client.reviewRequired && (
                         <button
                           className="btn small"
@@ -243,6 +265,12 @@ export function AccessClients({
                           {t("clients.review")}
                         </button>
                       )}
+                      <button
+                        className="btn small danger-outline"
+                        onClick={() => start({ kind: "revoke", client })}
+                      >
+                        {t("clients.revoke")}
+                      </button>
                     </>
                   )}
                 </td>
@@ -407,7 +435,10 @@ export function AccessClients({
                 >
                   {t("clients.cancel")}
                 </button>
-                <button className="btn primary" type="submit">
+                <button
+                  className={`btn ${edit.kind === "revoke" ? "danger" : "primary"}`}
+                  type="submit"
+                >
                   {edit.kind === "create"
                     ? t("clients.createClient")
                     : t("clients.confirmChange")}

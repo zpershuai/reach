@@ -81,3 +81,27 @@ it("asks for reauthentication when a changed retention field requires it", async
   );
   expect(api).toHaveBeenCalledWith("settings", { retentionDays: 60 }, "PATCH");
 });
+
+it("cycles the header theme using theme-only PATCHes without reauthentication", async () => {
+  vi.mocked(api).mockImplementation(async (path) =>
+    path === "me" ? { authenticated: true } : {},
+  );
+  render(<App />);
+  for (const theme of ["light", "dark", "system"]) {
+    const button = await screen.findByRole("button", {
+      name: new RegExp(`Switch to ${theme}`, "i"),
+    });
+    await waitFor(() => expect(button).not.toBeDisabled());
+    fireEvent.click(button);
+    await waitFor(() =>
+      expect(api).toHaveBeenCalledWith("settings", { theme }, "PATCH"),
+    );
+  }
+  expect(screen.queryByRole("dialog")).not.toBeInTheDocument();
+  expect(
+    vi
+      .mocked(api)
+      .mock.calls.filter(([path]) => path === "settings")
+      .map(([, body]) => Object.keys(body as object)),
+  ).toEqual([["theme"], ["theme"], ["theme"]]);
+});

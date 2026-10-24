@@ -2,7 +2,14 @@ import { setLang } from "./i18n";
 import { expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { ActivityTable } from "./Activity";
-import { CopyButton, Drawer, MiniLog, Modal, formatTime, warningText } from "./ui";
+import {
+  CopyButton,
+  Drawer,
+  MiniLog,
+  Modal,
+  formatTime,
+  warningText,
+} from "./ui";
 import { ReauthDialog } from "./Auth";
 import type { Activity } from "./types";
 
@@ -212,11 +219,79 @@ it("uses a zero-based 24-hour clock at midnight", () => {
 });
 
 it("uses stable warning codes and preserves legacy and unknown diagnostics", () => {
-  expect(warningText("Changed HTTP wording!", "zh-CN", {
-    code: "INSECURE_HTTP", message: "Changed HTTP wording!",
-  })).toContain("HTTPS");
+  expect(
+    warningText("Changed HTTP wording!", "zh-CN", {
+      code: "INSECURE_HTTP",
+      message: "Changed HTTP wording!",
+    }),
+  ).toContain("HTTPS");
   expect(warningText("Legacy warning", "zh-CN")).toBe("Legacy warning");
-  expect(warningText("Old text", "zh-CN", {
-    code: "FUTURE_WARNING", message: "Specific new diagnostic",
-  })).toBe("Specific new diagnostic");
+  expect(
+    warningText("Old text", "zh-CN", {
+      code: "FUTURE_WARNING",
+      message: "Specific new diagnostic",
+    }),
+  ).toBe("Specific new diagnostic");
+});
+
+it("dismisses a drawer through its backdrop and restores focus as Escape does", () => {
+  const opener = document.createElement("button");
+  document.body.append(opener);
+  opener.focus();
+  const onClose = vi.fn();
+  const view = render(
+    <Drawer title="Device" label="Device" onClose={onClose}>
+      <button>Action</button>
+    </Drawer>,
+  );
+  fireEvent.click(screen.getByTestId("drawer-backdrop"));
+  expect(onClose).toHaveBeenCalledOnce();
+  view.unmount();
+  expect(opener).toHaveFocus();
+  opener.remove();
+});
+it("ignores backdrop clicks for one-time credentials and overlays beneath a modal", () => {
+  const onClose = vi.fn();
+  const view = render(
+    <Drawer title="Device" label="Device" onClose={onClose} dismissible={false}>
+      <code>credential</code>
+    </Drawer>,
+  );
+  fireEvent.click(screen.getByTestId("drawer-backdrop"));
+  expect(onClose).not.toHaveBeenCalled();
+  view.rerender(
+    <Drawer title="Device" label="Device" onClose={onClose}>
+      <Modal title="Confirm">
+        <button>Cancel</button>
+      </Modal>
+    </Drawer>,
+  );
+  fireEvent.click(screen.getByTestId("drawer-backdrop"));
+  expect(onClose).not.toHaveBeenCalled();
+});
+
+it("keeps avatar colors distinct from method colors and white initials at AA contrast in both themes", async () => {
+  const { readFileSync } = await import("node:fs");
+  const { hues } = await import("./ui");
+  const css = readFileSync("src/style.css", "utf8");
+  const semantic = [
+    ...css.matchAll(/--c-(?:read|write|exec|skill):\s*(#[0-9a-f]+)/gi),
+  ].map((match) => match[1].toLowerCase());
+  const luminance = (hex: string) => {
+    const rgb = hex
+      .slice(1)
+      .match(/../g)!
+      .map((channel) => parseInt(channel, 16) / 255)
+      .map((value) =>
+        value <= 0.04045 ? value / 12.92 : ((value + 0.055) / 1.055) ** 2.4,
+      );
+    return rgb[0] * 0.2126 + rgb[1] * 0.7152 + rgb[2] * 0.0722;
+  };
+  for (const theme of ["light", "dark"]) {
+    document.documentElement.dataset.theme = theme;
+    for (const color of hues) {
+      expect(semantic).not.toContain(color.toLowerCase());
+      expect(1.05 / (luminance(color) + 0.05)).toBeGreaterThanOrEqual(4.5);
+    }
+  }
 });

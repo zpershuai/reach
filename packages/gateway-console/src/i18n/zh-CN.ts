@@ -28,6 +28,7 @@ export const zhCN: Messages = {
     storageWarning: "审计存储故障：{{path}}",
   },
   nav: {
+    gatewayStatus: "Gateway 状态",
     overview: "概览",
     topology: "拓扑",
     clients: "客户端",
@@ -78,6 +79,16 @@ export const zhCN: Messages = {
     reauthNote: "请输入密码以继续操作。身份确认有效期为十分钟。",
     cancel: "取消",
     confirm: "确认",
+  },
+  attention: {
+    title: "需要关注",
+    offline: "{{name}} · 离线",
+    outdated: "{{name}} · 版本落后（v{{version}}）",
+    review: "{{name}} · 待审核全局访问",
+    failures: "近 24 小时 {{count}} 次失败或拒绝",
+    healthy: "一切正常",
+    accessError: "无法加载访问身份",
+    loading: "正在检查访问身份…",
   },
   overview: {
     metrics: "关键指标",
@@ -132,6 +143,9 @@ export const zhCN: Messages = {
     revokeTitle: "撤销 {{name}} 的授权？",
   },
   settings: {
+    activityRetention: "活动保留",
+    appearance: "外观",
+    switchTheme: "切换为{{theme}}主题",
     title: "设置",
     retention: "活动保留天数",
     retentionNote: "每天清理一次过期记录。修改此项需要再次输入密码。",
@@ -152,6 +166,7 @@ export const zhCN: Messages = {
     mcp: "让机器人通过 MCP 发现并运行技能。",
   },
   clients: {
+    usageUnavailable: "暂无记录（受活动保留期限制）",
     revoked: "已撤销",
     oauthLifecycle: "OAuth 令牌生命周期",
     title: "客户端身份与权限",
@@ -207,6 +222,7 @@ export const zhCN: Messages = {
     delegated: "委托",
   },
   devices: {
+    latestOperation: "最近操作",
     manualType: "已手动设置类型",
     detectedType: "自动检测类型",
     status: "状态",
@@ -381,6 +397,8 @@ export const zhCN: Messages = {
     ok: "成功",
     error: "错误",
     authFailed: "身份验证失败",
+    unauthenticated: "未认证请求",
+    hideUnauthenticated: "隐藏未认证请求",
     event: "事件",
     time: "时间",
     client: "客户端",

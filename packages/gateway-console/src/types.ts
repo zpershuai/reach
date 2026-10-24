@@ -75,6 +75,7 @@ export interface LiveEvent {
   processId?: string;
   launchId?: string;
   code?: string;
+  count?: number;
 }
 export interface Activity extends Omit<LiveEvent, "type"> {
   type?: EventType;

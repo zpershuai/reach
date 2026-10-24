@@ -150,8 +150,20 @@ export class ClientAccess {
       permissions: Object.freeze(permissions.map(permission => Object.freeze(permission))) as ClientPermission[] }) as AccessClient;
   }
 
-  list(): AccessClient[] {
-    return this.store.db.prepare("SELECT id FROM client_principals ORDER BY created_at,id").all().map(row => this.get(String(row.id)));
+  list(): Array<AccessClient & { approvedAt: number; lastUsedAt: number | null }> {
+    // Keep changing display metadata out of the authorization cache. Audit
+    // history is aggregated once for the list, rather than once per identity.
+    return this.store.db.prepare(`SELECT p.id, coalesce(o.approved_at,p.created_at) AS approved_at,
+      o.last_used_at, a.last_used_at AS audit_last_used_at FROM client_principals p
+      LEFT JOIN oauth_clients o ON o.id=p.oauth_client_id
+      LEFT JOIN (SELECT principal_id,max(ts) AS last_used_at FROM activity
+        WHERE principal_id IS NOT NULL AND event_type IN ('rpc.started','rpc.finished','rpc.denied')
+        GROUP BY principal_id) a ON a.principal_id=p.id
+      ORDER BY p.created_at,p.id`).all().map(row => {
+        const timestamps = [row.last_used_at, row.audit_last_used_at].filter(value => value !== null).map(Number);
+        return { ...this.get(String(row.id)), approvedAt: Number(row.approved_at),
+          lastUsedAt: timestamps.length ? Math.max(...timestamps) : null };
+      });
   }
 
   authenticate(authorization: string | undefined): DelegatedIdentity | undefined {

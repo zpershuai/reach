@@ -10,6 +10,39 @@ import { AuditWriter } from "./audit.js";
 import { GatewayEvents } from "./events.js";
 import { ConsoleStore } from "./store.js";
 
+test("excludes auth failures before pagination and from exports", async () => {
+  const directory = mkdtempSync(join(tmpdir(), "reach-activity-filter-"));
+  const store = new ConsoleStore(directory);
+  let now = Date.now();
+  const events = new GatewayEvents(() => now++);
+  const writer = new AuditWriter(store, events);
+  const activity = new ActivityLog(store, () => 30);
+  for (let i = 0; i < 10; i++) events.emit("rpc.finished", { method: "fs.read", outcome: "ok" });
+  for (let i = 0; i < 80; i++) events.emit("auth.failed", { path: "/unknown" });
+  writer.flush();
+  const server = createServer((_request, response) => {
+    void activity.export(response, "csv", { excludeAuthFailed: "1" }, events).catch(() => response.destroy());
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  try {
+    const page = activity.query({ excludeAuthFailed: "1", limit: 50 });
+    assert.equal(page.rows.length, 10);
+    assert.ok(page.rows.every(row => row.eventType === "rpc.finished"));
+    assert.equal(page.cursor, null);
+    assert.equal(activity.query({ excludeAuthFailed: "true", limit: 50 }).rows.length, 10);
+    assert.ok(activity.query({ limit: 50 }).rows.every(row => row.eventType === "auth.failed"));
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const csv = await (await fetch(`http://127.0.0.1:${address.port}`)).text();
+    assert.equal(csv.trim().split("\r\n").length, 11);
+    assert.ok(!csv.includes("auth.failed"));
+  } finally {
+    await new Promise<void>(resolve => server.close(() => resolve()));
+    activity.close(); writer.close(); store.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
 test("activity filters, pagination, streamed exports and daily retention share the same records", async () => {
   const directory = mkdtempSync(join(tmpdir(), "reach-activity-"));
   const store = new ConsoleStore(directory);

@@ -23,6 +23,7 @@ const activityQuery = z.object({
   from: z.coerce.number().int().optional(), to: z.coerce.number().int().optional(), engineId: z.string().optional(), clientLabel: z.string().optional(),
   methodClass: z.enum(["read", "write", "exec", "control"]).optional(), outcome: z.enum(["ok", "error", "denied", "not_ok"]).optional(),
   cursor: z.string().optional(), limit: z.coerce.number().int().min(1).max(200).optional(),
+  excludeAuthFailed: z.enum(["1", "true"]).optional(),
 });
 
 export function engineView(engine: RegisteredEngine, registry: EngineRegistry, now: number, heartbeatInterval: number): Record<string, unknown> {

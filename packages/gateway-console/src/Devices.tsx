@@ -518,7 +518,6 @@ export function DevicesView({
   onAdd: () => void;
 }) {
   const { t, lang } = useT();
-  const now = useNow();
   const [selected, setSelected] = useState(initialId ?? "");
   const closeDrawer = useCallback(() => setSelected(""), []);
   const device = snapshot.engines.find((engine) => engine.id === selected);
@@ -533,41 +532,58 @@ export function DevicesView({
         </div>
         {snapshot.engines.length ? (
           <div className="device-grid">
-            {snapshot.engines.map((engine) => (
-              <button
-                className={`device-card${engine.id === selected ? " selected" : ""}`}
-                key={engine.id}
-                onClick={() => setSelected(engine.id)}
-              >
-                <div className="row">
-                  <DeviceGlyph
-                    heartbeatInterval={snapshot.gateway.heartbeatInterval}
-                    engine={engine}
-                  />
-                  <div className="eng-body">
-                    <span className="name">{engine.displayName}</span>
-                    <span className="meta">{modelText(engine, lang)}</span>
+            {snapshot.engines.map((engine) => {
+              const recent = snapshot.activity.find(
+                (row) => row.engineId === engine.id && row.method,
+              );
+              return (
+                <button
+                  className={`device-card${engine.id === selected ? " selected" : ""}`}
+                  key={engine.id}
+                  onClick={() => setSelected(engine.id)}
+                >
+                  <div className="row">
+                    <DeviceGlyph
+                      heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                      engine={engine}
+                    />
+                    <div className="eng-body">
+                      <span className="name">{engine.displayName}</span>
+                      <span className="meta">{modelText(engine, lang)}</span>
+                    </div>
                   </div>
-                </div>
-                <div className="meta">
-                  <span>{platformText(engine, lang)}</span>
-                  {engine.engineVersion && (
-                    <span className="mono">v{engine.engineVersion}</span>
-                  )}
-                </div>
-                <footer>
-                  <EngineStatus
-                    heartbeatInterval={snapshot.gateway.heartbeatInterval}
-                    engine={engine}
-                  />
-                  <span>
-                    {engine.lastSeenAt
-                      ? formatAgo(engine.lastSeenAt, now, lang)
-                      : "—"}
-                  </span>
-                </footer>
-              </button>
-            ))}
+                  <div className="meta">
+                    <span>{platformText(engine, lang)}</span>
+                    {engine.engineVersion && (
+                      <span className="mono">v{engine.engineVersion}</span>
+                    )}
+                  </div>
+                  <div className="card-facts">
+                    <span>
+                      {t("devices.owner")}:{" "}
+                      {engine.session.ownerLabel ?? t("devices.none")}
+                    </span>
+                    <span>
+                      {t("devices.latestOperation")}:{" "}
+                      <span className="mono">
+                        {recent?.method ?? t("common.noOperations")}
+                      </span>
+                    </span>
+                  </div>
+                  <footer>
+                    <EngineStatus
+                      heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                      engine={engine}
+                    />
+                    <span>
+                      {t("topology.workspaces", {
+                        count: engine.session.workspaces?.length ?? 0,
+                      })}
+                    </span>
+                  </footer>
+                </button>
+              );
+            })}
           </div>
         ) : (
           <div className="empty">{t("devices.empty")}</div>

@@ -15,6 +15,7 @@ export interface ActivityFilters {
   outcome?: "ok" | "error" | "denied" | "not_ok";
   cursor?: string;
   limit?: number;
+  excludeAuthFailed?: "1" | "true";
 }
 
 export interface ActivityRow extends AuditRecord { id: number }
@@ -57,6 +58,7 @@ export class ActivityLog {
     if (!Number.isSafeInteger(limit) || limit < 1 || limit > 200) throw new Error("Activity limit must be between 1 and 200");
     const clauses: string[] = [];
     const values: SQLInputValue[] = [];
+    if (filters.excludeAuthFailed) clauses.push("event_type <> 'auth.failed'");
     for (const [key, column] of [["from", "ts >="], ["to", "ts <="]] as const) {
       const value = filters[key];
       if (value !== undefined) {
