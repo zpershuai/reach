@@ -1,10 +1,11 @@
+import { useT, i18n } from "../i18n";
 import { useNow } from "../clock";
 import { memo } from "react";
 import { api } from "../api";
 import type { SensitiveAction } from "../Devices";
 import { consoleStore } from "../store";
 import type { Activity, Client, Snapshot } from "../types";
-import { Drawer, MiniLog, formatAgo } from "../ui";
+import { Drawer, MiniLog, formatAgo, formatNumber, warningText } from "../ui";
 
 export const ClientDrawer = memo(function ClientDrawer({
   client,
@@ -17,24 +18,31 @@ export const ClientDrawer = memo(function ClientDrawer({
   sensitive: SensitiveAction;
   onClose: () => void;
 }) {
+  const { t, lang } = useT();
   const now = useNow();
   return (
-    <Drawer title={client.label} label="Client details" onClose={onClose}>
+    <Drawer
+      title={client.label}
+      label={t("topologyDrawer.client")}
+      onClose={onClose}
+    >
       <section>
         <dl className="kv">
-          <dt>Connects via</dt>
+          <dt>{t("topologyDrawer.via")}</dt>
           <dd>
             {client.type === "mcp-http"
-              ? "Remote MCP (HTTP)"
-              : "Controller API"}
+              ? t("topologyDrawer.remote")
+              : t("topologyDrawer.controller")}
           </dd>
-          <dt>Identity</dt>
+          <dt>{t("topologyDrawer.identity")}</dt>
           <dd>
-            <span className="pill warn">Self-reported</span>
+            <span className="pill warn">
+              {t("topologyDrawer.selfReported")}
+            </span>
           </dd>
-          <dt>MCP sessions</dt>
-          <dd className="mono">{client.activeSessions}</dd>
-          <dt>In session with</dt>
+          <dt>{t("topologyDrawer.sessions")}</dt>
+          <dd className="mono">{formatNumber(client.activeSessions, lang)}</dd>
+          <dt>{t("topologyDrawer.sessionWith")}</dt>
           <dd>
             {client.ownedEngines.length
               ? client.ownedEngines.map((id) => (
@@ -42,22 +50,22 @@ export const ClientDrawer = memo(function ClientDrawer({
                     {id}
                   </span>
                 ))
-              : "No device"}
+              : t("topologyDrawer.noDevice")}
           </dd>
-          <dt>Last activity</dt>
-          <dd>{formatAgo(client.lastSeenAt, now)}</dd>
-          <dt>Last 24 h</dt>
+          <dt>{t("topologyDrawer.lastActivity")}</dt>
+          <dd>{formatAgo(client.lastSeenAt, now, lang)}</dd>
+          <dt>{t("topologyDrawer.lastDay")}</dt>
           <dd>
-            {client.calls24h} calls · {client.errors24h} errors
+            {t("topologyDrawer.calls", {
+              calls: client.calls24h,
+              errors: client.errors24h,
+            })}
           </dd>
         </dl>
       </section>
-      <div className="reserved">
-        This label comes from the client itself, so it attributes activity but
-        proves nothing. Verified client identity arrives with MCP OAuth.
-      </div>
+      <div className="reserved">{t("topologyDrawer.labelNote")}</div>
       <section>
-        <h4>Recent operations</h4>
+        <h4>{t("topologyDrawer.recent")}</h4>
         <MiniLog
           rows={activity.filter(
             (row) => (row.clientLabel ?? row.caller?.label) === client.label,
@@ -78,7 +86,7 @@ export const ClientDrawer = memo(function ClientDrawer({
               })
             }
           >
-            Disconnect sessions
+            {t("topologyDrawer.disconnect")}
           </button>
         </section>
       )}
@@ -97,50 +105,59 @@ export const GatewayDrawer = memo(function GatewayDrawer({
   settings: Snapshot["settings"];
   onClose: () => void;
 }) {
+  const { t, lang } = useT();
   return (
-    <Drawer title="reach-gateway" label="Gateway details" onClose={onClose}>
+    <Drawer
+      title="reach-gateway"
+      label={t("topologyDrawer.gateway")}
+      onClose={onClose}
+    >
       <section>
         <dl className="kv">
-          <dt>Version</dt>
+          <dt>{t("topologyDrawer.version")}</dt>
           <dd className="mono">
             v{gateway.version} · MCP v{gateway.mcpVersion}
           </dd>
-          <dt>Address</dt>
+          <dt>{t("topologyDrawer.address")}</dt>
           <dd className="mono">{gateway.publicOrigin}</dd>
-          <dt>Devices</dt>
+          <dt>{t("topologyDrawer.devices")}</dt>
           <dd className="mono">
-            {kpis.onlineEngines} online / {kpis.registeredEngines}
+            {t("topologyDrawer.online", {
+              online: kpis.onlineEngines,
+              total: kpis.registeredEngines,
+            })}
           </dd>
-          <dt>MCP sessions</dt>
-          <dd className="mono">{kpis.activeMcpSessions}</dd>
-          <dt>Heartbeat</dt>
-          <dd>Every {gateway.heartbeatInterval} s</dd>
-          <dt>Auto-update</dt>
+          <dt>{t("topologyDrawer.sessions")}</dt>
+          <dd className="mono">{formatNumber(kpis.activeMcpSessions, lang)}</dd>
+          <dt>{t("topologyDrawer.heartbeat")}</dt>
+          <dd>
+            {t("topologyDrawer.every", { seconds: gateway.heartbeatInterval })}
+          </dd>
+          <dt>{t("topologyDrawer.update")}</dt>
           <dd>
             {gateway.updateEnabled
-              ? "On · applies when every device is idle"
-              : "Off"}
+              ? t("topologyDrawer.on")
+              : t("topologyDrawer.off")}
           </dd>
-          <dt>Audit</dt>
-          <dd>SQLite · kept {settings.retentionDays} days</dd>
+          <dt>{t("topologyDrawer.audit")}</dt>
+          <dd>{t("topologyDrawer.kept", { count: settings.retentionDays })}</dd>
         </dl>
       </section>
       <section>
-        <h4>Request pipeline</h4>
+        <h4>{t("topologyDrawer.pipeline")}</h4>
         <div className="reserved">
-          Auth checks the Controller token and labels the caller.
+          {t("topologyDrawer.authNote")}
           <br />
-          Policy checks grants: writes and process runs need one issued for the
-          session.
+          {t("topologyDrawer.policyNote")}
           <br />
-          Route forwards the request to the Engine named by engineId.
+          {t("topologyDrawer.routeNote")}
           <br />
-          Each step’s result is written to the activity ledger.
+          {t("topologyDrawer.ledgerNote")}
         </div>
       </section>
-      {gateway.warnings.map((warning) => (
+      {gateway.warnings.map((warning, index) => (
         <div className="notice warn" key={warning}>
-          {warning}
+          {warningText(warning, lang, gateway.warningDetails?.[index])}
         </div>
       ))}
     </Drawer>

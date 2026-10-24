@@ -25,14 +25,14 @@ function inertRuntime(): EngineRuntime {
 test("registry validates enrollment, keeps seeds authoritative and persists rename and override", () => {
   const registry = new EngineRegistry(inertRuntime, undefined, true);
   const local = new EngineRegistry(inertRuntime);
-  assert.throws(() => local.add("engine-b", "Device"), /authentication/);
+  assert.throws(() => local.add("engine-b", "Device"), { code: "ENGINE_AUTH_REQUIRED", message: "Multiple Engines require Gateway authentication" });
   registry.seed("seed", "s".repeat(48));
   for (const operation of [() => registry.remove("seed"), () => registry.rotate("seed")]) {
-    assert.throws(operation, (error: unknown) => error instanceof RegistryError && error.status === 409);
+    assert.throws(operation, (error: unknown) => error instanceof RegistryError && error.status === 409 && error.code === "ENGINE_CONFIG_MANAGED");
   }
   for (const id of ["", "a".repeat(65), "../engine", "space id", "设备"]) assert.throws(() => registry.add(id, "Device"), /Invalid Engine id/);
   registry.add("engine._-1", "Device");
-  assert.throws(() => registry.add("engine._-1", "Other"), /already exists/);
+  assert.throws(() => registry.add("engine._-1", "Other"), { code: "ENGINE_ID_EXISTS", message: "Engine id already exists" });
   registry.update("seed", { displayName: "New name", deviceOverride: { kind: "nas", model: "4-bay NAS" } });
   assert.equal(registry.engines.get("seed")!.displayName, "New name");
   assert.equal(registry.engines.get("seed")!.deviceOverride!.kind, "nas");

@@ -9,7 +9,9 @@ import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "./api";
 import { ActivityView } from "./Activity";
 import { snapshot } from "./test-fixture";
-vi.mock("./api", () => ({ api: vi.fn() }));
+vi.mock("./api", async (original) => ({
+  ...await original<typeof import("./api")>(), api: vi.fn(),
+}));
 beforeEach(() => {
   vi.mocked(api).mockReset().mockResolvedValue({ rows: [], cursor: null });
 });

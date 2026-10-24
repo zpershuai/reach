@@ -45,3 +45,11 @@ npm --prefix packages/reach-rpc test
 ```
 
 Close test browser tabs and stop the local Engine and Gateway when finished. Preserve the data directory when restarting to test durable registration and login.
+
+## Localization checks
+
+Use EN / 中 on setup/sign-in and navigation, or Language in Settings. Repeat the manual workflow above in both languages, with light/dark themes, a 390 px viewport and reduced motion. Check all views, every enrollment step, device/client/Gateway drawers, Activity filter reload, reconnect status and clipboard feedback. Switching must preserve form state and update the root lang, title, localStorage preference and non-sensitive language cookie. Settings language changes must make no API call or reauthentication prompt. Start an MCP OAuth authorization with each console language selected and verify that approval and failed-code pages follow that choice.
+
+The literal-text audit permits product/protocol names Reach, Gateway, Engine, MCP, reach-gateway, engineId; version prefixes; byte units B/KB; punctuation and commands; and fixed language names EN / 中, English / 简体中文. Device/workspace names, platform identifiers, method/event identifiers, error codes and received user data stay verbatim. Gateway health warnings are translated by stable codes and parameters in the additive `gateway.warningDetails` field; unknown codes and legacy warning strings preserve server diagnostics. Catalog tests explicitly permit unchanged Linux, macOS, OpenWrt and Docker names.
+
+English-named deployment guide paths now contain English, with Chinese at matching _cn siblings and a switch link directly under each title.

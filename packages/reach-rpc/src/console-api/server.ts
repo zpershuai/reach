@@ -83,12 +83,22 @@ export class ConsoleServer {
     const errorRate = this.store.db.prepare("SELECT count(*) AS n,coalesce(sum(outcome != 'ok'),0) AS errors FROM activity WHERE event_type IN ('rpc.finished','rpc.denied') AND ts >= ?").get(now - 300_000)!;
     const midnight = new Date(now); midnight.setUTCHours(0, 0, 0, 0);
     const denials = this.store.db.prepare("SELECT count(*) AS n FROM activity WHERE event_type='rpc.denied' AND stage='policy' AND ts >= ?").get(midnight.getTime())!;
-    const warnings: string[] = [];
-    if (!this.audit.storageHealth || !this.registry.storageHealth || !this.activity.storageHealth) warnings.push(`Audit storage failure: ${this.config.dataDir}`);
-    if (!this.config.publicOrigin.startsWith("https:")) warnings.push("Console uses HTTP; configure an HTTPS public origin for public access.");
-    if (!this.config.trustedProxies.length) warnings.push("No trusted proxies configured; behind a proxy, per-client rate limiting may share one peer address.");
+    // Keep the legacy strings while new consoles translate the stable codes.
+    const warningDetails: Array<{ code: string; message: string; params?: { path: string } }> = [];
+    if (!this.audit.storageHealth || !this.registry.storageHealth || !this.activity.storageHealth) {
+      warningDetails.push({
+        code: "AUDIT_STORAGE_FAILURE", message: `Audit storage failure: ${this.config.dataDir}`,
+        params: { path: this.config.dataDir },
+      });
+    }
+    if (!this.config.publicOrigin.startsWith("https:")) {
+      warningDetails.push({ code: "INSECURE_HTTP", message: "Console uses HTTP; configure an HTTPS public origin for public access." });
+    }
+    if (!this.config.trustedProxies.length) {
+      warningDetails.push({ code: "NO_TRUSTED_PROXIES", message: "No trusted proxies configured; behind a proxy, per-client rate limiting may share one peer address." });
+    }
     return { ts: now, eventId: this.events.replay(0).at(-1)?.id ?? 0, clients, engines, settings: this.settings(), activity: this.activity.query({ limit: 100 }).rows,
-      gateway: { version: GATEWAY_VERSION, mcpVersion: MCP_VERSION, publicOrigin: this.config.publicOrigin, updateEnabled: this.updateEnabled, heartbeatInterval: this.heartbeatInterval, warnings },
+      gateway: { version: GATEWAY_VERSION, mcpVersion: MCP_VERSION, publicOrigin: this.config.publicOrigin, updateEnabled: this.updateEnabled, heartbeatInterval: this.heartbeatInterval, warnings: warningDetails.map(warning => warning.message), warningDetails },
       kpis: { clients: clients.length, registeredEngines: engines.length, onlineEngines: engines.filter(engine => engine.online).length,
         activeMcpSessions: this.mcp.clients().reduce((sum, client) => sum + client.activeSessions, 0), requestsPerMinute: Number(requests.n),
         errorRate5m: Number(errorRate.n) ? Number(errorRate.errors) / Number(errorRate.n) : 0, policyDenialsToday: Number(denials.n) } };
@@ -181,7 +191,7 @@ export class ConsoleServer {
       const oauthClient = /^oauth\/([^/]+)$/.exec(path);
       if (method === "DELETE" && oauthClient) {
         const id = decodeURIComponent(oauthClient[1]);
-        if (!this.oauth.revoke(id)) { sendJson(response, 404, { error: "Unknown OAuth application" }); return; }
+        if (!this.oauth.revoke(id)) { sendJson(response, 404, { error: "Unknown OAuth application", code: "OAUTH_APPLICATION_NOT_FOUND" }); return; }
         this.auth.action(`oauth.revoke:${id}`); sendJson(response, 200, { revoked: id }); return;
       }
       if (method === "GET" && path === "settings") { sendJson(response, 200, this.settings()); return; }
@@ -194,15 +204,15 @@ export class ConsoleServer {
         });
         this.auth.action("settings.update"); sendJson(response, 200, this.settings()); return;
       }
-      sendJson(response, 404, { error: "not found" });
+      sendJson(response, 404, { error: "not found", code: "NOT_FOUND" });
     } catch (error) {
       if (response.headersSent) { response.destroy(); return; }
-      if (error instanceof ConsoleError) sendJson(response, error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
-      else if (error instanceof RegistryError) sendJson(response, error.status, { error: error.message });
-      else if (error instanceof ClientAccessError) sendJson(response, error.status, { error: error.message });
-      else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB" });
-      else if (error instanceof z.ZodError || error instanceof InvalidJsonError || error instanceof URIError || error instanceof Error && error.message.includes("cursor")) sendJson(response, 400, { error: "Invalid console request" });
-      else sendJson(response, 500, { error: "Console storage unavailable" });
+      if (error instanceof ConsoleError) sendJson(response, error.status, { error: error.message, code: error.code, ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}) });
+      else if (error instanceof RegistryError) sendJson(response, error.status, { error: error.message, code: error.code });
+      else if (error instanceof ClientAccessError) sendJson(response, error.status, { error: error.message, code: error.code });
+      else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB", code: "BODY_TOO_LARGE" });
+      else if (error instanceof z.ZodError || error instanceof InvalidJsonError || error instanceof URIError || error instanceof Error && error.message.includes("cursor")) sendJson(response, 400, { error: "Invalid console request", code: "INVALID_REQUEST" });
+      else sendJson(response, 500, { error: "Console storage unavailable", code: "STORAGE_UNAVAILABLE" });
     }
   }
 }

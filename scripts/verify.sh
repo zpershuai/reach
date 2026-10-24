@@ -6,6 +6,8 @@ cd "$repo_root"
 
 python3 scripts/verify-toolchain.py
 
+node scripts/check-docs-i18n.mjs
+
 if [[ -x "$repo_root/node_modules/.bin/openspec" ]]; then
   openspec_cli="$repo_root/node_modules/.bin/openspec"
 else
@@ -22,7 +24,7 @@ python3 scripts/install-publication-tools.py
 for suite in toolchain tls-fixture public-source publication release-trust node-runtime node-launcher engine-linux-installer engine-macos-installer engine-openwrt-installer install-engine release-metadata package-notices release-assets release-plan release-download release-helpers; do
   python3 "scripts/test-$suite.py"
 done
-node --test scripts/test-grok-plugin.mjs scripts/test-engine-supervisor.mjs scripts/test-release-workflow.mjs
+node --test scripts/test-docs-i18n.mjs scripts/test-grok-plugin.mjs scripts/test-engine-supervisor.mjs scripts/test-release-workflow.mjs
 cargo fmt --all -- --check
 cargo test --workspace --locked
 cargo build --locked -p reach-rpc --bin engine

@@ -1,6 +1,6 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
-import { afterEach, vi } from "vitest";
+import { afterEach, beforeEach, vi } from "vitest";
 import { resetServerClock } from "./clock";
 import { resetOverlayStack } from "./ui";
 afterEach(() => {
@@ -29,3 +29,10 @@ globalThis.ResizeObserver = class {
   unobserve(): void {}
   disconnect(): void {}
 };
+
+import { languageKey, setLang } from "./i18n";
+beforeEach(() => {
+  setLang("en");
+  localStorage.removeItem(languageKey);
+  document.cookie = "reach_lang=; Path=/; Max-Age=0";
+});

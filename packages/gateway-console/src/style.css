@@ -23,8 +23,8 @@
   --ok-soft: #e4f4ea;
   --warn-soft: #fbf1de;
   --shadow: 0 1px 2px rgba(20, 34, 42, 0.05), 0 4px 16px rgba(20, 34, 42, 0.05);
-  --f-display: "Bricolage Grotesque", "Geist", ui-sans-serif, system-ui, sans-serif;
-  --f-ui: "Geist", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  --f-display: "Bricolage Grotesque", "Geist", ui-sans-serif, system-ui, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+  --f-ui: "Geist", ui-sans-serif, system-ui, -apple-system, "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
   --f-mono: "Geist Mono", ui-monospace, SFMono-Regular, Menlo, monospace;
   --r: 10px;
   color-scheme: light;
@@ -321,3 +321,12 @@ pre.command { margin: 0; padding: 12px; border-radius: 8px; background: var(--su
 .copy-control { display: inline-flex; flex-direction: column; align-items: flex-start; gap: 6px; }
 .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .permission-operations { display: flex; flex-wrap: wrap; gap: 16px; margin: 12px 0; }
+
+.language-toggle { display: inline-flex; align-items: center; gap: 3px; flex-shrink: 0; }
+.language-toggle [aria-pressed="true"] { background: var(--accent-soft); color: var(--accent); }
+.auth-language { position: absolute; top: 16px; right: 16px; }
+@media (max-width: 820px) {
+  .nav { flex-wrap: wrap; }
+  .nav-foot { flex-wrap: wrap; justify-content: flex-end; }
+  .nav-foot .language-toggle .btn { padding: 4px 6px; }
+}

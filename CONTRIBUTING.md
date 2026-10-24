@@ -1,6 +1,6 @@
 # Contributing to Reach
 
-Thanks for helping. Bug reports, documentation fixes (including English translations of the deployment guides), and code changes are all welcome.
+Thanks for helping. Bug reports, documentation fixes and translations, and code changes are all welcome.
 
 ## Repository layout
 
@@ -14,7 +14,7 @@ Thanks for helping. Bug reports, documentation fixes (including English translat
 | `fixtures/` | Shared protocol fixtures used by both the Rust and TypeScript tests |
 | `scripts/` | Installers, packaging, release helpers and verification scripts |
 | `deploy/` | Docker Compose, Dockerfiles and updater units |
-| `docs/deploy/` | Deployment guides (currently in Chinese) |
+| `docs/deploy/` | Deployment guides in English and Simplified Chinese |
 | `docs/reference/` | Protocol and runtime reference |
 | `docs/dev/` | Maintainer notes: past code reviews and the publishing checklist |
 | `openspec/` | Specifications (`specs/`) and the history of changes (`changes/`) |
@@ -65,3 +65,7 @@ By contributing, you agree that your contributions are licensed under the [Apach
 - Issue 是公开的：只提供版本、平台、稳定错误码和脱敏重现步骤；漏洞按 SECURITY.md 私下报告。
 - 示例里只能使用保留域名和文档 IP；真实主机、token 和部署记录只能放在被 Git 忽略的 `.reach/` 目录。
 - 贡献的内容按 Apache-2.0 授权。
+
+## Bilingual documentation
+
+User-facing README, top-level docs guides and docs/deploy guides use English `<name>.md` and Simplified Chinese `<name>_cn.md` siblings. Put the counterpart language switch directly below the title and link to guides in the same language, including translated anchors. Update both languages in the same PR whenever either changes; keep procedures, versions, warnings, executable command structure, configuration keys, environment variable names and file paths aligned. Translate comments, explanatory script messages, descriptive placeholders and diagram labels, including inside code blocks. Identifier-style placeholders such as `<delegated-client-token>` may stay unchanged when surrounding prose explains the replacement value. Run `node scripts/check-docs-i18n.mjs` to check pairs, switch lines, links, anchors and untranslated code-block comments. Developer guides, references, package READMEs, CONTRIBUTING and SECURITY remain English-only.

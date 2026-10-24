@@ -1,7 +1,31 @@
+import { useT } from "./i18n";
 import { useNow } from "./clock";
 import { displayOnline } from "./online";
 import type { ReactNode } from "react";
 import type { Engine } from "./types";
+
+export const glyphLabels = {
+  "mac-mini": "glyph.macMini",
+  "mac-studio": "glyph.macStudio",
+  macbook: "glyph.macbook",
+  imac: "glyph.imac",
+  mac: "glyph.mac",
+  router: "glyph.router",
+  nas: "glyph.nas",
+  "raspberry-pi": "glyph.raspberryPi",
+  server: "glyph.server",
+} as const;
+export const sessionLabels = {
+  ready: "glyph.ready",
+  wanted: "glyph.wanted",
+  pending: "glyph.pending",
+  connecting: "glyph.connecting",
+  none: "glyph.none",
+  closed: "glyph.closed",
+  closing: "glyph.closing",
+  offline: "glyph.offline",
+  idle: "glyph.idle",
+} as const;
 
 export const glyphKinds = [
   "mac-mini",
@@ -183,13 +207,15 @@ export function DeviceGlyph({
   large?: boolean;
   heartbeatInterval?: number;
 }) {
+  const { t } = useT();
   const kind = glyphKind(engine);
+  const status = engine.session.status as keyof typeof sessionLabels;
   const state = glyphState(engine, useNow(), heartbeatInterval);
   return (
     <span
       className={`dev-icon s-${state}${large ? " lg" : ""}`}
       role="img"
-      aria-label={`${kind}, ${state === "offline" ? "offline" : engine.session.status}`}
+      aria-label={`${t(glyphLabels[kind as keyof typeof glyphLabels])}, ${t(sessionLabels[state === "offline" ? "offline" : status] ?? "glyph.none")}`}
     >
       <svg viewBox="0 0 32 32" aria-hidden="true">
         {glyphs[kind]}

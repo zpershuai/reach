@@ -9,7 +9,9 @@ import { ClientsView, Overview, SettingsView, SkillsView } from "./Views";
 import { ActivityView } from "./Activity";
 import { consoleStore } from "./store";
 import { engine, snapshot } from "./test-fixture";
-vi.mock("./api", () => ({ api: vi.fn() }));
+vi.mock("./api", async (original) => ({
+  ...await original<typeof import("./api")>(), api: vi.fn(),
+}));
 beforeEach(() => {
   history.replaceState(null, "", "/console/activity");
   vi.spyOn(consoleStore, "refresh").mockResolvedValue();

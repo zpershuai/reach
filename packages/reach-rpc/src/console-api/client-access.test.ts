@@ -145,3 +145,12 @@ test("policy reads are cached and every write, including cascades, invalidates t
     assert.throws(() => f.access.get("oauth:app"), (error: unknown) => error instanceof ClientAccessError && error.status === 404);
   } finally { f.close(); }
 });
+
+test("invalid delegated credentials have a credential-specific code and retain HTTP 401", () => {
+  const f = fixture();
+  try {
+    assert.throws(() => f.access.requireDelegated("Bearer invalid"), {
+      status: 401, code: "INVALID_CLIENT_CREDENTIAL", message: "Invalid or expired client credential",
+    });
+  } finally { f.close(); }
+});

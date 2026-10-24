@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { serveConsole } from "./static.js";
+import { createGateway } from "../gateway.js";
 
 test("console static serving protects paths, sets security and cache headers, and supports deep links", async () => {
   const directory = mkdtempSync(join(tmpdir(), "reach-static-"));
@@ -46,4 +47,17 @@ test("console static serving protects paths, sets security and cache headers, an
     assert.equal(missing.status, 503);
     assert.ok((await missing.text()).includes("build packages/gateway-console"));
   } finally { await new Promise<void>(resolve => server.close(() => resolve())); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("disabled console APIs return a stable not-found code", async () => {
+  const gateway = createGateway({ logger: () => {} });
+  gateway.listen(0, "127.0.0.1");
+  await once(gateway, "listening");
+  const address = gateway.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    const response = await fetch(`http://127.0.0.1:${address.port}/api/console/me`);
+    assert.equal(response.status, 404);
+    assert.deepEqual(await response.json(), { error: "not found", code: "NOT_FOUND" });
+  } finally { await new Promise<void>(resolve => gateway.close(() => resolve())); }
 });

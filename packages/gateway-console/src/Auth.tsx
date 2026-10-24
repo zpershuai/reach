@@ -1,6 +1,8 @@
+import { LanguageToggle } from "./LanguageToggle";
+import { useT } from "./i18n";
 import { useState, type FormEvent } from "react";
 import qrcode from "qrcode-generator";
-import { api } from "./api";
+import { api, errorText } from "./api";
 import { Modal } from "./ui";
 
 interface Identity {
@@ -8,9 +10,6 @@ interface Identity {
   setupRequired?: boolean;
   csrfToken: string;
   recoveryCodes?: string[];
-}
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : "Request failed";
 }
 
 export function AuthScreen({
@@ -20,13 +19,14 @@ export function AuthScreen({
   setup: boolean;
   onAuthenticated: () => void;
 }) {
+  const { t } = useT();
   const [token, setToken] = useState("");
   const [secret, setSecret] = useState("");
   const [qr, setQr] = useState("");
   const [password, setPassword] = useState("");
   const [code, setCode] = useState("");
   const [recovery, setRecovery] = useState<string[]>([]);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -58,20 +58,23 @@ export function AuthScreen({
         else onAuthenticated();
       }
     } catch (error) {
-      setError(errorText(error));
+      setError(error);
     } finally {
       setBusy(false);
     }
   }
   const heading = recovery.length
-    ? "Save your recovery codes"
+    ? t("auth.saveCodes")
     : setup
       ? secret
-        ? "Connect your authenticator"
-        : "Set up your Gateway"
-      : "Sign in";
+        ? t("auth.connectAuthenticator")
+        : t("auth.setup")
+      : t("auth.signIn");
   return (
     <main className="auth-page">
+      <div className="auth-language">
+        <LanguageToggle />
+      </div>
       <section className="panel auth-card">
         <div className="panel-body">
           <span className="brand">
@@ -81,10 +84,7 @@ export function AuthScreen({
           <h1>{heading}</h1>
           {recovery.length ? (
             <>
-              <p>
-                These ten codes are shown once. Keep them somewhere private.
-                Each one replaces an authenticator code for a single sign-in.
-              </p>
+              <p>{t("auth.codesNote")}</p>
               <div className="recovery">
                 {recovery.map((value) => (
                   <code key={value}>{value}</code>
@@ -97,19 +97,16 @@ export function AuthScreen({
                   onAuthenticated();
                 }}
               >
-                I saved my recovery codes →
+                {t("auth.savedCodes")}
               </button>
             </>
           ) : (
             <form onSubmit={(event) => void submit(event)}>
               {setup && !secret ? (
                 <>
-                  <p className="muted">
-                    Enter the setup token from the Gateway log or your private
-                    configuration.
-                  </p>
+                  <p className="muted">{t("auth.setupNote")}</p>
                   <label>
-                    Setup token
+                    {t("auth.setupToken")}
                     <input
                       type="password"
                       value={token}
@@ -123,18 +120,15 @@ export function AuthScreen({
                 <>
                   {setup && (
                     <div className="totp">
-                      <img
-                        src={qr}
-                        alt="Scan this QR code with your authenticator"
-                      />
+                      <img src={qr} alt={t("auth.scan")} />
                       <details>
-                        <summary>Enter the secret manually</summary>
+                        <summary>{t("auth.manual")}</summary>
                         <code>{secret}</code>
                       </details>
                     </div>
                   )}
                   <label>
-                    Password
+                    {t("auth.password")}
                     <input
                       type="password"
                       minLength={setup ? 12 : undefined}
@@ -146,9 +140,7 @@ export function AuthScreen({
                     />
                   </label>
                   <label>
-                    {setup
-                      ? "Authenticator code"
-                      : "Authenticator or recovery code"}
+                    {setup ? t("auth.code") : t("auth.recoveryCode")}
                     <input
                       inputMode="text"
                       autoComplete="one-time-code"
@@ -159,19 +151,19 @@ export function AuthScreen({
                   </label>
                 </>
               )}
-              {error && (
+              {Boolean(error) && (
                 <p className="error" role="alert">
-                  {error}
+                  {errorText(error, t)}
                 </p>
               )}
               <button className="btn primary" disabled={busy}>
                 {busy
-                  ? "Working…"
+                  ? t("auth.working")
                   : setup
                     ? secret
-                      ? "Create administrator →"
-                      : "Continue →"
-                    : "Sign in →"}
+                      ? t("auth.create")
+                      : t("auth.continue")
+                    : t("auth.submit")}
               </button>
             </form>
           )}
@@ -188,8 +180,9 @@ export function ReauthDialog({
   onConfirm: (password: string) => Promise<void>;
   onCancel: () => void;
 }) {
+  const { t } = useT();
   const [password, setPassword] = useState("");
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const [busy, setBusy] = useState(false);
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -199,19 +192,17 @@ export function ReauthDialog({
       await onConfirm(password);
       setPassword("");
     } catch (error) {
-      setError(errorText(error));
+      setError(error);
     } finally {
       setBusy(false);
     }
   }
   return (
-    <Modal title="Confirm it’s you" onCancel={onCancel}>
-      <p className="muted">
-        Enter your password to continue. The confirmation lasts ten minutes.
-      </p>
+    <Modal title={t("auth.confirmIdentity")} onCancel={onCancel}>
+      <p className="muted">{t("auth.reauthNote")}</p>
       <form onSubmit={(event) => void submit(event)}>
         <label>
-          Password
+          {t("auth.password")}
           <input
             type="password"
             autoComplete="current-password"
@@ -220,17 +211,17 @@ export function ReauthDialog({
             required
           />
         </label>
-        {error && (
+        {Boolean(error) && (
           <p role="alert" className="error">
-            {error}
+            {errorText(error, t)}
           </p>
         )}
         <div className="actions">
           <button type="button" className="btn" onClick={onCancel}>
-            Cancel
+            {t("auth.cancel")}
           </button>
           <button className="btn primary" disabled={busy}>
-            Confirm
+            {t("auth.confirm")}
           </button>
         </div>
       </form>

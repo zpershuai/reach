@@ -208,7 +208,7 @@ export function createGateway(options: GatewayOptions = {}): GatewayServer {
     if (url.pathname.startsWith("/api/console/")) {
       // Console authentication records its own failures with the proxy-aware peer address.
       securityHeaders(response);
-      if (!consoleServer) { sendJson(response, 404, { error: "not found" }); return; }
+      if (!consoleServer) { sendJson(response, 404, { error: "not found", code: "NOT_FOUND" }); return; }
       void consoleServer.handle(url, request, response);
       return;
     }

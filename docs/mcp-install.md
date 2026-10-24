@@ -1,5 +1,7 @@
-# Reach MCP 安装文档入口
+# Reach MCP installation documentation
 
-通用 stdio MCP 的完整安装说明见 [docs/deploy/mcp.md](deploy/mcp.md)，覆盖已安装产物、源码运行、独立运行目录、客户端配置、设备 JSON、环境变量和工具列表兼容。
+English | [简体中文](mcp-install_cn.md)
 
-整套部署文档见 [docs/deploy/README.md](deploy/README.md)。本路径保留为已有链接的入口。
+See [docs/deploy/mcp.md](deploy/mcp.md) for full stdio MCP instructions: installed outputs, source execution, independent runtime directories, client configuration, devices JSON, environment variables and tool-list compatibility.
+
+The full guide index is [docs/deploy/README.md](deploy/README.md). This path remains an entry point for existing links.

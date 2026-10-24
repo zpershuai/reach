@@ -1,5 +1,8 @@
+import { formatNumber } from "./ui";
+import { LanguageToggle } from "./LanguageToggle";
+import { useT } from "./i18n";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ApiError, api } from "./api";
+import { ApiError, api, errorText } from "./api";
 import { AuthScreen, ReauthDialog } from "./Auth";
 import { ActivityView } from "./Activity";
 import { AddDevice, DevicesView, type SensitiveAction } from "./Devices";
@@ -9,20 +12,21 @@ import { TopologyView } from "./Topology";
 import { ClientsView, Overview, SettingsView, SkillsView } from "./Views";
 
 const navigation = [
-  ["overview", "Overview"],
-  ["topology", "Topology"],
-  ["clients", "Clients"],
-  ["devices", "Devices"],
-  ["activity", "Activity"],
-  ["skills", "Skills"],
-  ["settings", "Settings"],
-];
+  ["overview", "nav.overview"],
+  ["topology", "nav.topology"],
+  ["clients", "nav.clients"],
+  ["devices", "nav.devices"],
+  ["activity", "nav.activity"],
+  ["skills", "nav.skills"],
+  ["settings", "nav.settings"],
+] as const;
 export function App() {
+  const { t, lang } = useT();
   const [identity, setIdentity] = useState<{
     authenticated: boolean;
     setupRequired?: boolean;
   }>();
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const [reauth, setReauth] = useState(false);
   const [adding, setAdding] = useState(false);
   const pending = useRef<(() => Promise<void>) | undefined>(undefined);
@@ -33,7 +37,7 @@ export function App() {
     try {
       setIdentity(await api("me"));
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Gateway unavailable");
+      setError(error);
     }
   }
   useEffect(() => {
@@ -50,7 +54,7 @@ export function App() {
   }, []);
   useEffect(() => {
     if (identity?.authenticated)
-      void consoleStore.start().catch((error) => setError(String(error)));
+      void consoleStore.start().catch((error) => setError(error));
     else consoleStore.stop();
   }, [identity?.authenticated]);
   useEffect(() => {
@@ -65,8 +69,7 @@ export function App() {
       if (error instanceof ApiError && error.code === "REAUTH_REQUIRED") {
         pending.current = operation;
         setReauth(true);
-      } else
-        setError(error instanceof Error ? error.message : "Request failed");
+      } else setError(error);
     }
   }, []);
   if (!identity)
@@ -76,10 +79,10 @@ export function App() {
           <b>Reach</b>
           <span>Gateway</span>
         </span>
-        <p>{error || "Connecting to your Gateway…"}</p>
-        {error && (
+        <p>{error ? errorText(error, t) : t("nav.connecting")}</p>
+        {Boolean(error) && (
           <button className="btn" onClick={() => void loadIdentity()}>
-            Retry
+            {t("nav.retry")}
           </button>
         )}
       </main>
@@ -92,17 +95,16 @@ export function App() {
       />
     );
   const snapshot = state.snapshot;
-  const title =
-    navigation.find((item) => item[0] === section)?.[1] ?? "Not found";
+  const title = navigation.find((item) => item[0] === section)?.[1];
   const counts: Record<string, string | undefined> = {
-    clients: snapshot ? String(snapshot.clients.length) : undefined,
-    devices: snapshot ? String(snapshot.engines.length) : undefined,
-    skills: "Planned",
+    clients: snapshot ? formatNumber(snapshot.clients.length, lang) : undefined,
+    devices: snapshot ? formatNumber(snapshot.engines.length, lang) : undefined,
+    skills: t("nav.planned"),
   };
   const warnings = snapshot?.gateway.warnings.length ?? 0;
   return (
     <div className="app">
-      <nav className="nav" aria-label="Main">
+      <nav className="nav" aria-label={t("nav.main")}>
         <a
           className="brand"
           href="/console/"
@@ -126,26 +128,27 @@ export function App() {
                   navigate(path);
                 }}
               >
-                {label}
+                {t(label)}
                 {counts[path] && <small>{counts[path]}</small>}
               </a>
             </li>
           ))}
         </ul>
         <div className="nav-foot">
+          <LanguageToggle />
           <button
             className="btn primary add-device"
-            aria-label="Add device"
+            aria-label={t("nav.add")}
             disabled={!snapshot}
             onClick={() => setAdding(true)}
           >
-            <span className="add-device-label">Add device</span>
+            <span className="add-device-label">{t("nav.add")}</span>
             <span className="add-device-symbol" aria-hidden="true">
               +
             </span>
           </button>
           <div className="owner">
-            <span>Administrator</span>
+            <span>{t("nav.administrator")}</span>
             <button
               className="btn ghost small"
               onClick={() =>
@@ -155,10 +158,10 @@ export function App() {
                     setIdentity({ authenticated: false });
                     return loadIdentity();
                   })
-                  .catch((error) => setError(String(error)))
+                  .catch((error) => setError(error))
               }
             >
-              Sign out
+              {t("nav.signOut")}
             </button>
           </div>
         </div>
@@ -166,7 +169,7 @@ export function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <h1>{title}</h1>
+            <h1>{title ? t(title) : t("nav.notFound")}</h1>
             {snapshot && (
               <div className="sub">
                 <span className="mono">
@@ -178,10 +181,14 @@ export function App() {
                 <span className={`pill ${warnings ? "warn" : "ok"}`}>
                   <span className="dot" />
                   {warnings
-                    ? `${warnings} warning${warnings > 1 ? "s" : ""}`
-                    : "Healthy"}
+                    ? t("nav.warning", { count: warnings })
+                    : t("nav.healthy")}
                 </span>
-                <span>Heartbeat {snapshot.gateway.heartbeatInterval} s</span>
+                <span>
+                  {t("nav.heartbeat", {
+                    seconds: snapshot.gateway.heartbeatInterval,
+                  })}
+                </span>
               </div>
             )}
           </div>
@@ -191,24 +198,24 @@ export function App() {
               role="status"
             >
               <span className="dot" />
-              {state.connected ? "Live" : "Reconnecting"}
+              {state.connected ? t("nav.live") : t("nav.reconnecting")}
             </span>
           </div>
         </header>
-        {error && (
+        {Boolean(error) && (
           <div className="notice err" role="alert">
-            {error}
+            {errorText(error, t)}
             <button
               className="btn ghost small"
               onClick={() => setError("")}
-              aria-label="Dismiss error"
+              aria-label={t("nav.dismiss")}
             >
               ×
             </button>
           </div>
         )}
         {!snapshot ? (
-          <div className="panel empty">Loading Gateway state…</div>
+          <div className="panel empty">{t("nav.loading")}</div>
         ) : (
           <>
             {section === "overview" && <Overview snapshot={snapshot} />}
@@ -241,9 +248,9 @@ export function App() {
             {section === "skills" && <SkillsView />}
             {!navigation.some((item) => item[0] === section) && (
               <section className="panel empty">
-                <p>This page does not exist.</p>
+                <p>{t("nav.missingPage")}</p>
                 <button className="btn" onClick={() => navigate("overview")}>
-                  Open Overview
+                  {t("nav.openOverview")}
                 </button>
               </section>
             )}

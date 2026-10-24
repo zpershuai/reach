@@ -1,7 +1,8 @@
+import { setLang } from "./i18n";
 import { expect, it, vi } from "vitest";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { ActivityTable } from "./Activity";
-import { CopyButton, Drawer, MiniLog, Modal } from "./ui";
+import { CopyButton, Drawer, MiniLog, Modal, formatTime, warningText } from "./ui";
 import { ReauthDialog } from "./Auth";
 import type { Activity } from "./types";
 
@@ -189,4 +190,33 @@ it("returns focus to the node that swapped in a drawer, not the first one", () =
   expect(screen.getByText("a")).not.toHaveFocus();
   view.rerender(<Harness open="" />);
   expect(screen.getByText("b")).toHaveFocus();
+});
+
+it("confirms clipboard copying in Chinese", async () => {
+  setLang("zh-CN");
+  const writeText = vi.fn().mockResolvedValue(undefined);
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText },
+  });
+  render(<CopyButton value="private-test-token" />);
+  fireEvent.click(screen.getByRole("button", { name: "复制" }));
+  expect(await screen.findByRole("button", { name: "已复制" })).toBeVisible();
+  expect(writeText).toHaveBeenCalledWith("private-test-token");
+});
+
+it("uses a zero-based 24-hour clock at midnight", () => {
+  const midnight = new Date(2026, 0, 1, 0, 5, 10).getTime();
+  expect(formatTime(midnight, "en")).toBe("00:05:10");
+  expect(formatTime(midnight, "zh-CN")).toBe("00:05:10");
+});
+
+it("uses stable warning codes and preserves legacy and unknown diagnostics", () => {
+  expect(warningText("Changed HTTP wording!", "zh-CN", {
+    code: "INSECURE_HTTP", message: "Changed HTTP wording!",
+  })).toContain("HTTPS");
+  expect(warningText("Legacy warning", "zh-CN")).toBe("Legacy warning");
+  expect(warningText("Old text", "zh-CN", {
+    code: "FUTURE_WARNING", message: "Specific new diagnostic",
+  })).toBe("Specific new diagnostic");
 });

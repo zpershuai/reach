@@ -1,3 +1,4 @@
+import { messages, resolveLang, type Lang, type MessageKey } from "./oauth-messages.js";
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ConsoleAuth } from "./auth.js";
@@ -169,6 +170,7 @@ export class OAuthServer {
   async handle(url: URL, request: IncomingMessage, response: ServerResponse): Promise<boolean> {
     const path = url.pathname;
     if (!path.startsWith("/.well-known/oauth-") && !path.startsWith("/oauth/")) return false;
+    const lang = resolveLang(request);
     try {
       if (request.method === "OPTIONS" && path.startsWith("/.well-known/")) {
         response.writeHead(204, { "access-control-allow-origin": "*", "access-control-allow-methods": "GET", "access-control-allow-headers": "mcp-protocol-version" });
@@ -195,8 +197,8 @@ export class OAuthServer {
           authorization_response_iss_parameter_supported: true,
         }, { "access-control-allow-origin": "*", "cache-control": "max-age=300" });
       } else if (request.method === "POST" && path === "/oauth/register") await this.register(request, response);
-      else if (request.method === "GET" && path === "/oauth/authorize") this.authorize(url, response);
-      else if (request.method === "POST" && path === "/oauth/authorize") await this.decide(request, response);
+      else if (request.method === "GET" && path === "/oauth/authorize") this.authorize(url, response, lang);
+      else if (request.method === "POST" && path === "/oauth/authorize") await this.decide(request, response, lang);
       else if (request.method === "POST" && path === "/oauth/token") await this.token(request, response);
       else if (request.method === "POST" && path === "/oauth/revoke") await this.revocation(request, response);
       else send(response, 404, { error: "not_found" });
@@ -206,7 +208,7 @@ export class OAuthServer {
         error.retryAfter ? { "retry-after": String(error.retryAfter) } : {});
       else if (error instanceof ConsoleError && error.status === 429) {
         if (error.retryAfter) response.setHeader("retry-after", error.retryAfter);
-        this.page(response, 429, "Too many attempts", `<p>Too many failed approvals. Try again later.</p>`);
+        this.page(response, lang, 429, "tooMany", `<p>${escapeHtml(messages[lang].tooManyNote)}</p>`);
       } else send(response, 500, { error: "server_error", error_description: "Authorization storage unavailable" });
     }
     return true;
@@ -285,12 +287,12 @@ export class OAuthServer {
     return request.expiresAt > this.now() ? request : undefined;
   }
 
-  private authorize(url: URL, response: ServerResponse): void {
+  private authorize(url: URL, response: ServerResponse, lang: Lang): void {
     const params = url.searchParams;
     const client = this.client(params.get("client_id"));
-    if (!client) { this.page(response, 400, "Unknown application", "<p>This application is not registered with the Gateway. Remove and add the connector again.</p>"); return; }
+    if (!client) { this.page(response, lang, 400, "unknownApp", `<p>${escapeHtml(messages[lang].unknownAppNote)}</p>`); return; }
     const redirectUri = params.get("redirect_uri") ?? (client.redirectUris.length === 1 ? client.redirectUris[0] : "");
-    if (!client.redirectUris.includes(redirectUri)) { this.page(response, 400, "Invalid redirect", "<p>The redirect URI does not match the application's registration.</p>"); return; }
+    if (!client.redirectUris.includes(redirectUri)) { this.page(response, lang, 400, "invalidRedirect", `<p>${escapeHtml(messages[lang].invalidRedirectNote)}</p>`); return; }
     const state = params.get("state") ?? undefined;
     const fail = (error: string, description: string) => redirect(response, this.callback(redirectUri, { error, error_description: description, state }));
     if (params.get("response_type") !== "code") { fail("unsupported_response_type", "Only response_type=code is supported"); return; }
@@ -298,18 +300,18 @@ export class OAuthServer {
     if (params.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) { fail("invalid_request", "PKCE with code_challenge_method=S256 is required"); return; }
     const resource = params.get("resource");
     if (resource !== null && resource.replace(/\/$/, "") !== this.resource && resource.replace(/\/$/, "") !== this.issuer) { fail("invalid_target", "Unknown resource"); return; }
-    if (!this.store.db.prepare("SELECT id FROM admin WHERE id=1").get()) { this.page(response, 503, "Gateway not set up", "<p>Finish the Gateway console setup before connecting applications.</p>"); return; }
+    if (!this.store.db.prepare("SELECT id FROM admin WHERE id=1").get()) { this.page(response, lang, 503, "notSetup", `<p>${escapeHtml(messages[lang].notSetupNote)}</p>`); return; }
     // Keeps an unapproved registration alive while its owner is using it.
     this.store.db.prepare("UPDATE oauth_clients SET last_used_at=? WHERE id=? AND approved_at IS NULL").run(this.now(), client.id);
     const signed = this.signRequest({ clientId: client.id, redirectUri, state, challenge, expiresAt: this.now() + pendingTtlMs });
-    this.consent(response, signed, client, redirectUri);
+    this.consent(response, lang, signed, client, redirectUri);
   }
 
-  private async decide(request: IncomingMessage, response: ServerResponse): Promise<void> {
+  private async decide(request: IncomingMessage, response: ServerResponse, lang: Lang): Promise<void> {
     // Browsers send Origin on same-origin form posts; Sec-Fetch-Site covers browsers that still send "null".
     const origin = request.headers.origin;
     if (origin !== this.issuer && !((origin === undefined || origin === "null") && request.headers["sec-fetch-site"] === "same-origin")) {
-      this.page(response, 403, "Request rejected", "<p>The approval did not come from this Gateway's page.</p>");
+      this.page(response, lang, 403, "rejected", `<p>${escapeHtml(messages[lang].rejectedNote)}</p>`);
       return;
     }
     const body = await readBody(request);
@@ -317,7 +319,7 @@ export class OAuthServer {
     const pending = this.openRequest(signed);
     const client = pending && this.client(pending.clientId);
     if (!pending || !client) {
-      this.page(response, 400, "Request expired", "<p>This authorization request has expired. Start the connection again from the application.</p>");
+      this.page(response, lang, 400, "expired", `<p>${escapeHtml(messages[lang].expiredNote)}</p>`);
       return;
     }
     if (body.decision !== "approve") {
@@ -325,7 +327,7 @@ export class OAuthServer {
       return;
     }
     if (!await this.auth.verifyOwner(request, "/oauth/authorize", body.password, body.code)) {
-      this.consent(response, signed, client, pending.redirectUri, "Password or authentication code is incorrect. Each code works once; wait for the next one if you just signed in.");
+      this.consent(response, lang, signed, client, pending.redirectUri, "wrongCode");
       return;
     }
     let permissions: ClientPermission[];
@@ -352,7 +354,7 @@ export class OAuthServer {
         return !resource || resource.workspaces && !resource.workspaces.includes(permission.workspace);
       })) throw new Error("Invalid resource selection");
     } catch {
-      this.consent(response, signed, client, pending.redirectUri, "Select registered Engines, workspace names and permissions. No access is selected by default.", 400);
+      this.consent(response, lang, signed, client, pending.redirectUri, "invalidSelection", 400);
       return;
     }
     if (!this.access) throw new OAuthError(503, "temporarily_unavailable", "Client policy storage unavailable");
@@ -465,7 +467,9 @@ export class OAuthServer {
     send(response, 200, {});
   }
 
-  private consent(response: ServerResponse, id: string, client: ClientRow, redirectUri: string, error?: string, status = 401): void {
+  private consent(response: ServerResponse, lang: Lang, id: string, client: ClientRow, redirectUri: string, error?: MessageKey, status = 401): void {
+    const m = messages[lang];
+    const text = (key: MessageKey) => escapeHtml(m[key]);
     const host = new URL(redirectUri).host;
     let index = 0;
     const rows = this.resources().flatMap(resource => (resource.workspaces ?? ["", "", ""]).map(workspace => ({ resource, workspace })));
@@ -474,29 +478,29 @@ export class OAuthServer {
       const prefix = `permission.${index++}.`;
       return `<fieldset><legend>${escapeHtml(resource.engineId)}</legend>
         <input type="hidden" name="${prefix}engineId" value="${escapeHtml(resource.engineId)}">
-        <label>Workspace<input name="${prefix}workspace" value="${escapeHtml(workspace)}"${workspace ? " readonly" : ""} placeholder="Configured workspace name"></label>
-        ${["read", "write", "execute"].map(operation => `<label class="choice"><input type="checkbox" name="${prefix}${operation}"> ${operation}</label>`).join("")}</fieldset>`;
-    }).join("") + (truncated ? `<p class="muted">Only the first ${MAX_CONSENT_ROWS} resource rows are shown. Approve with these, then add other resources from the console's Clients page.</p>` : "");
-    this.page(response, error ? status : 200, "Connect to Reach Gateway", `
-      <p><strong>${escapeHtml(client.name)}</strong> wants to use this Gateway's MCP tools. Select each Engine, workspace and operation you trust this application to use.</p>
-      <p>Execute runs trusted Node scripts with the Engine account's operating system privileges. It is not a sandbox. File write permission can change scripts that another trusted client may execute.</p>
-      <p class="muted">After approval you will return to <code>${escapeHtml(host)}</code>.</p>
-      ${error ? `<p class="error" role="alert">${escapeHtml(error)}</p>` : ""}
+        <label>${text("workspace")}<input name="${prefix}workspace" value="${escapeHtml(workspace)}"${workspace ? " readonly" : ""} placeholder="${text("workspacePlaceholder")}"></label>
+        ${["read", "write", "execute"].map(operation => `<label class="choice"><input type="checkbox" name="${prefix}${operation}"> ${text(operation as "read" | "write" | "execute")}</label>`).join("")}</fieldset>`;
+    }).join("") + (truncated ? `<p class="muted">${escapeHtml(m.truncated.replace("{{count}}", String(MAX_CONSENT_ROWS)))}</p>` : "");
+    this.page(response, lang, error ? status : 200, "connect", `
+      <p><strong>${escapeHtml(client.name)}</strong> ${text("wants")}</p>
+      <p>${text("execution")}</p>
+      <p class="muted">${text("returnTo")} <code>${escapeHtml(host)}</code>.</p>
+      ${error ? `<p class="error" role="alert">${text(error)}</p>` : ""}
       <form method="post" action="/oauth/authorize">
         <input type="hidden" name="request" value="${escapeHtml(id)}">
-        ${choices || "<p>No registered Engines. Register an Engine in the console first.</p>"}
-        <label>Administrator password<input type="password" name="password" autocomplete="current-password" required autofocus></label>
-        <label>Authentication code or recovery code<input name="code" autocomplete="one-time-code" inputmode="text" required></label>
+        ${choices || `<p>${text("noEngines")}</p>`}
+        <label>${text("password")}<input type="password" name="password" autocomplete="current-password" required autofocus></label>
+        <label>${text("code")}<input name="code" autocomplete="one-time-code" inputmode="text" required></label>
         <div class="actions">
-          <button type="submit" name="decision" value="approve">Approve</button>
-          <button type="submit" name="decision" value="deny" formnovalidate class="secondary">Deny</button>
+          <button type="submit" name="decision" value="approve">${text("approve")}</button>
+          <button type="submit" name="decision" value="deny" formnovalidate class="secondary">${text("deny")}</button>
         </div>
       </form>`, new URL(redirectUri).origin);
   }
 
-  private page(response: ServerResponse, status: number, title: string, content: string, formTarget?: string): void {
-    const html = `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${escapeHtml(title)}</title><style>
+  private page(response: ServerResponse, lang: Lang, status: number, title: MessageKey, content: string, formTarget?: string): void {
+    const html = `<!doctype html><html lang="${lang}"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${escapeHtml(messages[lang][title])}</title><style>
 body{font:15px/1.5 system-ui,sans-serif;background:#f6f6f4;color:#1c1c1a;margin:0;padding:48px 16px}
 main{max-width:420px;margin:0 auto;background:#fff;border:1px solid #e3e3df;border-radius:12px;padding:28px}
 h1{font-size:20px;margin:0 0 12px}.muted{color:#66665f}.error{color:#b42318}
@@ -504,9 +508,10 @@ label{display:block;margin:14px 0 0;font-weight:500}input{display:block;width:10
 fieldset{margin-top:16px;border:1px solid #cfcfc9;border-radius:8px}.choice{display:inline-block;margin-right:12px}.choice input{display:inline;width:auto}
 .actions{display:flex;gap:8px;margin-top:20px}button{flex:1;padding:10px;border-radius:8px;border:1px solid #1c1c1a;background:#1c1c1a;color:#fff;font:inherit;cursor:pointer}
 button.secondary{background:#fff;color:#1c1c1a}code{font-size:13px}
-</style></head><body><main><h1>${escapeHtml(title)}</h1>${content}</main></body></html>`;
+</style></head><body><main><h1>${escapeHtml(messages[lang][title])}</h1>${content}</main></body></html>`;
     // Form submission redirects to the client, so form-action must allow its origin.
     response.writeHead(status, {
+      "vary": "Accept-Language, Cookie",
       "content-type": "text/html; charset=utf-8", "content-length": Buffer.byteLength(html), "cache-control": "no-store",
       "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; form-action 'self'${formTarget ? ` ${formTarget}` : ""}; frame-ancestors 'none'; base-uri 'none'`,
             // no-referrer would make browsers send `Origin: null` on the approval form post.

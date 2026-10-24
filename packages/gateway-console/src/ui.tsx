@@ -1,3 +1,4 @@
+import { i18n, useT, type Lang } from "./i18n";
 import { useNow } from "./clock";
 import {
   useEffect,
@@ -7,7 +8,7 @@ import {
   type ReactNode,
 } from "react";
 import { glyphState } from "./Glyph";
-import type { Activity, Engine } from "./types";
+import type { Activity, Engine, GatewayWarning } from "./types";
 
 const overlays: symbol[] = [];
 export function resetOverlayStack(): void {
@@ -85,6 +86,7 @@ export function Drawer({
   dismissible?: boolean;
   children: ReactNode;
 }) {
+  const { t } = useT();
   const ref = useOverlay(dismissible ? onClose : undefined, false);
   return (
     <aside
@@ -97,7 +99,7 @@ export function Drawer({
       <div className="drawer-head">
         <h3>{title}</h3>
         <button className="btn small" type="button" onClick={onClose}>
-          Close
+          {t("common.close")}
         </button>
       </div>
       <div className="drawer-body">{children}</div>
@@ -119,6 +121,7 @@ export function Modal({
   dismissible?: boolean;
   children: ReactNode;
 }) {
+  const { t } = useT();
   const ref = useOverlay(dismissible ? (onCancel ?? onClose) : undefined, true);
   return (
     <div className="modal-backdrop">
@@ -134,7 +137,7 @@ export function Modal({
           <h2>{title}</h2>
           {onClose && (
             <button className="btn small" type="button" onClick={onClose}>
-              Close
+              {t("common.close")}
             </button>
           )}
         </div>
@@ -145,10 +148,10 @@ export function Modal({
 }
 
 const statusText = {
-  ready: ["In session", "ok"],
-  connecting: ["Connecting", "warn"],
-  idle: ["Idle · heartbeat", ""],
-  offline: ["Offline", "err"],
+  ready: ["common.inSession", "ok"],
+  connecting: ["common.connecting", "warn"],
+  idle: ["common.idle", ""],
+  offline: ["common.offline", "err"],
 } as const;
 
 export function EngineStatus({
@@ -158,31 +161,33 @@ export function EngineStatus({
   engine: Engine;
   heartbeatInterval?: number;
 }) {
+  const { t } = useT();
   const now = useNow();
-  const [text, tone] =
+  const [textKey, tone] =
     engine.enrollmentStatus === "awaiting_heartbeat"
-      ? ["Awaiting first heartbeat", "warn"]
+      ? (["common.awaiting", "warn"] as const)
       : statusText[glyphState(engine, now, heartbeatInterval)];
   return (
     <span className={`pill ${tone}`}>
       <span className="dot" />
-      {text}
+      {t(textKey)}
     </span>
   );
 }
 
-export function platformText(engine: Engine): string {
+export function platformText(engine: Engine, lang: Lang = "en"): string {
+  const t = i18n.getFixedT(lang);
   const hardware = engine.hardware;
-  if (!hardware) return "Hardware not reported";
+  if (!hardware) return t("common.hardwareNotReported");
   return (
     [[hardware.os, hardware.osVersion].filter(Boolean).join(" "), hardware.arch]
       .filter(Boolean)
-      .join(" · ") || "Hardware not reported"
+      .join(" · ") || t("common.hardwareNotReported")
   );
 }
 
-export function modelText(engine: Engine): string {
-  return engine.effectiveHardware?.model || platformText(engine);
+export function modelText(engine: Engine, lang: Lang = "en"): string {
+  return engine.effectiveHardware?.model || platformText(engine, lang);
 }
 
 export function MethodSwatch({ methodClass }: { methodClass?: string }) {
@@ -221,22 +226,38 @@ export function ClientAvatar({ label }: { label: string }) {
   );
 }
 
-export function formatTime(ts: number): string {
-  return new Date(ts).toLocaleTimeString([], { hour12: false });
+export function formatTime(ts: number, lang: Lang = "en"): string {
+  return new Intl.DateTimeFormat(lang, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+    hourCycle: "h23",
+  }).format(ts);
 }
 
-export function formatAgo(ts: number | null, now = Date.now()): string {
-  if (ts === null) return "never";
+export function formatAgo(
+  ts: number | null,
+  now = Date.now(),
+  lang: Lang = "en",
+): string {
+  if (ts === null) return i18n.getFixedT(lang)("common.never");
   const seconds = Math.max(0, Math.round((now - ts) / 1000));
-  if (seconds < 60) return `${seconds} s ago`;
-  if (seconds < 3600) return `${Math.round(seconds / 60)} min ago`;
-  if (seconds < 86_400) return `${Math.round(seconds / 3600)} h ago`;
-  return new Date(ts).toLocaleDateString();
+  if (seconds >= 86_400) return new Intl.DateTimeFormat(lang).format(ts);
+  const t = i18n.getFixedT(lang);
+  if (seconds >= 3600)
+    return t("common.hoursAgo", { count: Math.round(seconds / 3600) });
+  if (seconds >= 60)
+    return t("common.minutesAgo", { count: Math.round(seconds / 60) });
+  return t("common.secondsAgo", { count: seconds });
 }
 
-export function formatBytes(bytes?: number): string {
+export function formatBytes(
+  bytes: number | undefined,
+  lang: Lang = "en",
+): string {
   if (bytes === undefined || bytes === null) return "—";
-  return bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`;
+  const value = bytes < 1024 ? bytes : bytes / 1024;
+  return `${new Intl.NumberFormat(lang, { minimumFractionDigits: bytes < 1024 ? 0 : 1, maximumFractionDigits: bytes < 1024 ? 0 : 1 }).format(value)} ${bytes < 1024 ? "B" : "KB"}`;
 }
 
 /**
@@ -257,8 +278,9 @@ export function MiniLog({
   rows: Activity[];
   showEngine?: boolean;
 }) {
+  const { t, lang } = useT();
   if (!rows.length)
-    return <div className="reserved">No operations recorded yet.</div>;
+    return <div className="reserved">{t("common.noOperations")}</div>;
   return (
     <div className="mini-log">
       {rows.slice(0, 6).map((row) => (
@@ -269,7 +291,7 @@ export function MiniLog({
           </span>
           <span className="mono muted">
             {showEngine && row.engineId ? `${row.engineId} · ` : ""}
-            {formatTime(row.ts)}
+            {formatTime(row.ts, lang)}
           </span>
         </div>
       ))}
@@ -279,11 +301,12 @@ export function MiniLog({
 
 export function CopyButton({
   value,
-  label = "Copy",
+  label,
 }: {
   value: string;
   label?: string;
 }) {
+  const { t } = useT();
   const [copied, setCopied] = useState(false);
   const [manual, setManual] = useState(false);
   const input = useRef<HTMLTextAreaElement>(null);
@@ -318,22 +341,45 @@ export function CopyButton({
   return (
     <span className="copy-control">
       <button type="button" className="btn small" onClick={() => void copy()}>
-        {copied ? "Copied" : label}
+        {copied ? t("common.copied") : (label ?? t("common.copy"))}
       </button>
       {manual && (
         <label>
-          Press Ctrl+C or ⌘C to copy
+          {t("common.manualCopy")}
           <textarea
             ref={input}
             readOnly
             value={value}
-            aria-label="Copy manually"
+            aria-label={t("common.copyManually")}
           />
         </label>
       )}
       <span role="status" className="sr-only">
-        {copied ? "Copied" : ""}
+        {copied ? t("common.copied") : ""}
       </span>
     </span>
   );
+}
+
+export function warningText(warning: string, lang: Lang, detail?: GatewayWarning): string {
+  const t = i18n.getFixedT(lang);
+  switch (detail?.code) {
+    case "INSECURE_HTTP": return t("common.httpWarning");
+    case "NO_TRUSTED_PROXIES": return t("common.proxyWarning");
+    case "AUDIT_STORAGE_FAILURE":
+      if (detail.params?.path !== undefined)
+        return t("common.storageWarning", { path: detail.params.path });
+  }
+  return detail?.message ?? warning;
+}
+
+export function formatNumber(
+  value: number,
+  lang: Lang,
+  fractionDigits = 0,
+): string {
+  return new Intl.NumberFormat(lang, {
+    minimumFractionDigits: fractionDigits,
+    maximumFractionDigits: fractionDigits,
+  }).format(value);
 }

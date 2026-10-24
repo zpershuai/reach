@@ -1,17 +1,50 @@
+import { useT, i18n } from "./i18n";
 import { navigate, useSearch } from "./router";
 import { memo, useEffect, useMemo, useRef, useState } from "react";
-import { api } from "./api";
+import { api, errorText } from "./api";
 import type { Activity, Snapshot } from "./types";
 import { activityKey, MethodSwatch, formatBytes, formatTime } from "./ui";
 
+const stageKeys = {
+  auth: "topology.auth",
+  policy: "topology.policy",
+  route: "topology.route",
+} as const;
+
+const eventKeys = {
+  "rpc.started": "activity.started",
+  "rpc.finished": "activity.finished",
+  "session.state": "activity.state",
+  "engine.heartbeat": "activity.heartbeat",
+  "client.connected": "activity.connected",
+  "client.disconnected": "activity.disconnected",
+  "admin.action": "activity.action",
+} as const;
+
 function resultText(row: Activity): string {
   const type = row.type ?? row.eventType;
-  if (type === "rpc.denied")
-    return `Denied · ${row.stage ?? "policy"}${row.code ? ` (${row.code})` : ""}`;
-  if (row.outcome === "ok") return type === "rpc.finished" ? "OK" : "Done";
-  if (row.outcome === "error") return row.code ?? "Error";
-  if (type === "auth.failed") return "Auth failed";
-  return type?.replace(/^\w+\./, "") ?? "Event";
+  if (type === "rpc.denied") {
+    const stageKey = Object.hasOwn(stageKeys, row.stage ?? "")
+      ? stageKeys[row.stage as keyof typeof stageKeys]
+      : undefined;
+    return i18n.t("activity.deniedAt", {
+      stage: stageKey
+        ? i18n.t(stageKey)
+        : row.stage ?? i18n.t("topology.policy"),
+      code: row.code ? ` (${row.code})` : "",
+    });
+  }
+  if (row.outcome === "ok")
+    return type === "rpc.finished"
+      ? i18n.t("activity.ok")
+      : i18n.t("activity.done");
+  if (row.outcome === "error") return row.code ?? i18n.t("activity.error");
+  if (type === "auth.failed") return i18n.t("activity.authFailed");
+  const key = Object.hasOwn(eventKeys, type ?? "")
+    ? eventKeys[type as keyof typeof eventKeys]
+    : undefined;
+  if (key) return i18n.t(key);
+  return type?.replace(/^\w+\./, "") ?? i18n.t("activity.event");
 }
 
 export const ActivityTable = memo(function ActivityTable({
@@ -21,19 +54,20 @@ export const ActivityTable = memo(function ActivityTable({
   rows: Activity[];
   tall?: boolean;
 }) {
+  const { t, lang } = useT();
   return (
     <div className={`table-wrap${tall ? " tall" : ""}`}>
       <table>
         <thead>
           <tr>
-            <th>Time</th>
-            <th>Client</th>
-            <th>Device</th>
-            <th>Method</th>
-            <th>Target</th>
-            <th>Result</th>
-            <th className="num">Latency</th>
-            <th className="num">Size</th>
+            <th>{t("activity.time")}</th>
+            <th>{t("activity.client")}</th>
+            <th>{t("activity.device")}</th>
+            <th>{t("activity.method")}</th>
+            <th>{t("activity.target")}</th>
+            <th>{t("activity.result")}</th>
+            <th className="num">{t("activity.latency")}</th>
+            <th className="num">{t("activity.size")}</th>
           </tr>
         </thead>
         <tbody>
@@ -44,7 +78,7 @@ export const ActivityTable = memo(function ActivityTable({
                 .join(" / ") || "—";
             return (
               <tr key={activityKey(row)}>
-                <td className="mono">{formatTime(row.ts)}</td>
+                <td className="mono">{formatTime(row.ts, lang)}</td>
                 <td>{row.clientLabel ?? row.caller?.label ?? "Gateway"}</td>
                 <td className="mono">{row.engineId ?? "—"}</td>
                 <td>
@@ -68,24 +102,23 @@ export const ActivityTable = memo(function ActivityTable({
                 <td className="num">
                   {row.latencyMs === undefined || row.latencyMs === null
                     ? "—"
-                    : `${Math.round(row.latencyMs)} ms`}
+                    : t("common.milliseconds", {
+                        count: Math.round(row.latencyMs),
+                      })}
                 </td>
-                <td className="num">{formatBytes(row.responseBytes)}</td>
+                <td className="num">{formatBytes(row.responseBytes, lang)}</td>
               </tr>
             );
           })}
         </tbody>
       </table>
-      {!rows.length && (
-        <div className="empty">
-          No activity matches this view. Operations appear here as they happen.
-        </div>
-      )}
+      {!rows.length && <div className="empty">{t("activity.empty")}</div>}
     </div>
   );
 });
 
 export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
+  const { t } = useT();
   const search = useSearch();
   const filters = useMemo(
     () => Object.fromEntries(new URLSearchParams(search)),
@@ -93,7 +126,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
   );
   const [rows, setRows] = useState(snapshot.activity);
   const [cursor, setCursor] = useState<string | null>(null);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const generation = useRef(0);
   const query = new URLSearchParams(
     Object.entries(filters).filter(([, value]) => value),
@@ -120,10 +153,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
       setCursor(result.cursor);
       setError("");
     } catch (error) {
-      if (requestGeneration === generation.current)
-        setError(
-          error instanceof Error ? error.message : "Activity unavailable",
-        );
+      if (requestGeneration === generation.current) setError(error);
     }
   }
   useEffect(() => {
@@ -162,31 +192,31 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Activity ledger</h2>
+        <h2>{t("activity.ledger")}</h2>
         <div className="tools">
           <a
             className="btn small"
             href={`/api/console/activity/export?${query}&format=csv`}
           >
-            Export CSV
+            {t("activity.exportCsv")}
           </a>
           <a
             className="btn small"
             href={`/api/console/activity/export?${query}&format=jsonl`}
           >
-            Export JSONL
+            {t("activity.exportJsonl")}
           </a>
         </div>
       </div>
       <div className="filters">
         <label>
-          Device
+          {t("activity.device")}
           <select
-            aria-label="Filter device"
+            aria-label={t("activity.filterDevice")}
             value={filters.engineId ?? ""}
             onChange={(event) => select("engineId", event.target.value)}
           >
-            <option value="">All devices</option>
+            <option value="">{t("activity.allDevices")}</option>
             {snapshot.engines.map((engine) => (
               <option key={engine.id} value={engine.id}>
                 {engine.displayName}
@@ -195,13 +225,13 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           </select>
         </label>
         <label>
-          Client
+          {t("activity.client")}
           <select
-            aria-label="Filter client"
+            aria-label={t("activity.filterClient")}
             value={filters.clientLabel ?? ""}
             onChange={(event) => select("clientLabel", event.target.value)}
           >
-            <option value="">All clients</option>
+            <option value="">{t("activity.allClients")}</option>
             {snapshot.clients.map((client) => (
               <option key={`${client.type}-${client.label}`}>
                 {client.label}
@@ -210,32 +240,43 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           </select>
         </label>
         <label>
-          Class
+          {t("activity.class")}
           <select
             value={filters.methodClass ?? ""}
             onChange={(event) => select("methodClass", event.target.value)}
           >
-            <option value="">All classes</option>
+            <option value="">{t("activity.allClasses")}</option>
             {["read", "write", "exec", "control"].map((value) => (
-              <option key={value}>{value}</option>
+              <option key={value} value={value}>
+                {t(
+                  (
+                    {
+                      read: "activity.read",
+                      write: "activity.write",
+                      exec: "activity.exec",
+                      control: "activity.control",
+                    } as const
+                  )[value as "read" | "write" | "exec" | "control"],
+                )}
+              </option>
             ))}
           </select>
         </label>
         <label>
-          Result
+          {t("activity.result")}
           <select
             value={filters.outcome ?? ""}
             onChange={(event) => select("outcome", event.target.value)}
           >
-            <option value="">All results</option>
-            <option value="ok">OK</option>
-            <option value="error">Error</option>
-            <option value="denied">Denied</option>
-            <option value="not_ok">Error or denied</option>
+            <option value="">{t("activity.allResults")}</option>
+            <option value="ok">{t("activity.ok")}</option>
+            <option value="error">{t("activity.error")}</option>
+            <option value="denied">{t("activity.denied")}</option>
+            <option value="not_ok">{t("activity.notOk")}</option>
           </select>
         </label>
         <label>
-          From
+          {t("activity.from")}
           <input
             type="datetime-local"
             value={dateInput(filters.from)}
@@ -250,7 +291,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           />
         </label>
         <label>
-          To
+          {t("activity.to")}
           <input
             type="datetime-local"
             value={dateInput(filters.to)}
@@ -265,24 +306,20 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           />
         </label>
       </div>
-      {error && (
+      {Boolean(error) && (
         <div className="notice err" role="alert">
-          {error}
+          {errorText(error, t)}
         </div>
       )}
       <ActivityTable rows={rows} />
       {cursor && (
         <div className="note">
           <button className="btn small" onClick={() => void load(true)}>
-            Load more
+            {t("activity.loadMore")}
           </button>
         </div>
       )}
-      <div className="note">
-        Metadata only: method, path, result code, latency and size. File
-        contents, search patterns, process arguments and output are never
-        recorded.
-      </div>
+      <div className="note">{t("activity.metadataNote")}</div>
     </section>
   );
 }

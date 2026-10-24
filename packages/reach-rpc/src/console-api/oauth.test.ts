@@ -351,3 +351,46 @@ test("anonymous OAuth traffic cannot crowd out an approval in progress", async (
     assert.equal((await f.form("/oauth/authorize", { request, decision: "deny" }, { origin })).status, 400, "requests still expire");
   } finally { await f.close(); }
 });
+
+test("approval pages follow the console cookie or browser language, including failed and rate-limited approvals", async () => {
+  const f = await fixture();
+  try {
+    const client = await f.register();
+    const query = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: redirectUri,
+      code_challenge: createHash("sha256").update("v".repeat(43)).digest("base64url"), code_challenge_method: "S256" });
+    const url = `${f.base}/oauth/authorize?${query}`;
+    const chinese = await fetch(url, { headers: { "accept-language": "zh-CN,zh;q=0.9" } });
+    assert.equal(chinese.headers.get("vary"), "Accept-Language, Cookie");
+    const html = await chinese.text();
+    assert.match(html, /<html lang="zh-CN">/);
+    for (const text of ["管理员密码", "身份验证码或恢复码", "批准", "拒绝"]) assert.ok(html.includes(text));
+    const english = await fetch(url, { headers: { cookie: "reach_lang=en", "accept-language": "zh-CN" } });
+    assert.match(await english.text(), /<html lang="en">/);
+    const tampered = await fetch(url, { headers: { cookie: "reach_lang=<script>", "accept-language": "zh-CN" } });
+    const safe = await tampered.text();
+    assert.match(safe, /<html lang="zh-CN">/);
+    assert.ok(!safe.includes("<script>"));
+    const request = /name="request" value="([^"]+)"/.exec(html)![1];
+    const values = { request, password, code: "wrong", decision: "approve" };
+    const headers = { origin, cookie: "reach_lang=zh-CN", "accept-language": "en" };
+    const wrong = await f.form("/oauth/authorize", values, headers);
+    assert.equal(wrong.status, 401);
+    assert.match(await wrong.text(), /密码或身份验证码错误/);
+    let limited = wrong;
+    for (let i = 0; i < 5; i++) limited = await f.form("/oauth/authorize", values, headers);
+    assert.equal(limited.status, 429);
+    const limitedHtml = await limited.text();
+    assert.match(limitedHtml, /<html lang="zh-CN">/);
+    assert.match(limitedHtml, /尝试次数过多/);
+    assert.ok(limited.headers.get("retry-after"));
+  } finally { await f.close(); }
+});
+
+test("non-OAuth requests do not inspect language headers", async () => {
+  const { OAuthServer } = await import("./oauth.js");
+  const handler = Object.create(OAuthServer.prototype) as InstanceType<typeof OAuthServer>;
+  const request = { get headers(): import("node:http").IncomingHttpHeaders { throw new Error("Language headers must not be read"); } } as import("node:http").IncomingMessage;
+  for (const path of ["/mcp", "/api/console/snapshot", "/heartbeat"]) {
+    assert.equal(await handler.handle(new URL(path, origin), request, {} as import("node:http").ServerResponse), false);
+  }
+});

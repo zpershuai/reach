@@ -115,7 +115,7 @@ Finish with the [deployment checklist](docs/deploy/deployment-checklist.md). Upg
 
 ### Uninstall
 
-Stop each Engine service, the Gateway container and MCP client entries as described in [operations](docs/deploy/operations.md#停用组件). Uninstalling never deletes workspaces; remove program files and private configuration deliberately after backing up anything you want to keep. [First run](docs/deploy/first-run.md#10-uninstall) shows the same order for a source checkout.
+Stop each Engine service, the Gateway container and MCP client entries as described in [operations](docs/deploy/operations.md#disable-components). Uninstalling never deletes workspaces; remove program files and private configuration deliberately after backing up anything you want to keep. [First run](docs/deploy/first-run.md#10-uninstall) shows the same order for a source checkout.
 
 ## Security model
 
@@ -149,7 +149,7 @@ If you only need occasional access to one machine on a trusted network, a tunnel
 | Topic | Link |
 | --- | --- |
 | First run on one machine | [docs/deploy/first-run.md](docs/deploy/first-run.md) |
-| Deployment guide (Chinese) | [docs/deploy/README.md](docs/deploy/README.md) |
+| Deployment guide | [docs/deploy/README.md](docs/deploy/README.md) |
 | Configuration and credentials | [docs/deploy/configuration.md](docs/deploy/configuration.md) |
 | Client identities and permissions | [docs/deploy/client-access.md](docs/deploy/client-access.md) |
 | MCP clients | [docs/deploy/mcp.md](docs/deploy/mcp.md) |

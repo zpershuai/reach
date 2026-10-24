@@ -1,7 +1,8 @@
+import { useT } from "./i18n";
 import { useNow } from "./clock";
 import { memo, useCallback, useState, type FormEvent } from "react";
-import { api } from "./api";
-import { DeviceGlyph, executionState, glyphKinds } from "./Glyph";
+import { api, errorText } from "./api";
+import { DeviceGlyph, executionState, glyphKinds, glyphLabels } from "./Glyph";
 import { consoleStore } from "./store";
 import type { Activity, Engine, Snapshot } from "./types";
 import {
@@ -52,13 +53,14 @@ export const DeviceDrawer = memo(function DeviceDrawer({
   onClose: () => void;
   sensitive: SensitiveAction;
 }) {
+  const { t, lang } = useT();
   const now = useNow();
   const [displayName, setName] = useState(engine.displayName);
   const [kind, setKind] = useState(engine.deviceOverride?.kind ?? "");
   const [model, setModel] = useState(engine.deviceOverride?.model ?? "");
   const [token, setToken] = useState("");
   const [confirmRemove, setConfirmRemove] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const [saved, setSaved] = useState(false);
   async function save(event: FormEvent): Promise<void> {
     event.preventDefault();
@@ -73,7 +75,7 @@ export const DeviceDrawer = memo(function DeviceDrawer({
       await consoleStore.refresh();
       setSaved(true);
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Update failed");
+      setError(error);
     }
   }
   const recent = activity
@@ -82,7 +84,7 @@ export const DeviceDrawer = memo(function DeviceDrawer({
   return (
     <Drawer
       title={engine.displayName}
-      label={`Device ${engine.displayName}`}
+      label={t("devices.drawer", { name: engine.displayName })}
       onClose={onClose}
       dismissible={!token}
     >
@@ -93,44 +95,50 @@ export const DeviceDrawer = memo(function DeviceDrawer({
           large
         />
         <div>
-          <b>{modelText(engine)}</b>
-          <div className="muted">{platformText(engine)}</div>
+          <b>{modelText(engine, lang)}</b>
+          <div className="muted">{platformText(engine, lang)}</div>
           <span className="pill">
-            {engine.deviceOverride ? "Type set manually" : "Type detected"}
+            {engine.deviceOverride
+              ? t("devices.manualType")
+              : t("devices.detectedType")}
           </span>
         </div>
       </section>
       <section>
         <dl className="kv">
-          <dt>Status</dt>
+          <dt>{t("devices.status")}</dt>
           <dd>
             <EngineStatus
               heartbeatInterval={heartbeatInterval}
               engine={engine}
             />
           </dd>
-          <dt>Device ID</dt>
+          <dt>{t("devices.id")}</dt>
           <dd className="mono">{engine.id}</dd>
           <dt>Engine</dt>
           <dd className="mono">
-            {engine.engineVersion ? `v${engine.engineVersion}` : "Not reported"}
+            {engine.engineVersion
+              ? `v${engine.engineVersion}`
+              : t("devices.notReported")}
           </dd>
-          <dt>Last heartbeat</dt>
+          <dt>{t("devices.lastHeartbeat")}</dt>
           <dd>
             {engine.lastSeenAt
-              ? formatAgo(engine.lastSeenAt, now)
-              : "Awaiting first heartbeat"}
+              ? formatAgo(engine.lastSeenAt, now, lang)
+              : t("devices.awaiting")}
           </dd>
-          <dt>Session owner</dt>
-          <dd>{engine.session.ownerLabel ?? "None"}</dd>
-          <dt>Registered by</dt>
+          <dt>{t("devices.owner")}</dt>
+          <dd>{engine.session.ownerLabel ?? t("devices.none")}</dd>
+          <dt>{t("devices.registeredBy")}</dt>
           <dd>
-            {engine.origin === "seed" ? "Gateway configuration" : "Console"}
+            {engine.origin === "seed"
+              ? t("devices.configuration")
+              : t("devices.console")}
           </dd>
         </dl>
       </section>
       <section>
-        <h4>Workspaces & execution</h4>
+        <h4>{t("devices.workspaces")}</h4>
         {engine.session.workspaces?.length ? (
           <ul className="ws-list">
             {engine.session.workspaces.map((workspace) => {
@@ -144,34 +152,35 @@ export const DeviceDrawer = memo(function DeviceDrawer({
                   <span
                     className={`pill ${state === "enabled" ? "accent" : ""}`}
                   >
-                    Execution {state}
+                    {t(
+                      state === "enabled"
+                        ? "devices.executionEnabled"
+                        : state === "disabled"
+                          ? "devices.executionDisabled"
+                          : "devices.executionNotReported",
+                    )}
                   </span>
                 </li>
               );
             })}
           </ul>
         ) : (
-          <div className="reserved">
-            Workspaces are reported while a session is open.
-          </div>
+          <div className="reserved">{t("devices.workspacesNote")}</div>
         )}
       </section>
       <section>
-        <h4>Skills · reserved</h4>
-        <div className="reserved">
-          Planned: install SKILL.md skills on this device from the Gateway
-          catalogue and expose them to bots through MCP.
-        </div>
+        <h4>{t("devices.skills")}</h4>
+        <div className="reserved">{t("devices.skillsNote")}</div>
       </section>
       <section>
-        <h4>Recent operations</h4>
+        <h4>{t("devices.recent")}</h4>
         <MiniLog rows={recent} showEngine={false} />
       </section>
       <section>
-        <h4>Display</h4>
+        <h4>{t("devices.display")}</h4>
         <form onSubmit={(event) => void save(event)}>
           <label>
-            Display name
+            {t("devices.displayName")}
             <input
               value={displayName}
               maxLength={64}
@@ -180,20 +189,22 @@ export const DeviceDrawer = memo(function DeviceDrawer({
             />
           </label>
           <label>
-            Device type
+            {t("devices.deviceType")}
             <select
               value={kind}
               onChange={(event) => setKind(event.target.value)}
             >
-              <option value="">Use reported hardware</option>
+              <option value="">{t("devices.reportedHardware")}</option>
               {glyphKinds.map((value) => (
-                <option key={value}>{value}</option>
+                <option key={value} value={value}>
+                  {t(glyphLabels[value as keyof typeof glyphLabels])}
+                </option>
               ))}
             </select>
           </label>
           {kind && (
             <label>
-              Model
+              {t("devices.model")}
               <input
                 value={model}
                 maxLength={64}
@@ -202,10 +213,10 @@ export const DeviceDrawer = memo(function DeviceDrawer({
             </label>
           )}
           <div className="actions">
-            <button className="btn small">Save</button>
+            <button className="btn small">{t("devices.save")}</button>
             {saved && (
               <span className="success" role="status">
-                Saved
+                {t("devices.saved")}
               </span>
             )}
           </div>
@@ -213,22 +224,21 @@ export const DeviceDrawer = memo(function DeviceDrawer({
       </section>
       {engine.origin === "console" ? (
         <section>
-          <h4>Credentials</h4>
+          <h4>{t("devices.credentials")}</h4>
           {token && (
             <div className="one-time">
-              <strong>New Engine token · shown once</strong>
+              <strong>{t("devices.newToken")}</strong>
               <code>{token}</code>
-              <CopyButton value={token} label="Copy token" />
+              <CopyButton value={token} label={t("devices.copyToken")} />
               <button className="btn small" onClick={() => setToken("")}>
-                I saved this token
+                {t("devices.savedToken")}
               </button>
             </div>
           )}
           {confirmRemove ? (
             <div className="notice err">
               <span>
-                Remove {engine.displayName}? Its session closes and its token
-                stops working. Activity history is kept.
+                {t("devices.removeNote", { name: engine.displayName })}
               </span>
             </div>
           ) : null}
@@ -245,7 +255,7 @@ export const DeviceDrawer = memo(function DeviceDrawer({
                 })
               }
             >
-              Rotate Engine token
+              {t("devices.rotate")}
             </button>
             {confirmRemove ? (
               <>
@@ -263,13 +273,13 @@ export const DeviceDrawer = memo(function DeviceDrawer({
                     })
                   }
                 >
-                  Remove device
+                  {t("devices.remove")}
                 </button>
                 <button
                   className="btn small"
                   onClick={() => setConfirmRemove(false)}
                 >
-                  Cancel
+                  {t("devices.cancel")}
                 </button>
               </>
             ) : (
@@ -277,27 +287,30 @@ export const DeviceDrawer = memo(function DeviceDrawer({
                 className="btn small danger-ghost"
                 onClick={() => setConfirmRemove(true)}
               >
-                Remove device…
+                {t("devices.removePrompt")}
               </button>
             )}
           </div>
         </section>
       ) : (
-        <div className="reserved">
-          This device is configured in the Gateway environment or engines file.
-          Change its token or remove it there.
-        </div>
+        <div className="reserved">{t("devices.seedNote")}</div>
       )}
-      {error && (
+      {Boolean(error) && (
         <p className="error" role="alert">
-          {error}
+          {errorText(error, t)}
         </p>
       )}
     </Drawer>
   );
 });
 
-const platforms = ["Linux", "macOS", "OpenWrt", "Docker"];
+const platforms = ["Linux", "macOS", "OpenWrt", "Docker"] as const;
+const platformLabels = {
+  Linux: "glyph.linux",
+  macOS: "glyph.macOS",
+  OpenWrt: "glyph.openwrt",
+  Docker: "glyph.docker",
+} as const;
 
 export function AddDevice({
   snapshot,
@@ -308,6 +321,7 @@ export function AddDevice({
   sensitive: SensitiveAction;
   onClose: () => void;
 }) {
+  const { t, lang } = useT();
   const [step, setStep] = useState(1);
   const [name, setName] = useState("");
   const [id, setId] = useState("");
@@ -337,15 +351,20 @@ export function AddDevice({
   }
   return (
     <Modal
-      title="Add device"
+      title={t("devices.add")}
       dismissible={!token}
       onClose={() => {
         setToken("");
         onClose();
       }}
     >
-      <div className="steps" aria-label={`Step ${step} of 4`}>
-        {["Name", "Platform", "Install", "Connect"].map((value, index) => (
+      <div className="steps" aria-label={t("devices.step", { step })}>
+        {[
+          t("devices.stepName"),
+          t("devices.stepPlatform"),
+          t("devices.stepInstall"),
+          t("devices.stepConnect"),
+        ].map((value, index) => (
           <span
             key={value}
             className={
@@ -364,7 +383,7 @@ export function AddDevice({
           }}
         >
           <label>
-            Device name
+            {t("devices.name")}
             <input
               value={name}
               maxLength={64}
@@ -382,7 +401,7 @@ export function AddDevice({
             />
           </label>
           <label>
-            Device ID
+            {t("devices.id")}
             <input
               value={id}
               pattern="[A-Za-z0-9._-]{1,64}"
@@ -395,13 +414,15 @@ export function AddDevice({
             />
           </label>
           <div className="actions">
-            <button className="btn primary">Choose platform →</button>
+            <button className="btn primary">
+              {t("devices.choosePlatform")}
+            </button>
           </div>
         </form>
       )}
       {step === 2 && (
         <>
-          <p className="muted">Where will the Engine run?</p>
+          <p className="muted">{t("devices.where")}</p>
           <div className="platforms">
             {platforms.map((value) => (
               <button
@@ -410,42 +431,40 @@ export function AddDevice({
                 onClick={() => setPlatform(value)}
                 key={value}
               >
-                {value}
+                {t(platformLabels[value])}
               </button>
             ))}
           </div>
-          <div className="reserved">
-            Run the commands from a Reach checkout or release bundle. OpenWrt
-            also needs the prepared Node bundle.
-          </div>
+          <div className="reserved">{t("devices.commandsNote")}</div>
           <div className="actions">
             <button className="btn" onClick={() => setStep(1)}>
-              ← Back
+              {t("devices.back")}
             </button>
             <button
               className="btn primary"
               disabled={busy}
               onClick={() => void enroll()}
             >
-              {busy ? "Registering…" : "Register device →"}
+              {busy ? t("devices.registering") : t("devices.register")}
             </button>
           </div>
         </>
       )}
       {step === 3 && (
         <>
-          <div className="notice warn">
-            This Engine token is shown once. It stays in the device’s private
-            configuration file.
-          </div>
+          <div className="notice warn">{t("devices.tokenNote")}</div>
           <label>
-            Engine token
-            <input readOnly value={token} aria-label="One-time Engine token" />
+            {t("devices.engineToken")}
+            <input
+              readOnly
+              value={token}
+              aria-label={t("devices.oneTimeToken")}
+            />
           </label>
-          <CopyButton value={token} label="Copy token" />
+          <CopyButton value={token} label={t("devices.copyToken")} />
           <pre className="command">{command}</pre>
           <div className="actions">
-            <CopyButton value={command} label="Copy commands" />
+            <CopyButton value={command} label={t("devices.copyCommands")} />
             <button
               className="btn primary"
               onClick={() => {
@@ -453,7 +472,7 @@ export function AddDevice({
                 setStep(4);
               }}
             >
-              I’ve started the Engine →
+              {t("devices.started")}
             </button>
           </div>
         </>
@@ -467,21 +486,18 @@ export function AddDevice({
                 engine={registered}
                 large
               />
-              <h3>Device connected</h3>
-              <p>{modelText(registered)}</p>
-              <p className="muted">{platformText(registered)}</p>
+              <h3>{t("devices.connected")}</h3>
+              <p>{modelText(registered, lang)}</p>
+              <p className="muted">{platformText(registered, lang)}</p>
               <button className="btn primary" onClick={onClose}>
-                Done
+                {t("devices.done")}
               </button>
             </>
           ) : (
             <>
               <span className="spinner" aria-hidden="true" />
-              <h3>Waiting for the first heartbeat</h3>
-              <p className="muted">
-                You can close this window. The device stays in Devices until its
-                Engine connects.
-              </p>
+              <h3>{t("devices.waiting")}</h3>
+              <p className="muted">{t("devices.waitingNote")}</p>
             </>
           )}
         </div>
@@ -501,6 +517,7 @@ export function DevicesView({
   initialId?: string;
   onAdd: () => void;
 }) {
+  const { t, lang } = useT();
   const now = useNow();
   const [selected, setSelected] = useState(initialId ?? "");
   const closeDrawer = useCallback(() => setSelected(""), []);
@@ -509,9 +526,9 @@ export function DevicesView({
     <>
       <section className="panel">
         <div className="panel-head">
-          <h2>Devices</h2>
+          <h2>{t("devices.title")}</h2>
           <button className="btn small primary" onClick={onAdd}>
-            Add device
+            {t("devices.add")}
           </button>
         </div>
         {snapshot.engines.length ? (
@@ -529,11 +546,11 @@ export function DevicesView({
                   />
                   <div className="eng-body">
                     <span className="name">{engine.displayName}</span>
-                    <span className="meta">{modelText(engine)}</span>
+                    <span className="meta">{modelText(engine, lang)}</span>
                   </div>
                 </div>
                 <div className="meta">
-                  <span>{platformText(engine)}</span>
+                  <span>{platformText(engine, lang)}</span>
                   {engine.engineVersion && (
                     <span className="mono">v{engine.engineVersion}</span>
                   )}
@@ -545,7 +562,7 @@ export function DevicesView({
                   />
                   <span>
                     {engine.lastSeenAt
-                      ? formatAgo(engine.lastSeenAt, now)
+                      ? formatAgo(engine.lastSeenAt, now, lang)
                       : "—"}
                   </span>
                 </footer>
@@ -553,9 +570,7 @@ export function DevicesView({
             ))}
           </div>
         ) : (
-          <div className="empty">
-            No devices yet. Add one to install its Engine.
-          </div>
+          <div className="empty">{t("devices.empty")}</div>
         )}
       </section>
       {device && (

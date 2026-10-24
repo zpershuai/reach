@@ -1,5 +1,7 @@
 # First run: one machine, scoped client, script, revoke and uninstall
 
+English | [简体中文](first-run_cn.md)
+
 This walkthrough runs a Gateway and one Engine from source on a single Linux or macOS machine, connects a scoped MCP client, enables one trusted Node script, revokes the client and the device, and uninstalls. Everything listens on `127.0.0.1`. It uses reserved names (`engine-a`, `docs`, `scripts`) and credentials generated locally. For a remote Gateway with HTTPS, follow the [deployment guide](README.md) afterwards.
 
 Run every step as an ordinary non-root account. Reach does not need root, and a script you enable later runs with the Engine account's privileges, so use an account (or VM/container) whose access you are prepared to give to that script.
@@ -83,6 +85,7 @@ It prints `Reach gateway v… listening on http://127.0.0.1:8787` and a reminder
 1. Print the one-time setup credential in your own terminal: `cat ~/reach-demo/gateway-data/admin-setup-token`. Do not paste it into logs, issues or chats.
 2. Open `http://127.0.0.1:8787/console/`, enter the setup credential, scan the TOTP secret into your authenticator, then choose a password of at least 12 characters and confirm a TOTP code.
 3. Save the recovery codes privately. The setup file is deleted after a successful setup.
+4. Switch with EN / 中, or choose Language in navigation or Settings. It applies immediately, preserves input and remembers the browser choice without reauthentication. OAuth approval uses the console language cookie first, then browser language.
 
 ## 5. Pair the Engine (terminal 2)
 
@@ -111,7 +114,7 @@ Create the client and copy the token, which is shown once, into a private file w
 umask 077; cat > ~/reach-demo/client-token   # paste the token, press Enter, then Ctrl-D
 ```
 
-The same policy can be created through the [console API](client-access.md#api-字段) (`POST /api/console/access-clients`).
+The same policy can be created through the [console API](client-access.md#api-fields) (`POST /api/console/access-clients`).
 
 ## 7. Use the client over MCP
 
@@ -226,4 +229,4 @@ rm gateway.env engine.env client-token mcp-headers workspaces.json
 ls workspaces/docs workspaces/scripts   # your files are still here
 ```
 
-Remove the source checkout and its build outputs (`target/`, `node_modules/`, `dist/`) when you no longer need them. For Engines installed as a LaunchAgent, systemd or procd service, follow [operations](operations.md#停用组件); the installers likewise keep workspaces and private configuration until you remove them deliberately.
+Remove the source checkout and its build outputs (`target/`, `node_modules/`, `dist/`) when you no longer need them. For Engines installed as a LaunchAgent, systemd or procd service, follow [operations](operations.md#disable-components); the installers likewise keep workspaces and private configuration until you remove them deliberately.

@@ -1,8 +1,21 @@
+import { useT, i18n } from "./i18n";
 import { useEffect, useId, useState } from "react";
-import { api } from "./api";
+import { api, errorText } from "./api";
 import type { SensitiveAction } from "./Devices";
 import type { Engine } from "./types";
 import { CopyButton, Modal } from "./ui";
+
+const operationKeys = {
+  read: "clients.read",
+  write: "clients.write",
+  execute: "clients.execute",
+} as const;
+const editKeys = {
+  policy: "clients.policy",
+  rotate: "clients.rotateAction",
+  revoke: "clients.revokeAction",
+  review: "clients.reviewAction",
+} as const;
 
 interface Permission {
   engineId: string;
@@ -35,10 +48,15 @@ function expiryDefault(): string {
 }
 
 function credentialStatus(client: AccessClient): string {
-  if (client.revokedAt !== null) return "Revoked";
+  if (client.revokedAt !== null) return i18n.t("clients.revoked");
   if (client.expiresAt !== null)
-    return `Expires ${new Date(client.expiresAt).toLocaleString()}`;
-  return "OAuth token lifecycle";
+    return i18n.t("clients.expires", {
+      date: new Intl.DateTimeFormat(i18n.language, {
+        dateStyle: "medium",
+        timeStyle: "short",
+      }).format(client.expiresAt),
+    });
+  return i18n.t("clients.oauthLifecycle");
 }
 
 export function AccessClients({
@@ -50,9 +68,10 @@ export function AccessClients({
   sensitive: SensitiveAction;
   revision?: number;
 }) {
+  const { t } = useT();
   const suggestionsId = useId();
   const [clients, setClients] = useState<AccessClient[]>([]);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const [edit, setEdit] = useState<Edit>();
   const [name, setName] = useState("");
   const [expiresAt, setExpiresAt] = useState(expiryDefault);
@@ -63,10 +82,8 @@ export function AccessClients({
       const data = await api<{ clients: AccessClient[] }>("access-clients");
       setClients(data.clients ?? []);
       setError("");
-    } catch {
-      setError(
-        "Client identities could not be loaded. Retry to see current permissions.",
-      );
+    } catch (error) {
+      setError(error);
     }
   };
   useEffect(() => {
@@ -121,20 +138,17 @@ export function AccessClients({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Client identities & permissions</h2>
+        <h2>{t("clients.title")}</h2>
         <button className="btn" onClick={() => start({ kind: "create" })}>
-          Create delegated client
+          {t("clients.create")}
         </button>
       </div>
-      <div className="note">
-        These identities authenticate API access. Display labels in activity
-        remain self-reported. The configured Owner token has global access.
-      </div>
-      {error && (
+      <div className="note">{t("clients.identityNote")}</div>
+      {Boolean(error) && (
         <div className="notice err" role="alert">
-          {error}
+          {errorText(error, t)}
           <button className="btn" onClick={() => void load()}>
-            Retry
+            {t("clients.retry")}
           </button>
         </div>
       )}
@@ -142,10 +156,10 @@ export function AccessClients({
         <table>
           <thead>
             <tr>
-              <th>Identity</th>
-              <th>Access</th>
-              <th>Credential</th>
-              <th>Actions</th>
+              <th>{t("clients.identity")}</th>
+              <th>{t("clients.access")}</th>
+              <th>{t("clients.credential")}</th>
+              <th>{t("clients.actions")}</th>
             </tr>
           </thead>
           <tbody>
@@ -153,14 +167,18 @@ export function AccessClients({
               <tr key={client.id}>
                 <td>
                   <strong>{client.name}</strong>
-                  <small>{client.kind}</small>
+                  <small>
+                    {client.kind === "oauth" ? "OAuth" : t("clients.delegated")}
+                  </small>
                   <code>{client.id}</code>
                 </td>
                 <td>
                   {client.legacyGlobal ? (
                     <div className="notice warn">
-                      Global access · Owner equivalent ·{" "}
-                      {client.reviewRequired ? "Review required" : "Reviewed"}
+                      {t("clients.global")}{" "}
+                      {client.reviewRequired
+                        ? t("clients.reviewRequired")
+                        : t("clients.reviewed")}
                     </div>
                   ) : (
                     client.permissions.map((permission) => (
@@ -178,13 +196,20 @@ export function AccessClients({
                                 operation as "read" | "write" | "execute"
                               ],
                           )
-                          .join(", ") || "No operations"}
+                          .map((operation) =>
+                            t(
+                              operationKeys[
+                                operation as keyof typeof operationKeys
+                              ],
+                            ),
+                          )
+                          .join(", ") || t("clients.noOperations")}
                       </div>
                     ))
                   )}
                   {!client.legacyGlobal &&
                     !client.permissions.length &&
-                    "No resource access"}
+                    t("clients.noAccess")}
                 </td>
                 <td>{credentialStatus(client)}</td>
                 <td>
@@ -194,28 +219,28 @@ export function AccessClients({
                         className="btn small"
                         onClick={() => start({ kind: "policy", client })}
                       >
-                        Edit permissions
+                        {t("clients.edit")}
                       </button>
                       {client.kind === "delegated" && (
                         <button
                           className="btn small"
                           onClick={() => start({ kind: "rotate", client })}
                         >
-                          Rotate credential
+                          {t("clients.rotate")}
                         </button>
                       )}
                       <button
                         className="btn small danger"
                         onClick={() => start({ kind: "revoke", client })}
                       >
-                        Revoke identity
+                        {t("clients.revoke")}
                       </button>
                       {client.legacyGlobal && client.reviewRequired && (
                         <button
                           className="btn small"
                           onClick={() => start({ kind: "review", client })}
                         >
-                          Review global access
+                          {t("clients.review")}
                         </button>
                       )}
                     </>
@@ -226,15 +251,15 @@ export function AccessClients({
           </tbody>
         </table>
         {!clients.length && !error && (
-          <div className="empty">No delegated or OAuth identities yet.</div>
+          <div className="empty">{t("clients.empty")}</div>
         )}
       </div>
       {edit && (
         <Modal
           title={
             edit.kind === "create"
-              ? "Create delegated client"
-              : `${edit.client.name} · ${edit.kind}`
+              ? t("clients.create")
+              : `${edit.client.name} · ${t(editKeys[edit.kind])}`
           }
           onClose={() => setEdit(undefined)}
         >
@@ -247,7 +272,7 @@ export function AccessClients({
             <div className="panel-body">
               {edit.kind === "create" && (
                 <label>
-                  Client name
+                  {t("clients.name")}
                   <input
                     required
                     maxLength={64}
@@ -258,7 +283,7 @@ export function AccessClients({
               )}
               {(edit.kind === "create" || edit.kind === "rotate") && (
                 <label>
-                  Credential expiry
+                  {t("clients.expiry")}
                   <input
                     required
                     type="datetime-local"
@@ -269,20 +294,15 @@ export function AccessClients({
               )}
               {(edit.kind === "create" || edit.kind === "policy") && (
                 <>
-                  <p>
-                    No permissions are selected by default. Each operation is
-                    independent. Execute runs trusted scripts with the Engine
-                    account's system privileges; it is not a sandbox.
-                  </p>
+                  <p>{t("clients.permissionsNote")}</p>
                   {edit.kind === "policy" && edit.client.legacyGlobal && (
-                    <p>
-                      Saving replaces global access with only the resources
-                      selected below.
-                    </p>
+                    <p>{t("clients.replaceGlobal")}</p>
                   )}
                   {permissions.map((permission, index) => (
                     <fieldset key={index}>
-                      <legend>Resource {index + 1}</legend>
+                      <legend>
+                        {t("clients.resource", { count: index + 1 })}
+                      </legend>
                       <label>
                         Engine
                         <select
@@ -292,7 +312,7 @@ export function AccessClients({
                             update(index, { engineId: event.target.value })
                           }
                         >
-                          <option value="">Select Engine</option>
+                          <option value="">{t("clients.selectEngine")}</option>
                           {[
                             ...new Set(
                               [
@@ -308,7 +328,7 @@ export function AccessClients({
                         </select>
                       </label>
                       <label>
-                        Workspace
+                        {t("clients.workspace")}
                         <input
                           required
                           list={`${suggestionsId}-${index}`}
@@ -338,7 +358,7 @@ export function AccessClients({
                                   })
                                 }
                               />
-                              {operation}
+                              {t(operationKeys[operation])}
                             </label>
                           ),
                         )}
@@ -352,7 +372,7 @@ export function AccessClients({
                           )
                         }
                       >
-                        Remove resource {index + 1}
+                        {t("clients.removeResource", { count: index + 1 })}
                       </button>
                     </fieldset>
                   ))}
@@ -372,39 +392,25 @@ export function AccessClients({
                       ])
                     }
                   >
-                    Add resource
+                    {t("clients.addResource")}
                   </button>
                 </>
               )}
-              {edit.kind === "rotate" && (
-                <p>
-                  The old credential stops working immediately. Its grants and
-                  owned sessions drain.
-                </p>
-              )}
-              {edit.kind === "revoke" && (
-                <p>
-                  This identity's credentials stop working immediately. Its
-                  grants, sessions and running tasks drain.
-                </p>
-              )}
-              {edit.kind === "review" && (
-                <p>
-                  This existing OAuth client retains global access equivalent to
-                  the Owner. Only confirm if you trust it with every Engine and
-                  workspace. Edit permissions to restrict it instead.
-                </p>
-              )}
+              {edit.kind === "rotate" && <p>{t("clients.rotateNote")}</p>}
+              {edit.kind === "revoke" && <p>{t("clients.revokeNote")}</p>}
+              {edit.kind === "review" && <p>{t("clients.reviewNote")}</p>}
               <div className="actions">
                 <button
                   type="button"
                   className="btn"
                   onClick={() => setEdit(undefined)}
                 >
-                  Cancel
+                  {t("clients.cancel")}
                 </button>
                 <button className="btn primary" type="submit">
-                  {edit.kind === "create" ? "Create client" : "Confirm change"}
+                  {edit.kind === "create"
+                    ? t("clients.createClient")
+                    : t("clients.confirmChange")}
                 </button>
               </div>
             </div>
@@ -412,19 +418,16 @@ export function AccessClients({
         </Modal>
       )}
       {token && (
-        <Modal title="Save the client credential">
+        <Modal title={t("clients.saveCredential")}>
           <div className="panel-body">
-            <p>
-              This credential is shown once. Store it privately; it cannot be
-              retrieved later.
-            </p>
+            <p>{t("clients.oneTimeNote")}</p>
             <label>
-              One-time client token
+              {t("clients.oneTimeToken")}
               <textarea readOnly value={token} />
             </label>
-            <CopyButton value={token} label="Copy token" />
+            <CopyButton value={token} label={t("clients.copyToken")} />
             <button className="btn primary" onClick={() => setToken("")}>
-              I saved the credential
+              {t("clients.savedCredential")}
             </button>
           </div>
         </Modal>

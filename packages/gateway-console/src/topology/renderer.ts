@@ -1,3 +1,4 @@
+import { i18n } from "../i18n";
 import {
   OUT_MS,
   ROUTE,
@@ -56,6 +57,7 @@ export function createRenderer({
   const context = target.getContext("2d");
   if (!context) return;
   let colors = readColors();
+  let numberFormat = new Intl.NumberFormat(i18n.language);
   const themeObserver = new MutationObserver(() => (colors = readColors()));
   themeObserver.observe(document.documentElement, {
     attributes: true,
@@ -70,6 +72,11 @@ export function createRenderer({
   const wake = () => {
     if (!disposed && frame === undefined) frame = requestAnimationFrame(draw);
   };
+  const onLanguage = () => {
+    numberFormat = new Intl.NumberFormat(i18n.language);
+    wake();
+  };
+  i18n.on("languageChanged", onLanguage);
 
   function dot(
     point: Point,
@@ -165,7 +172,11 @@ export function createRenderer({
         context.font = "600 10px 'Geist Mono', monospace";
         context.textAlign = "center";
         context.textBaseline = "middle";
-        context.fillText(String(particle.count), point.x, point.y + 0.5);
+        context.fillText(
+          numberFormat.format(particle.count),
+          point.x,
+          point.y + 0.5,
+        );
       } else if (state.mark === "denied") {
         const stop = ROUTE[state.stage as "auth" | "policy" | "route"] * OUT_MS;
         const k = Math.min(1, (now - particle.started - stop) / 700);
@@ -229,6 +240,7 @@ export function createRenderer({
       disposed = true;
       if (frame !== undefined) cancelAnimationFrame(frame);
       themeObserver.disconnect();
+      i18n.off("languageChanged", onLanguage);
       scheme.removeEventListener?.("change", onScheme);
     },
   };

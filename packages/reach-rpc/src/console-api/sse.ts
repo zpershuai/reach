@@ -5,7 +5,7 @@ import { ConsoleError } from "./auth.js";
 export function serveEvents(events: GatewayEvents, request: IncomingMessage, response: ServerResponse, sessionValid: () => boolean = () => true): () => void {
   const header = request.headers["last-event-id"];
   const after = header === undefined ? 0 : Number(header);
-  if (Array.isArray(header) || !Number.isSafeInteger(after) || after < 0) throw new ConsoleError(400, "Invalid Last-Event-ID");
+  if (Array.isArray(header) || !Number.isSafeInteger(after) || after < 0) throw new ConsoleError(400, "Invalid Last-Event-ID", "INVALID_LAST_EVENT_ID");
   response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", "x-accel-buffering": "no", connection: "keep-alive" });
   response.flushHeaders();
   let unsubscribe = (): void => {};

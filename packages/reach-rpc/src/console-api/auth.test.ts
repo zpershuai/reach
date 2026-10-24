@@ -110,6 +110,8 @@ test("factor failures are generic, logout revokes immediately, and TOTP cannot b
     const wrongPassword = await f.call("login", { password: "wrong password", code });
     const wrongCode = await f.call("login", { password: "a long owner password", code: wrong });
     assert.equal(wrongPassword.response.status, 401);
+    assert.equal(wrongPassword.data.code, "INVALID_CREDENTIALS");
+    assert.equal(wrongPassword.data.error, "Invalid credentials");
     assert.equal(wrongCode.response.status, 401);
     assert.deepEqual(wrongPassword.data, wrongCode.data);
     assert.equal((await f.call("login", { password: "a long owner password", code })).response.status, 200);
@@ -394,4 +396,27 @@ test("console SSE requires a session and replays event ids 4181 through 4200 in 
     abort.abort();
     await reader.cancel().catch(() => {});
   } finally { abort.abort(); await f.close(); }
+});
+
+test("console resource errors keep distinct meanings and snapshots expose stable warning codes", async () => {
+  const f = await fixture();
+  try {
+    await f.setup();
+    const cases: Array<[string, unknown, string, number, string, string]> = [
+      ["engines", { id: "engine-a", displayName: "Duplicate" }, "POST", 409, "ENGINE_ID_EXISTS", "Engine id already exists"],
+      ["engines/engine-a/rotate", {}, "POST", 409, "ENGINE_CONFIG_MANAGED", "Engine is managed by Gateway configuration"],
+      ["access-clients", { name: "Client", expiresAt: f.now() - 1 }, "POST", 400, "INVALID_CREDENTIAL_EXPIRY", "Credential expiry must be a future timestamp"],
+      ["access-clients/missing", undefined, "GET", 404, "CLIENT_IDENTITY_NOT_FOUND", "Unknown client identity"],
+      ["oauth/missing", undefined, "DELETE", 404, "OAUTH_APPLICATION_NOT_FOUND", "Unknown OAuth application"],
+    ];
+    for (const [path, body, method, status, code, message] of cases) {
+      const result = await f.call(path, body, {}, method);
+      assert.equal(result.response.status, status);
+      assert.deepEqual(result.data, { code, error: message });
+    }
+    const { data } = await f.call("snapshot");
+    const warning = data.gateway.warningDetails.find((warning: { code: string }) => warning.code === "NO_TRUSTED_PROXIES");
+    assert.ok(warning);
+    assert.ok(data.gateway.warnings.includes(warning.message));
+  } finally { await f.close(); }
 });

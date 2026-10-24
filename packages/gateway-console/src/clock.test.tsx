@@ -109,3 +109,25 @@ it("judges heartbeats against Gateway time when the browser clock is skewed", ()
     vi.useRealTimers();
   }
 });
+
+it("formats Chinese relative time and a never-seen device", () => {
+  expect(formatAgo(88_000, 100_000, "zh-CN")).toBe("12 秒前");
+  expect(formatAgo(null, 100_000, "zh-CN")).toBe("从未连接");
+});
+
+it("uses deterministic relative-time templates independently of ICU output", () => {
+  const relativeTime = vi.spyOn(Intl, "RelativeTimeFormat").mockImplementation(() => {
+    throw new Error("ICU relative-time formatting must not be needed");
+  });
+  try {
+    for (const [seconds, english, chinese] of [
+      [0, "0 s ago", "0 秒前"],
+      [5, "5 s ago", "5 秒前"],
+      [65, "1 min ago", "1 分钟前"],
+      [7200, "2 h ago", "2 小时前"],
+    ] as const) {
+      expect(formatAgo(0, seconds * 1000, "en")).toBe(english);
+      expect(formatAgo(0, seconds * 1000, "zh-CN")).toBe(chinese);
+    }
+  } finally { relativeTime.mockRestore(); }
+});

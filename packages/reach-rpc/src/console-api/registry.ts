@@ -100,9 +100,9 @@ export class EngineRegistry {
   }
 
   add(id: string, displayName: string): { engine: EngineRegistration; token: string } {
-    if (!this.controllerConfigured) throw new RegistryError(409, "Multiple Engines require Gateway authentication");
-    if (!/^[A-Za-z0-9._-]{1,64}$/.test(id)) throw new RegistryError(400, "Invalid Engine id");
-    if (this.engines.has(id)) throw new RegistryError(409, "Engine id already exists");
+    if (!this.controllerConfigured) throw new RegistryError(409, "Multiple Engines require Gateway authentication", "ENGINE_AUTH_REQUIRED");
+    if (!/^[A-Za-z0-9._-]{1,64}$/.test(id)) throw new RegistryError(400, "Invalid Engine id", "INVALID_ENGINE_ID");
+    if (this.engines.has(id)) throw new RegistryError(409, "Engine id already exists", "ENGINE_ID_EXISTS");
     this.validateName(displayName);
     const token = randomBytes(32).toString("hex");
     const registration: EngineRegistration = {
@@ -119,7 +119,7 @@ export class EngineRegistry {
     if (changes.displayName !== undefined) this.validateName(changes.displayName);
     const override = changes.deviceOverride;
     if (override && (!deviceKinds.includes(override.kind) || [...override.model].length > 64 || /[\x00-\x1f\x7f]/.test(override.model))) {
-      throw new RegistryError(400, "Invalid device override");
+      throw new RegistryError(400, "Invalid device override", "INVALID_DEVICE_OVERRIDE");
     }
     const updated = { ...engine, ...changes };
     if (changes.displayName !== undefined) updated.displayName = changes.displayName.trim();
@@ -161,18 +161,18 @@ export class EngineRegistry {
 
   private require(id: string): RegisteredEngine {
     const engine = this.engines.get(id);
-    if (!engine) throw new RegistryError(404, "Unknown device");
+    if (!engine) throw new RegistryError(404, "Unknown device", "DEVICE_NOT_FOUND");
     return engine;
   }
 
   private requireConsole(id: string): RegisteredEngine {
     const engine = this.require(id);
-    if (engine.origin === "seed") throw new RegistryError(409, "Engine is managed by Gateway configuration");
+    if (engine.origin === "seed") throw new RegistryError(409, "Engine is managed by Gateway configuration", "ENGINE_CONFIG_MANAGED");
     return engine;
   }
 
   private validateName(name: string): void {
-    if (!name.trim() || [...name].length > 64 || /[\x00-\x1f\x7f]/.test(name)) throw new RegistryError(400, "Invalid display name");
+    if (!name.trim() || [...name].length > 64 || /[\x00-\x1f\x7f]/.test(name)) throw new RegistryError(400, "Invalid display name", "INVALID_DISPLAY_NAME");
   }
 
   private attach(registration: EngineRegistration): void {
@@ -206,5 +206,5 @@ export class EngineRegistry {
 }
 
 export class RegistryError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string, readonly code: string) { super(message); }
 }

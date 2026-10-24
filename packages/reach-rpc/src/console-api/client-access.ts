@@ -4,7 +4,7 @@ import { credentialDigest } from "./credentials.js";
 import type { ConsoleStore } from "./store.js";
 
 export class ClientAccessError extends Error {
-  constructor(readonly status: number, message: string) { super(message); }
+  constructor(readonly status: number, message: string, readonly code: string) { super(message); }
 }
 
 export interface AccessClient {
@@ -48,11 +48,11 @@ export class ClientAccess {
   }
 
   private validateExpiry(expiresAt: number): void {
-    if (!Number.isSafeInteger(expiresAt) || expiresAt <= this.now() || expiresAt > 8_640_000_000_000_000) throw new ClientAccessError(400, "Credential expiry must be a future timestamp");
+    if (!Number.isSafeInteger(expiresAt) || expiresAt <= this.now() || expiresAt > 8_640_000_000_000_000) throw new ClientAccessError(400, "Credential expiry must be a future timestamp", "INVALID_CREDENTIAL_EXPIRY");
   }
 
   private validateName(name: string): string {
-    if (typeof name !== "string" || !name.trim() || name.trim().length > 64 || /[\x00-\x1f\x7f]/.test(name)) throw new ClientAccessError(400, "Client name must contain 1–64 printable characters");
+    if (typeof name !== "string" || !name.trim() || name.trim().length > 64 || /[\x00-\x1f\x7f]/.test(name)) throw new ClientAccessError(400, "Client name must contain 1–64 printable characters", "INVALID_CLIENT_NAME");
     return name.trim();
   }
 
@@ -109,7 +109,7 @@ export class ClientAccess {
 
   approveOAuth(clientId: string, name: string, value: unknown): AccessClient {
     const permissions = parseClientPermissions(value);
-    if (!permissions.length) throw new ClientAccessError(400, "Select resources and permissions");
+    if (!permissions.length) throw new ClientAccessError(400, "Select resources and permissions", "CLIENT_PERMISSIONS_REQUIRED");
     const id = `oauth:${clientId}`;
     this.store.transaction(() => {
       this.write(`INSERT INTO client_principals (id,kind,oauth_client_id,display_name,created_at) VALUES (?,'oauth',?,?,?)
@@ -140,7 +140,7 @@ export class ClientAccess {
   private read(id: string): AccessClient {
     const row = this.store.db.prepare(`SELECT p.*,c.expires_at FROM client_principals p
       LEFT JOIN client_credentials c ON c.principal_id=p.id WHERE p.id=?`).get(id);
-    if (!row) throw new ClientAccessError(404, "Unknown client identity");
+    if (!row) throw new ClientAccessError(404, "Unknown client identity", "CLIENT_IDENTITY_NOT_FOUND");
     const permissions = this.store.db.prepare("SELECT * FROM client_permissions WHERE principal_id=? ORDER BY engine_id,workspace").all(id).map(permission => ({
       engineId: String(permission.engine_id), workspace: String(permission.workspace), read: Boolean(permission.can_read), write: Boolean(permission.can_write), execute: Boolean(permission.can_execute),
     }));
@@ -166,7 +166,7 @@ export class ClientAccess {
 
   requireDelegated(authorization: string | undefined): DelegatedIdentity {
     const identity = this.authenticate(authorization);
-    if (!identity) throw new ClientAccessError(401, "Invalid or expired client credential");
+    if (!identity) throw new ClientAccessError(401, "Invalid or expired client credential", "INVALID_CLIENT_CREDENTIAL");
     return identity;
   }
 
@@ -178,7 +178,7 @@ export class ClientAccess {
 
   rotate(id: string, expiresAt: number): { client: AccessClient; token: string } {
     const client = this.get(id);
-    if (client.kind !== "delegated" || client.revokedAt !== null) throw new ClientAccessError(409, "Only active delegated identities can rotate credentials");
+    if (client.kind !== "delegated" || client.revokedAt !== null) throw new ClientAccessError(409, "Only active delegated identities can rotate credentials", "CLIENT_ROTATION_NOT_ALLOWED");
     this.validateExpiry(expiresAt);
     const token = this.store.transaction(() => {
       this.write("UPDATE client_principals SET policy_revision=policy_revision+1 WHERE id=?").run(id);
@@ -201,7 +201,7 @@ export class ClientAccess {
 
   reviewLegacy(id: string): AccessClient {
     const client = this.get(id);
-    if (!client.legacyGlobal || client.kind !== "oauth") throw new ClientAccessError(409, "Only existing legacy OAuth authority can be reviewed as global");
+    if (!client.legacyGlobal || client.kind !== "oauth") throw new ClientAccessError(409, "Only existing legacy OAuth authority can be reviewed as global", "CLIENT_GLOBAL_REVIEW_NOT_ALLOWED");
     this.write("UPDATE client_principals SET review_required=0 WHERE id=?").run(id);
     return this.get(id);
   }

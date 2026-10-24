@@ -1,25 +1,27 @@
-# Gateway 部署到 VPS
+# Deploy Gateway to a VPS
 
-Gateway 是公网控制入口，在 VPS 上由 Docker Compose 常驻，宿主 Caddy 处理 TLS。示例使用容器端口 `8787`、VPS 回环端口 `28787`、公网域名 `reach.example.com`。
+English | [简体中文](gateway_cn.md)
 
-本机直接运行 Gateway 时，可共用 Engine 安装到 `~/.reach/runtime/node/bin/node` 的独立 runtime。先完成下面的 npm 构建，然后在仓库根目录执行 `sh scripts/start-gateway.sh`；该入口通过独立 runtime 启动已构建的 Gateway。没有安装 Engine 的 Mac/Linux 主机可先执行 `python3 scripts/install-node-runtime.py`（支持 x64、arm64）。Docker 部署继续使用镜像自身的 Node，宿主与其他设备的 runtime 不跨主机共享。
+Gateway is the public control entry point. Docker Compose keeps it running on the VPS; host Caddy terminates TLS. Examples use container port `8787`, VPS loopback port `28787` and `reach.example.com`.
 
-## 1. 准备配置和构建产物
+A local Gateway can share the independent Node runtime installed by Engine at `~/.reach/runtime/node/bin/node`. Complete the npm build below, then run `sh scripts/start-gateway.sh` from the repository root. A Mac/Linux host without Engine can first run `python3 scripts/install-node-runtime.py` (x64/arm64). Docker uses its image's Node; runtimes are not shared across hosts.
 
-先完成 [配置与凭证](configuration.md)，确保存在 `.reach/gateway.env`。首次部署需要已安装 Docker、Compose 插件与 Caddy，并配置域名 DNS 和 80/443 网络访问。
+## 1. Prepare configuration and build outputs
 
-Compose 还需要 `deploy/engines.json`：单设备部署复制 `deploy/engines.json.example`（空数组）；多设备部署按 [OpenWrt 与多设备](openwrt.md) 填入额外 Engine 并设置 `REACH_ENGINES_FILE`。部署目录限制为管理员访问，注册文件需可被容器的 node 用户读取。升级前备份并保留已有注册文件。
+Complete [Configuration and credentials](configuration.md), including `.reach/gateway.env`. Install Docker, Compose and Caddy, configure DNS and allow ports 80/443 before first deployment.
 
-在本地仓库根目录运行：
+Compose also requires `deploy/engines.json`. For one device, copy the empty-array `deploy/engines.json.example`; for multiple devices follow [OpenWrt and multiple devices](openwrt.md) and set `REACH_ENGINES_FILE`. Restrict deployment directory access to administrators and allow the container's node user to read the registry. Back up and retain an existing registry during upgrades.
+
+From the local repository root:
 
 ```bash
 npm --prefix packages/reach-rpc ci --ignore-scripts
 npm --prefix packages/reach-rpc run build
 ```
 
-[Dockerfile](../../deploy/Dockerfile.gateway) 直接复制 `packages/reach-rpc/dist`，不会在镜像里编译 TypeScript。只有源码、没有 `dist` 的发布包无法构建；修改源码后也必须先重新编译。
+The [Dockerfile](../../deploy/Dockerfile.gateway) copies `packages/reach-rpc/dist` without compiling TypeScript. A source-only package cannot build the image; rebuild after source edits.
 
-按白名单打包，不包含凭证、开发依赖、Rust 产物或工作区：
+Package only allowed files, excluding credentials, development dependencies, Rust outputs and workspaces:
 
 ```bash
 tar -czf /tmp/reach-gateway-release.tgz \
@@ -30,13 +32,13 @@ tar -czf /tmp/reach-gateway-release.tgz \
   packages/reach-rpc/dist
 ```
 
-此手工发布包同时携带可选 updater 的 helper 和 systemd 模板；上传包不会自动启用更新。GitHub Release 的 `gateway-amd64.tgz` 包含 helper，但不包含 systemd 模板；使用 Release 包时，需从同一发布标签的源码取得模板。两种部署方式均按 [updater 安装步骤](operations.md#安装可选-github-release-updater) 显式安装并启用。
+This manual package includes optional updater helpers and systemd templates; uploading it does not enable updates. GitHub's `gateway-amd64.tgz` includes helpers but excludes systemd templates: obtain those from the matching source release tag. Explicitly install/enable either method using [updater installation](operations.md).
 
-镜像运行时安装 `ws`、`zod` 等生产依赖，因此 VPS 的 Docker 构建需要能够拉取 Node 基础镜像并访问 npm。共享 MCP 核心和 HTTP `/mcp` 随 `reach-rpc/dist` 一起进入镜像；独立 stdio Connector 入口和 Rust Engine 不在这个镜像中。
+The image installs production dependencies such as `ws` and `zod`; the VPS Docker build needs the Node base image and npm access. Shared MCP core and HTTP `/mcp` ship in `reach-rpc/dist`; the separate stdio Connector and Rust Engine are excluded.
 
-## 2. 上传到 VPS
+## 2. Upload to the VPS
 
-以下使用保留的示例主机 `gateway.example.com`、部署账号 `deploy` 和发布目录 `/srv/reach`。按自己的配置替换，确保账号具有目录写入与 Docker 管理权限，并保持 Compose 构建上下文目录结构。
+Replace reserved host `gateway.example.com`, account `deploy` and directory `/srv/reach`. The account needs directory write access and Docker administration. Preserve the Compose build-context directory layout.
 
 ```bash
 ssh deploy@gateway.example.com 'mkdir -p /srv/reach; chmod 700 /srv/reach; tar -xzf - -C /srv/reach' \
@@ -47,9 +49,9 @@ ssh deploy@gateway.example.com 'cat > /srv/reach/deploy/engines.json; chmod 644 
   < .reach/engines.json
 ```
 
-后两条命令会覆盖远端配置，首次部署使用生成的文件；升级时应复用当前凭证和 Engine 注册表并先备份。不要把含 token 的配置粘贴到命令行参数、聊天或发布说明中。
+The final two commands overwrite remote configuration. Use generated files only on first deployment; for upgrades, back up and reuse current credentials and registry. Never paste token-bearing configuration into command arguments, chats or release notes.
 
-上传后目录应为：
+Expected uploaded layout:
 
 ```text
 /srv/reach/
@@ -58,8 +60,8 @@ ssh deploy@gateway.example.com 'cat > /srv/reach/deploy/engines.json; chmod 644 
 │   ├── Dockerfile.gateway
 │   ├── reach-gateway-update.service
 │   ├── reach-gateway-update.path
-│   ├── gateway.env             # 600，不进入镜像
-│   └── engines.json           # 私有注册表，仅挂载给容器读取
+│   ├── gateway.env             # mode 600; excluded from the image
+│   └── engines.json           # private registry; mounted read-only in the container
 ├── scripts/
 │   ├── apply-gateway-release.sh
 │   ├── apply-engine-release.sh
@@ -70,7 +72,7 @@ ssh deploy@gateway.example.com 'cat > /srv/reach/deploy/engines.json; chmod 644 
     └── dist/
 ```
 
-## 3. 构建并启动容器
+## 3. Build and start the container
 
 ```bash
 ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose up -d --build gateway'
@@ -78,29 +80,29 @@ ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose ps'
 ssh deploy@gateway.example.com 'curl --fail --silent --show-error http://127.0.0.1:28787/healthz'
 ```
 
-健康响应应包含 `status: "ok"` 和 `protocol: "reach-rpc/1.0"`。Compose 健康检查每 15 秒执行一次，启动后可能短暂显示 `starting`。查看失败原因：
+Health should report `status: "ok"` and `protocol: "reach-rpc/1.0"`. Compose checks every 15 seconds and may initially show `starting`. Inspect failures with:
 
 ```bash
 ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose logs --tail 80 gateway'
 ```
 
-[compose.yaml](../../deploy/compose.yaml) 的部署策略：
+[Compose](../../deploy/compose.yaml) deployment properties:
 
-| 设置 | 行为 |
+| Setting | Behavior |
 | --- | --- |
-| `127.0.0.1:28787:8787` | 只允许 VPS 本机代理访问，不直接公开 8787/28787 |
-| `restart: unless-stopped` | Docker 启动后拉起服务；手动停止后保持停止 |
-| `USER node` | 容器进程不使用 root |
-| `read_only: true` | 容器根文件系统只读 |
-| `cap_drop: ALL`、`no-new-privileges` | 去除额外进程权限 |
-| 健康检查 | 容器内访问 `/healthz`；不检查 Engine 在线状态 |
-| `json-file` 日志 | 单文件 10 MB，最多 3 个文件 |
+| `127.0.0.1:28787:8787` | Accessible only to the VPS-local proxy; does not expose 8787/28787 publicly |
+| `restart: unless-stopped` | Starts with Docker; stays stopped after an explicit stop |
+| `USER node` | Non-root container process |
+| `read_only: true` | Read-only container root filesystem |
+| `cap_drop: ALL`, `no-new-privileges` | Removes additional process privileges |
+| Health check | Calls container `/healthz`; does not check Engine connectivity |
+| `json-file` logging | 10 MB per file, at most three files |
 
-Compose 项目名默认来自目录名 `deploy`，例如容器名为 `deploy-gateway-1`。后续保持同一目录和项目名；随意增加另一个 `-p` 会创建第二套服务并可能冲突。Gateway 没有业务文件卷，设备文件不会因为容器重建而被删除。
+The default project name comes from directory `deploy`, e.g. `deploy-gateway-1`. Keep that directory/project name; another `-p` creates a second installation and may conflict. Gateway has no business-file volume, so container recreation does not delete device files.
 
-## 4. 接入现有 Caddy
+## 4. Connect existing Caddy
 
-在 `/etc/caddy/Caddyfile` 中只新增或替换 Reach 站点，保留其他站点：
+Add or replace only the Reach site in `/etc/caddy/Caddyfile`, preserving other sites:
 
 ```caddyfile
 reach.example.com {
@@ -111,9 +113,9 @@ reach.example.com {
 }
 ```
 
-普通 `reverse_proxy` 同时代理 HTTP 和 WebSocket 升级。路径原样传递，不额外添加前缀或把 `/session` 转到另一域名。Engine 会检查 WSS origin 与配置的 Gateway origin 一致。
+Normal `reverse_proxy` handles HTTP and WebSocket upgrades. Preserve paths, add no prefix and keep `/session` on the same domain. Engines verify WSS origin against their configured Gateway origin.
 
-手工编辑配置前先备份，编辑后在 VPS 校验并重载：
+Back up before editing; validate and reload on the VPS:
 
 ```bash
 caddy validate --config /etc/caddy/Caddyfile --adapter caddyfile
@@ -121,17 +123,17 @@ systemctl reload caddy
 systemctl is-active caddy
 ```
 
-对于已有对应站点配置的 Linux/systemd 主机，可使用参数化脚本。运行账号须具备配置写入和 Caddy 重载权限：
+For an existing single-domain site on Linux/systemd, a parameterized helper is available. Its account needs configuration write access and Caddy reload permission:
 
 ```bash
 ssh deploy@gateway.example.com 'python3 - --domain reach.example.com --upstream 127.0.0.1:28787' < scripts/configure-vps-caddy.py
 ```
 
-[该脚本](../../scripts/configure-vps-caddy.py) 通过必填 `--domain` 选择站点，`--upstream` 指定 Gateway 地址；可通过 `--config` 和 `--service` 覆盖配置路径与 systemd 服务名。它先检查上游健康响应，生成并校验候选配置，再备份并重载；重载失败会恢复备份。它只更新已存在的单域名站点，不安装 Docker/Caddy、创建 DNS 或开放防火墙。
+The [helper](../../scripts/configure-vps-caddy.py) requires `--domain` and uses `--upstream` for the Gateway address. Override paths/service with `--config` and `--service`. It checks upstream health, generates and validates a candidate, backs up and reloads, restoring the backup on reload failure. It only updates an existing single-domain site; it does not install Docker/Caddy, create DNS or change firewalls.
 
-## 5. 检查公网入口
+## 5. Check the public entry point
 
-从本地运行：
+Run locally:
 
 ```bash
 curl --fail --silent --show-error https://reach.example.com/healthz
@@ -139,11 +141,11 @@ curl --silent --show-error --output /dev/null --write-out '%{http_code}\n' \
   https://reach.example.com/session/status
 ```
 
-第一条应通过证书校验并返回正确协议；第二条不带认证，应返回 `401`。不要使用 `curl -k` 掩盖证书或域名错误。
+The first request must validate the certificate and return the correct protocol. The unauthenticated second request must return `401`. Do not hide certificate/domain errors with `curl -k`.
 
-`/healthz` 成功只说明 Gateway 和代理可用，尚未证明 Engine 连通或文件 RPC 正常。继续 [Engine 部署](engine.md)，再按 [部署验证](verification.md) 检查完整链路。
+`/healthz` only confirms Gateway/proxy availability, not Engine connectivity or file RPC. Continue with [Engine deployment](engine.md), then [Deployment verification](verification.md).
 
-## Gateway 状态与日志
+## Gateway status and logs
 
 ```bash
 ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose ps'
@@ -151,6 +153,6 @@ ssh deploy@gateway.example.com 'cd /srv/reach/deploy && docker compose logs --ta
 ssh deploy@gateway.example.com 'journalctl -u caddy -n 50 --no-pager'
 ```
 
-需要 HTTP 诊断时，在远端 `gateway.env` 加入 `REACH_HTTP_LOG=1`，然后执行 `docker compose up -d gateway` 重新创建服务，使环境变量生效。普通 `restart` 不会载入修改后的 env。日志记录路径、状态和耗时，不记录 Authorization 或 session token 查询参数；Caddy 若另启访问日志，也应检查其敏感信息处理。
+For HTTP diagnostics, add `REACH_HTTP_LOG=1` to remote `gateway.env` and run `docker compose up -d gateway` to recreate the service. Plain `restart` does not reload env. Logs contain paths, status and duration, excluding Authorization and session-token query parameters. If Caddy access logging is enabled separately, check its handling of sensitive data too.
 
-升级与回滚见 [operations.md](operations.md)。
+See [Operations](operations.md) for upgrades and rollback.

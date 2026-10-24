@@ -1,12 +1,21 @@
+import { useT, type Lang } from "./i18n";
 import { useNow } from "./clock";
 import { memo, useEffect, useMemo, useState, type FormEvent } from "react";
-import { api } from "./api";
+import { api, errorText } from "./api";
 import { ActivityTable } from "./Activity";
 import { DeviceGlyph } from "./Glyph";
 import { consoleStore } from "./store";
 import type { SensitiveAction } from "./Devices";
 import type { Snapshot } from "./types";
-import { ClientAvatar, EngineStatus, Modal, formatAgo, modelText } from "./ui";
+import {
+  ClientAvatar,
+  EngineStatus,
+  Modal,
+  formatAgo,
+  modelText,
+  formatNumber,
+  warningText,
+} from "./ui";
 import { AccessClients } from "./AccessClients";
 
 export function inSession(engines: Snapshot["engines"]): number {
@@ -20,40 +29,51 @@ export const Kpis = memo(function Kpis({
   kpis: Snapshot["kpis"];
   inSession: number;
 }) {
+  const { t, lang } = useT();
   return (
-    <section className="kpis" aria-label="Key metrics">
+    <section className="kpis" aria-label={t("overview.metrics")}>
       <div className="kpi">
-        <span className="label">Clients</span>
-        <span className="value">{kpis.clients}</span>
+        <span className="label">{t("overview.clients")}</span>
+        <span className="value">{formatNumber(kpis.clients, lang)}</span>
       </div>
       <div className="kpi">
-        <span className="label">Devices online</span>
+        <span className="label">{t("overview.online")}</span>
         <span className="value">
-          {kpis.onlineEngines}/{kpis.registeredEngines}
-          <small>{inSession} in session</small>
+          {formatNumber(kpis.onlineEngines, lang)}/
+          {formatNumber(kpis.registeredEngines, lang)}
+          <small>{t("overview.inSession", { count: inSession })}</small>
         </span>
       </div>
       <div className="kpi">
-        <span className="label">MCP sessions</span>
-        <span className="value">{kpis.activeMcpSessions}</span>
+        <span className="label">{t("overview.mcpSessions")}</span>
+        <span className="value">
+          {formatNumber(kpis.activeMcpSessions, lang)}
+        </span>
       </div>
       <div className="kpi">
-        <span className="label">Requests / min</span>
-        <span className="value">{kpis.requestsPerMinute}</span>
+        <span className="label">{t("overview.requests")}</span>
+        <span className="value">
+          {formatNumber(kpis.requestsPerMinute, lang)}
+        </span>
       </div>
       <div className="kpi">
-        <span className="label">Error rate · 5 min</span>
-        <span className="value">{(kpis.errorRate5m * 100).toFixed(1)}%</span>
+        <span className="label">{t("overview.errorRate")}</span>
+        <span className="value">
+          {formatNumber(kpis.errorRate5m * 100, lang, 1)}%
+        </span>
       </div>
       <div className="kpi">
-        <span className="label">Policy denials · today</span>
-        <span className="value">{kpis.policyDenialsToday}</span>
+        <span className="label">{t("overview.denials")}</span>
+        <span className="value">
+          {formatNumber(kpis.policyDenialsToday, lang)}
+        </span>
       </div>
     </section>
   );
 });
 
 export function Overview({ snapshot }: { snapshot: Snapshot }) {
+  const { t, lang } = useT();
   const recent = useMemo(
     () => snapshot.activity.slice(0, 8),
     [snapshot.activity],
@@ -61,17 +81,19 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
   return (
     <>
       <Kpis kpis={snapshot.kpis} inSession={inSession(snapshot.engines)} />
-      {snapshot.gateway.warnings.map((warning) => (
+      {snapshot.gateway.warnings.map((warning, index) => (
         <div className="notice warn" key={warning} role="status">
-          {warning}
+          {warningText(warning, lang, snapshot.gateway.warningDetails?.[index])}
         </div>
       ))}
       <div className="columns">
         <section className="panel">
           <div className="panel-head">
-            <h2>Devices</h2>
+            <h2>{t("overview.devices")}</h2>
             <span className="pill">
-              Heartbeat every {snapshot.gateway.heartbeatInterval} s
+              {t("overview.heartbeat", {
+                seconds: snapshot.gateway.heartbeatInterval,
+              })}
             </span>
           </div>
           {snapshot.engines.map((engine) => (
@@ -82,7 +104,7 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
               />
               <div>
                 <strong>{engine.displayName}</strong>
-                <small>{modelText(engine)}</small>
+                <small>{modelText(engine, lang)}</small>
               </div>
               <EngineStatus
                 heartbeatInterval={snapshot.gateway.heartbeatInterval}
@@ -91,12 +113,12 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
             </div>
           ))}
           {!snapshot.engines.length && (
-            <div className="empty">No devices registered yet.</div>
+            <div className="empty">{t("overview.noDevices")}</div>
           )}
         </section>
         <section className="panel">
           <div className="panel-head">
-            <h2>Versions</h2>
+            <h2>{t("overview.versions")}</h2>
           </div>
           <div className="panel-body">
             <dl className="kv">
@@ -104,11 +126,11 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
               <dd className="mono">v{snapshot.gateway.version}</dd>
               <dt>MCP</dt>
               <dd className="mono">v{snapshot.gateway.mcpVersion}</dd>
-              <dt>Gateway auto-update</dt>
+              <dt>{t("overview.update")}</dt>
               <dd>
                 {snapshot.gateway.updateEnabled
-                  ? "On · applies when every device is idle"
-                  : "Off"}
+                  ? t("overview.on")
+                  : t("overview.off")}
               </dd>
               {snapshot.engines.map((engine) => (
                 <div key={engine.id} style={{ display: "contents" }}>
@@ -116,20 +138,18 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
                   <dd className="mono">
                     {engine.engineVersion
                       ? `v${engine.engineVersion}`
-                      : "Not reported"}
+                      : t("overview.notReported")}
                   </dd>
                 </div>
               ))}
             </dl>
-            <div className="reserved">
-              Engine updates are configured on each device.
-            </div>
+            <div className="reserved">{t("overview.engineUpdates")}</div>
           </div>
         </section>
       </div>
       <section className="panel">
         <div className="panel-head">
-          <h2>Recent activity</h2>
+          <h2>{t("overview.recent")}</h2>
         </div>
         <ActivityTable rows={recent} />
       </section>
@@ -144,25 +164,26 @@ export function ClientsView({
   snapshot: Snapshot;
   sensitive: SensitiveAction;
 }) {
+  const { t, lang } = useT();
   const now = useNow();
   const [confirm, setConfirm] = useState("");
   return (
     <>
       <section className="panel">
         <div className="panel-head">
-          <h2>Clients</h2>
-          <span className="pill">Self-reported labels · unverified</span>
+          <h2>{t("overview.clients")}</h2>
+          <span className="pill">{t("overview.unverifiedLabels")}</span>
         </div>
         <div className="table-wrap">
           <table>
             <thead>
               <tr>
-                <th>Client</th>
-                <th className="num">MCP sessions</th>
-                <th>Devices in session</th>
-                <th>Last activity</th>
-                <th className="num">Calls · 24 h</th>
-                <th className="num">Errors · 24 h</th>
+                <th>{t("overview.client")}</th>
+                <th className="num">{t("overview.mcpSessions")}</th>
+                <th>{t("overview.sessionDevices")}</th>
+                <th>{t("overview.lastActivity")}</th>
+                <th className="num">{t("overview.calls")}</th>
+                <th className="num">{t("overview.errors")}</th>
                 <th />
               </tr>
             </thead>
@@ -176,20 +197,24 @@ export function ClientsView({
                         <strong>{client.label}</strong>
                         <small>
                           {client.type === "mcp-http"
-                            ? "Remote MCP"
-                            : "Controller API"}{" "}
-                          · unverified
+                            ? t("overview.remote")
+                            : t("overview.controller")}{" "}
+                          {t("overview.unverified")}
                         </small>
                       </span>
                     </span>
                   </td>
-                  <td className="num">{client.activeSessions}</td>
+                  <td className="num">
+                    {formatNumber(client.activeSessions, lang)}
+                  </td>
                   <td className="mono">
                     {client.ownedEngines.join(", ") || "—"}
                   </td>
-                  <td>{formatAgo(client.lastSeenAt, now)}</td>
-                  <td className="num">{client.calls24h}</td>
-                  <td className="num">{client.errors24h}</td>
+                  <td>{formatAgo(client.lastSeenAt, now, lang)}</td>
+                  <td className="num">{formatNumber(client.calls24h, lang)}</td>
+                  <td className="num">
+                    {formatNumber(client.errors24h, lang)}
+                  </td>
                   <td>
                     {client.type === "mcp-http" &&
                       client.activeSessions > 0 && (
@@ -197,7 +222,7 @@ export function ClientsView({
                           className="btn small"
                           onClick={() => setConfirm(client.label)}
                         >
-                          Disconnect
+                          {t("overview.disconnect")}
                         </button>
                       )}
                   </td>
@@ -206,13 +231,10 @@ export function ClientsView({
             </tbody>
           </table>
           {!snapshot.clients.length && (
-            <div className="empty">No clients seen yet.</div>
+            <div className="empty">{t("overview.noClients")}</div>
           )}
         </div>
-        <div className="note">
-          Labels come from each client’s MCP handshake or X-Reach-Client header.
-          They attribute activity; they do not prove identity or grant access.
-        </div>
+        <div className="note">{t("overview.labelsNote")}</div>
       </section>
       <AccessClients
         engines={snapshot.engines}
@@ -233,14 +255,14 @@ export function ClientsView({
         }
       />
       {confirm && (
-        <Modal title={`Disconnect ${confirm}?`} onCancel={() => setConfirm("")}>
-          <p>
-            Its MCP sessions end now. Device sessions it opened finish their
-            current requests and close.
-          </p>
+        <Modal
+          title={t("overview.disconnectTitle", { name: confirm })}
+          onCancel={() => setConfirm("")}
+        >
+          <p>{t("overview.disconnectNote")}</p>
           <div className="actions">
             <button className="btn" onClick={() => setConfirm("")}>
-              Cancel
+              {t("overview.cancel")}
             </button>
             <button
               className="btn danger"
@@ -255,7 +277,7 @@ export function ClientsView({
                 })
               }
             >
-              Disconnect client
+              {t("overview.disconnectClient")}
             </button>
           </div>
         </Modal>
@@ -281,6 +303,7 @@ function AuthorizedApps({
   /** Id of the latest oauth.* admin action; approvals in other tabs reload the list. */
   revision: number;
 }) {
+  const { t, lang } = useT();
   const now = useNow();
   const [apps, setApps] = useState<OAuthApp[] | undefined>();
   const [confirm, setConfirm] = useState<OAuthApp | undefined>();
@@ -294,18 +317,18 @@ function AuthorizedApps({
   return (
     <section className="panel">
       <div className="panel-head">
-        <h2>Authorized apps</h2>
-        <span className="pill">OAuth · approved by you</span>
+        <h2>{t("overview.apps")}</h2>
+        <span className="pill">{t("overview.approvedByYou")}</span>
       </div>
       <div className="table-wrap">
         <table>
           <thead>
             <tr>
-              <th>App</th>
-              <th>Returns to</th>
-              <th>Approved</th>
-              <th>Last used</th>
-              <th className="num">Live tokens</th>
+              <th>{t("overview.app")}</th>
+              <th>{t("overview.returnsTo")}</th>
+              <th>{t("overview.approved")}</th>
+              <th>{t("overview.lastUsed")}</th>
+              <th className="num">{t("overview.liveTokens")}</th>
               <th />
             </tr>
           </thead>
@@ -318,12 +341,14 @@ function AuthorizedApps({
                 <td className="mono">
                   {app.redirectUris.map((uri) => new URL(uri).host).join(", ")}
                 </td>
-                <td>{formatAgo(app.approvedAt, now)}</td>
-                <td>{app.lastUsedAt ? formatAgo(app.lastUsedAt, now) : "—"}</td>
-                <td className="num">{app.activeTokens}</td>
+                <td>{formatAgo(app.approvedAt, now, lang)}</td>
+                <td>
+                  {app.lastUsedAt ? formatAgo(app.lastUsedAt, now, lang) : "—"}
+                </td>
+                <td className="num">{formatNumber(app.activeTokens, lang)}</td>
                 <td>
                   <button className="btn small" onClick={() => setConfirm(app)}>
-                    Revoke
+                    {t("overview.revoke")}
                   </button>
                 </td>
               </tr>
@@ -331,26 +356,19 @@ function AuthorizedApps({
           </tbody>
         </table>
         {apps && !apps.length && (
-          <div className="empty">No apps authorized through OAuth.</div>
+          <div className="empty">{t("overview.noApps")}</div>
         )}
       </div>
-      <div className="note">
-        Remote MCP clients such as ChatGPT connectors sign in through
-        /oauth/authorize. Each approval needs your password and authentication
-        code.
-      </div>
+      <div className="note">{t("overview.oauthNote")}</div>
       {confirm && (
         <Modal
-          title={`Revoke ${confirm.name}?`}
+          title={t("overview.revokeTitle", { name: confirm.name })}
           onCancel={() => setConfirm(undefined)}
         >
-          <p>
-            Its tokens stop working at once. It must be approved again before it
-            can reconnect.
-          </p>
+          <p>{t("overview.revokeNote")}</p>
           <div className="actions">
             <button className="btn" onClick={() => setConfirm(undefined)}>
-              Cancel
+              {t("overview.cancel")}
             </button>
             <button
               className="btn danger"
@@ -366,7 +384,7 @@ function AuthorizedApps({
                 })
               }
             >
-              Revoke access
+              {t("overview.revokeAccess")}
             </button>
           </div>
         </Modal>
@@ -382,13 +400,14 @@ export function SettingsView({
   snapshot: Snapshot;
   sensitive: SensitiveAction;
 }) {
+  const { t, lang, setLang } = useT();
   const [days, setDays] = useState(snapshot.settings.retentionDays);
   const [theme, setTheme] = useState(snapshot.settings.theme);
   const [heartbeats, setHeartbeats] = useState(
     snapshot.settings.heartbeatDisplay,
   );
   const [saved, setSaved] = useState(false);
-  const [error, setError] = useState("");
+  const [error, setError] = useState<unknown>();
   const [themeBusy, setThemeBusy] = useState(false);
   async function changeTheme(value: typeof theme): Promise<void> {
     const previous = theme;
@@ -402,9 +421,7 @@ export function SettingsView({
     } catch (error) {
       setTheme(previous);
       document.documentElement.dataset.theme = previous;
-      setError(
-        error instanceof Error ? error.message : "Theme could not be saved",
-      );
+      setError(error);
       return;
     } finally {
       setThemeBusy(false);
@@ -412,7 +429,7 @@ export function SettingsView({
     try {
       await consoleStore.refresh();
     } catch (error) {
-      setError(error instanceof Error ? error.message : "Settings unavailable");
+      setError(error);
     }
   }
   async function submit(event: FormEvent): Promise<void> {
@@ -433,27 +450,23 @@ export function SettingsView({
       try {
         await save();
       } catch (error) {
-        setError(
-          error instanceof Error
-            ? error.message
-            : "Settings could not be saved",
-        );
+        setError(error);
       }
     }
   }
   return (
     <section className="panel" style={{ maxWidth: 640 }}>
       <div className="panel-head">
-        <h2>Settings</h2>
+        <h2>{t("settings.title")}</h2>
       </div>
-      {error && (
+      {Boolean(error) && (
         <div className="notice err" role="alert">
-          {error}
+          {errorText(error, t)}
         </div>
       )}
       <form className="panel-body" onSubmit={(event) => void submit(event)}>
         <label>
-          Keep activity for (days)
+          {t("settings.retention")}
           <input
             type="number"
             min="1"
@@ -463,12 +476,19 @@ export function SettingsView({
             required
           />
         </label>
-        <div className="reserved">
-          Older records are deleted once a day. Changing this asks for your
-          password again.
-        </div>
+        <div className="reserved">{t("settings.retentionNote")}</div>
         <label>
-          Theme
+          {t("common.language")}
+          <select
+            value={lang}
+            onChange={(event) => setLang(event.target.value as Lang)}
+          >
+            <option value="en">English</option>
+            <option value="zh-CN">简体中文</option>
+          </select>
+        </label>
+        <label>
+          {t("settings.theme")}
           <select
             value={theme}
             disabled={themeBusy}
@@ -476,9 +496,9 @@ export function SettingsView({
               void changeTheme(event.target.value as typeof theme)
             }
           >
-            <option value="system">System</option>
-            <option value="light">Light</option>
-            <option value="dark">Dark</option>
+            <option value="system">{t("settings.system")}</option>
+            <option value="light">{t("settings.light")}</option>
+            <option value="dark">{t("settings.dark")}</option>
           </select>
         </label>
         <label className="checkbox">
@@ -487,13 +507,13 @@ export function SettingsView({
             checked={heartbeats}
             onChange={(event) => setHeartbeats(event.target.checked)}
           />
-          Show heartbeats in the topology
+          {t("settings.heartbeats")}
         </label>
         <div className="actions">
-          <button className="btn primary">Save settings</button>
+          <button className="btn primary">{t("settings.save")}</button>
           {saved && (
             <span className="success" role="status">
-              Settings saved
+              {t("settings.saved")}
             </span>
           )}
         </div>
@@ -503,18 +523,19 @@ export function SettingsView({
 }
 
 export function SkillsView() {
+  const { t } = useT();
   return (
     <section className="panel skills-reserved">
       <div className="panel-head">
-        <h2>Skills</h2>
-        <span className="pill">Planned</span>
+        <h2>{t("skills.title")}</h2>
+        <span className="pill">{t("skills.planned")}</span>
       </div>
       <div className="panel-body">
-        <p>Skill management is not available yet. It will let you:</p>
+        <p>{t("skills.intro")}</p>
         <ul>
-          <li>keep a catalogue of SKILL.md skills on the Gateway;</li>
-          <li>choose which skills each device installs;</li>
-          <li>let bots discover and run them through MCP.</li>
+          <li>{t("skills.catalogue")}</li>
+          <li>{t("skills.devices")}</li>
+          <li>{t("skills.mcp")}</li>
         </ul>
       </div>
     </section>

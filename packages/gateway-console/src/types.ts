@@ -82,6 +82,12 @@ export interface Activity extends Omit<LiveEvent, "type"> {
   clientLabel?: string;
   clientType?: string;
 }
+export interface GatewayWarning {
+  code: string;
+  message: string;
+  params?: { path?: string };
+}
+
 export interface Snapshot {
   ts: number;
   eventId: number;
@@ -95,6 +101,7 @@ export interface Snapshot {
     heartbeatInterval: number;
     updateEnabled: boolean;
     warnings: string[];
+    warningDetails?: GatewayWarning[];
   };
   settings: {
     retentionDays: number;

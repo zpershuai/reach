@@ -1,3 +1,4 @@
+import { useT } from "./i18n";
 import { displayOnline } from "./online";
 import { useNow } from "./clock";
 import {
@@ -14,7 +15,13 @@ import { DeviceDrawer, type SensitiveAction } from "./Devices";
 import { DeviceGlyph } from "./Glyph";
 import { ParticleScheduler, linkState } from "./particles";
 import type { Activity, Client, Engine, LiveEvent, Snapshot } from "./types";
-import { ClientAvatar, EngineStatus, formatAgo, modelText } from "./ui";
+import {
+  ClientAvatar,
+  EngineStatus,
+  formatAgo,
+  formatNumber,
+  modelText,
+} from "./ui";
 import { Kpis, inSession } from "./Views";
 import { bezier, type Geometry, type Route } from "./topology/geometry";
 import { ClientDrawer, GatewayDrawer } from "./topology/drawers";
@@ -28,13 +35,13 @@ type Selection =
 const clientKey = (type: string | undefined, label: string) =>
   `${type ?? "controller"}-${label}`;
 const classes = ["read", "write", "exec", "skill", "control"] as const;
-const legend: Record<(typeof classes)[number], string> = {
-  read: "Read",
-  write: "Write",
-  exec: "Exec",
-  skill: "Skill (reserved)",
-  control: "Control",
-};
+const legend = {
+  read: "topology.read",
+  write: "topology.write",
+  exec: "topology.exec",
+  skill: "topology.skill",
+  control: "topology.control",
+} as const;
 
 export function TopologyView({
   snapshot,
@@ -45,6 +52,7 @@ export function TopologyView({
   events: LiveEvent[];
   sensitive: SensitiveAction;
 }) {
+  const { t, lang } = useT();
   const now = useNow();
   const [selection, setSelection] = useState<Selection | null>(null);
   const [drawer, setDrawer] = useState<Selection | null>(null);
@@ -139,7 +147,7 @@ export function TopologyView({
     "|",
     ...engines.map((engine) => engine.id),
   ].join("\0");
-  useLayoutEffect(layout, [shape]);
+  useLayoutEffect(layout, [shape, lang]);
   useEffect(() => {
     const observer = new ResizeObserver(() => layout());
     for (const element of [
@@ -311,29 +319,29 @@ export function TopologyView({
       <Kpis kpis={snapshot.kpis} inSession={inSession(snapshot.engines)} />
       <section
         className={`panel${paused ? " paused" : ""}`}
-        aria-label="Routing topology"
+        aria-label={t("topology.routing")}
       >
         <div className="panel-head">
-          <h2>Clients → Gateway → Engines</h2>
+          <h2>{t("topology.title")}</h2>
           <div className="tools">
-            <div className="legend" aria-label="Legend">
+            <div className="legend" aria-label={t("topology.legend")}>
               {classes.map((name) => (
                 <span key={name}>
                   <i className={`sw c-${name}`} />
-                  {legend[name]}
+                  {t(legend[name])}
                 </span>
               ))}
               <span>
                 <i className="sw hollow" />
-                Response
+                {t("topology.response")}
               </span>
               <span>
                 <i className="sw diamond" />
-                Error
+                {t("topology.error")}
               </span>
               <span>
                 <i className="sw x">×</i>
-                Denied
+                {t("topology.denied")}
               </span>
             </div>
             <button
@@ -341,7 +349,7 @@ export function TopologyView({
               aria-pressed={paused}
               onClick={() => setPaused(!paused)}
             >
-              {paused ? "Resume" : "Pause"}
+              {paused ? t("topology.resume") : t("topology.pause")}
             </button>
           </div>
         </div>
@@ -401,7 +409,24 @@ export function TopologyView({
                       data-id={`egress-${engine.id}`}
                       d={route.d}
                     >
-                      <title>{state.label}</title>
+                      <title>
+                        {t(
+                          (
+                            {
+                              offline: "topology.offlineLink",
+                              ready: "topology.readyLink",
+                              connecting: "topology.connectingLink",
+                              idle: "topology.idleLink",
+                            } as const
+                          )[
+                            state.className as
+                              | "offline"
+                              | "ready"
+                              | "connecting"
+                              | "idle"
+                          ],
+                        )}
+                      </title>
                     </path>
                     <path
                       className="hit-path"
@@ -419,8 +444,8 @@ export function TopologyView({
             <div className="lanes">
               <div className="lane">
                 <div className="lane-title">
-                  <span>Clients</span>
-                  <span>{clients.length}</span>
+                  <span>{t("topology.clients")}</span>
+                  <span>{formatNumber(clients.length, lang)}</span>
                 </div>
                 {clients.map((item) => {
                   const key = clientKey(item.type, item.label);
@@ -447,26 +472,26 @@ export function TopologyView({
                           className={`pill ${item.activeSessions ? "ok" : ""}`}
                         >
                           {item.activeSessions
-                            ? `${item.activeSessions} session${item.activeSessions > 1 ? "s" : ""}`
-                            : "Idle"}
+                            ? t("topology.sessions", {
+                                count: item.activeSessions,
+                              })
+                            : t("topology.idle")}
                         </span>
                       </div>
                       <div className="meta">
                         <span>
                           {item.type === "mcp-http"
-                            ? "Remote MCP"
-                            : "Controller API"}{" "}
-                          · unverified
+                            ? t("topology.remote")
+                            : t("topology.controller")}{" "}
+                          {t("topology.unverified")}
                         </span>
-                        <span>{formatAgo(item.lastSeenAt, now)}</span>
+                        <span>{formatAgo(item.lastSeenAt, now, lang)}</span>
                       </div>
                     </div>
                   );
                 })}
                 {!clients.length && (
-                  <div className="lane-empty">
-                    No clients have connected yet.
-                  </div>
+                  <div className="lane-empty">{t("topology.emptyClients")}</div>
                 )}
               </div>
               <div className="lane">
@@ -486,33 +511,37 @@ export function TopologyView({
                     <span className="name">reach-gateway</span>
                     <span className="pill ok">
                       <span className="dot" />
-                      Running
+                      {t("topology.running")}
                     </span>
                   </div>
                   <div className="stages" ref={stages}>
                     <div className="stage" data-stage="auth">
-                      <b>Auth</b>
-                      <span>Token</span>
+                      <b>{t("topology.auth")}</b>
+                      <span>{t("topology.token")}</span>
                     </div>
                     <div className="stage" data-stage="policy">
-                      <b>Policy</b>
-                      <span>Grant · scope</span>
+                      <b>{t("topology.policy")}</b>
+                      <span>{t("topology.grant")}</span>
                     </div>
                     <div className="stage" data-stage="route">
-                      <b>Route</b>
+                      <b>{t("topology.route")}</b>
                       <span>engineId</span>
                     </div>
                   </div>
                   <div className="gw-foot">
-                    <span>Audit → SQLite</span>
-                    <span>Kept {snapshot.settings.retentionDays} days</span>
+                    <span>{t("topology.audit")}</span>
+                    <span>
+                      {t("topology.kept", {
+                        count: snapshot.settings.retentionDays,
+                      })}
+                    </span>
                   </div>
                 </div>
               </div>
               <div className="lane">
                 <div className="lane-title">
-                  <span>Engines</span>
-                  <span>{engines.length}</span>
+                  <span>{t("topology.engines")}</span>
+                  <span>{formatNumber(engines.length, lang)}</span>
                 </div>
                 {engines.map((engine) => {
                   const selected =
@@ -540,7 +569,7 @@ export function TopologyView({
                             <span className="name">{engine.displayName}</span>
                           </div>
                           <div className="meta">
-                            <span>{modelText(engine)}</span>
+                            <span>{modelText(engine, lang)}</span>
                           </div>
                           <div className="meta">
                             <EngineStatus
@@ -555,7 +584,9 @@ export function TopologyView({
                               snapshot.gateway.heartbeatInterval,
                             ) &&
                               engine.lastSeenAt !== null && (
-                                <span>{formatAgo(engine.lastSeenAt, now)}</span>
+                                <span>
+                                  {formatAgo(engine.lastSeenAt, now, lang)}
+                                </span>
                               )}
                             {displayOnline(
                               engine,
@@ -564,10 +595,9 @@ export function TopologyView({
                             ) &&
                               engine.session.workspaces && (
                                 <span>
-                                  {engine.session.workspaces.length} workspace
-                                  {engine.session.workspaces.length === 1
-                                    ? ""
-                                    : "s"}
+                                  {t("topology.workspaces", {
+                                    count: engine.session.workspaces.length,
+                                  })}
                                 </span>
                               )}
                           </div>
@@ -577,9 +607,7 @@ export function TopologyView({
                   );
                 })}
                 {!engines.length && (
-                  <div className="lane-empty">
-                    No devices yet. Add one from Devices.
-                  </div>
+                  <div className="lane-empty">{t("topology.emptyDevices")}</div>
                 )}
               </div>
             </div>
@@ -587,18 +615,18 @@ export function TopologyView({
           </div>
         </div>
       </section>
-      <section className="panel" aria-label="Live activity">
+      <section className="panel" aria-label={t("topology.live")}>
         <div className="panel-head">
-          <h2>Live activity</h2>
+          <h2>{t("topology.live")}</h2>
           <div className="tools">
             {(clientSelected || engineSelected) && (
               <span className="pill accent">
                 {clientSelected
-                  ? `Client: ${clientSelected}`
-                  : `Device: ${engineSelected}`}
+                  ? t("topology.clientFilter", { name: clientSelected })
+                  : t("topology.deviceFilter", { name: engineSelected ?? "" })}
                 <button
                   className="btn ghost small"
-                  aria-label="Clear filter"
+                  aria-label={t("topology.clearFilter")}
                   onClick={() => setSelection(null)}
                 >
                   ×
@@ -608,10 +636,7 @@ export function TopologyView({
           </div>
         </div>
         <ActivityTable rows={activity} tall />
-        <div className="note">
-          Particles follow received events only. Select a client, device or link
-          to filter.
-        </div>
+        <div className="note">{t("topology.particlesNote")}</div>
       </section>
       {device && (
         <DeviceDrawer

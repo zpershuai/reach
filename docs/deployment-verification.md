@@ -1,5 +1,7 @@
-# Reach 部署验收文档入口
+# Reach deployment acceptance documentation
 
-通用安装与验收事项见 [部署检查清单](deploy/deployment-checklist.md)。运行检查的方法、前置条件与故障注入影响见 [部署验证](deploy/verification.md)。实际环境配置、验收结果与产物摘要保存在部署者自己的私有目录。
+English | [简体中文](deployment-verification_cn.md)
 
-整套部署文档见 [docs/deploy/README.md](deploy/README.md)。本路径保留为已有链接的入口。
+See the [Deployment checklist](deploy/deployment-checklist.md) for installation and acceptance. [Verification](deploy/verification.md) explains commands, prerequisites and fault-injection impact. Keep real configuration, acceptance results and digests in your private directory.
+
+The full guide index is [docs/deploy/README.md](deploy/README.md). This path remains an entry point for existing links.

@@ -15,7 +15,7 @@ const absoluteMs = 7 * 24 * 60 * 60 * 1000;
 const recentMs = 10 * 60 * 1000;
 
 export class ConsoleError extends Error {
-  constructor(readonly status: number, message: string, readonly code?: string, readonly retryAfter?: number) { super(message); }
+  constructor(readonly status: number, message: string, readonly code: string, readonly retryAfter?: number) { super(message); }
 }
 
 export interface AdminSession {
@@ -140,7 +140,7 @@ export class ConsoleAuth {
 
   require(request: IncomingMessage, mutation = false, recent = false): AdminSession {
     const session = this.session(request);
-    if (!session) throw new ConsoleError(401, "Sign in required");
+    if (!session) throw new ConsoleError(401, "Sign in required", "SIGN_IN_REQUIRED");
     if (mutation) this.checkCsrf(request, session.csrfToken);
     if (recent && this.now() - session.reauthenticatedAt >= recentMs) throw new ConsoleError(403, "Re-authentication required", "REAUTH_REQUIRED");
     return session;
@@ -208,8 +208,8 @@ export class ConsoleAuth {
           : { authenticated: false, setupRequired: !this.hasAdmin(), csrfToken: this.bootstrap(request, response).csrfToken });
         return true;
       }
-      if (request.method !== "POST" || path === "me") throw new ConsoleError(405, "Method not allowed");
-      if (path === "setup" && this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists");
+      if (request.method !== "POST" || path === "me") throw new ConsoleError(405, "Method not allowed", "METHOD_NOT_ALLOWED");
+      if (path === "setup" && this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists", "ADMIN_EXISTS");
       const peer = this.peers.resolve(request);
       if (["setup", "login", "reauth"].includes(path)) this.limiter.check(peer);
       let session: AdminSession | undefined;
@@ -217,12 +217,12 @@ export class ConsoleAuth {
       if (path === "logout" || path === "reauth") session = this.require(request, true);
       else { bootstrap = this.bootstrap(request); this.checkCsrf(request, bootstrap.csrfToken); }
       const value = await readJsonBody(request);
-      if (!value || typeof value !== "object" || Array.isArray(value)) throw new ConsoleError(400, "Invalid request");
+      if (!value || typeof value !== "object" || Array.isArray(value)) throw new ConsoleError(400, "Invalid request", "INVALID_REQUEST");
       const body = value as Record<string, unknown>;
       const fail = (status = 401): never => {
         this.limiter.failed(peer);
         this.events.authFailed(`/api/console/${path}`, peer);
-        throw new ConsoleError(status, "Invalid credentials");
+        throw new ConsoleError(status, "Invalid credentials", "INVALID_CREDENTIALS");
       };
       if (path === "setup") {
         if (!this.setupDigest || typeof body.token !== "string" || !equal(credentialDigest(body.token), this.setupDigest)) fail(403);
@@ -232,11 +232,11 @@ export class ConsoleAuth {
           sendJson(response, 200, { secret, otpauthUrl: `otpauth://totp/Reach:Administrator?secret=${secret}&issuer=Reach&algorithm=SHA1&digits=6&period=30` });
           return true;
         }
-        if (typeof body.password !== "string" || body.password.length < 12 || body.password.length > 1024) throw new ConsoleError(400, "Password must contain 12 to 1024 characters");
+        if (typeof body.password !== "string" || body.password.length < 12 || body.password.length > 1024) throw new ConsoleError(400, "Password must contain 12 to 1024 characters", "PASSWORD_LENGTH");
         const step = bootstrap!.secret && typeof body.code === "string" ? verifyTotp(bootstrap!.secret, body.code, -1, this.now()) : undefined;
         if (step === undefined) fail(403);
         const passwordHash = await hashPassword(body.password);
-        if (this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists");
+        if (this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists", "ADMIN_EXISTS");
         const recovery = this.credentials.createAdmin(passwordHash, bootstrap!.secret!, step!, this.now());
         this.setupDigest = undefined;
         if (!removeSetupToken(this.store.directory)) this.logger(LEFTOVER_SETUP_TOKEN);
@@ -263,9 +263,9 @@ export class ConsoleAuth {
     } catch (error) {
       if (error instanceof ConsoleError) {
         if (error.retryAfter) response.setHeader("retry-after", error.retryAfter);
-        sendJson(response, error.status, { error: error.message, ...(error.code ? { code: error.code } : {}) });
-      } else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB" });
-      else sendJson(response, 400, { error: "Invalid console request" });
+        sendJson(response, error.status, { error: error.message, code: error.code, ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}) });
+      } else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB", code: "BODY_TOO_LARGE" });
+      else sendJson(response, 400, { error: "Invalid console request", code: "INVALID_REQUEST" });
     }
     return true;
   }
