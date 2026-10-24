@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { execFileSync, spawnSync } from 'node:child_process';
 import test from 'node:test';
 import YAML from 'yaml';
 
@@ -54,6 +57,42 @@ test('explicit CI tags use the real component pipeline and cannot enter publishi
   assert.ok(ancestry.run.includes('git merge-base --is-ancestor HEAD "origin/$DEFAULT_BRANCH"'));
   for (const name of ['verify', 'engine', 'gateway', 'candidate']) assert.ok(release.jobs[name]);
   assert.ok(release.jobs.publish.if.includes("needs.version.outputs.test_only == 'false'"));
+});
+
+test('tag ancestry accepts merged CI retries but still rejects unmerged stable and diverged commits', t => {
+  const cwd = fs.mkdtempSync(path.join(os.tmpdir(), 'reach-release-ancestry-'));
+  t.after(() => fs.rmSync(cwd, { recursive: true, force: true }));
+  const git = (...args) => execFileSync('git', args, { cwd, encoding: 'utf8' }).trim();
+  git('init', '--quiet');
+  git('config', 'user.name', 'Release test');
+  git('config', 'user.email', 'release-test@example.com');
+  const tree = execFileSync('git', ['mktree'], { cwd, input: '', encoding: 'utf8' }).trim();
+  const commit = (message, ...parents) => git('commit-tree', tree, ...parents.flatMap(parent => ['-p', parent]), '-m', message);
+  const base = commit('base');
+  const candidate = commit('candidate', base);
+  const advanced = commit('main after candidate merge', candidate);
+  const diverged = commit('diverged main', base);
+  const unrelated = commit('unrelated history');
+  const ancestry = release.jobs.version.steps.find(step => step.env?.TEST_ONLY);
+  for (const [name, head, main, testOnly, expected] of [
+    ['current CI candidate', base, base, true, 0],
+    ['CI candidate ahead of main', candidate, base, true, 0],
+    ['merged CI candidate after main advances', candidate, advanced, true, 0],
+    ['current stable release', base, base, false, 0],
+    ['merged stable release', candidate, advanced, false, 0],
+    ['unmerged stable release', candidate, base, false, 1],
+    ['diverged CI candidate', candidate, diverged, true, 1],
+    ['diverged stable release', candidate, diverged, false, 1],
+    ['unrelated CI candidate', candidate, unrelated, true, 1],
+    ['unrelated stable release', candidate, unrelated, false, 1],
+  ]) {
+    git('update-ref', 'refs/remotes/origin/main', main);
+    git('update-ref', 'HEAD', head);
+    const result = spawnSync('bash', ['-e', '-c', ancestry.run], {
+      cwd, encoding: 'utf8', env: { ...process.env, TEST_ONLY: String(testOnly), DEFAULT_BRANCH: 'main' },
+    });
+    assert.equal(result.status, expected, `${name}: ${result.stderr}`);
+  }
 });
 
 test('artifact uploads are explicit allowlists and private reports cannot be uploaded', () => {
