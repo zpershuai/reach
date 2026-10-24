@@ -1,8 +1,8 @@
-import { useEffect, useState } from "react";
+import { useEffect, useId, useState } from "react";
 import { api } from "./api";
 import type { SensitiveAction } from "./Devices";
 import type { Engine } from "./types";
-import { Modal } from "./ui";
+import { CopyButton, Modal } from "./ui";
 
 interface Permission {
   engineId: string;
@@ -50,6 +50,7 @@ export function AccessClients({
   sensitive: SensitiveAction;
   revision?: number;
 }) {
+  const suggestionsId = useId();
   const [clients, setClients] = useState<AccessClient[]>([]);
   const [error, setError] = useState("");
   const [edit, setEdit] = useState<Edit>();
@@ -130,7 +131,7 @@ export function AccessClients({
         remain self-reported. The configured Owner token has global access.
       </div>
       {error && (
-        <div role="alert">
+        <div className="notice err" role="alert">
           {error}
           <button className="btn" onClick={() => void load()}>
             Retry
@@ -310,28 +311,38 @@ export function AccessClients({
                         Workspace
                         <input
                           required
+                          list={`${suggestionsId}-${index}`}
                           value={permission.workspace}
                           onChange={(event) =>
                             update(index, { workspace: event.target.value })
                           }
                         />
                       </label>
-                      {(["read", "write", "execute"] as const).map(
-                        (operation) => (
-                          <label key={operation}>
-                            <input
-                              type="checkbox"
-                              checked={permission[operation]}
-                              onChange={(event) =>
-                                update(index, {
-                                  [operation]: event.target.checked,
-                                })
-                              }
-                            />
-                            {operation}
-                          </label>
-                        ),
-                      )}
+                      <datalist id={`${suggestionsId}-${index}`}>
+                        {engines
+                          .find((engine) => engine.id === permission.engineId)
+                          ?.session.workspaces?.map((workspace) => (
+                            <option key={workspace} value={workspace} />
+                          ))}
+                      </datalist>
+                      <div className="permission-operations">
+                        {(["read", "write", "execute"] as const).map(
+                          (operation) => (
+                            <label className="checkbox" key={operation}>
+                              <input
+                                type="checkbox"
+                                checked={permission[operation]}
+                                onChange={(event) =>
+                                  update(index, {
+                                    [operation]: event.target.checked,
+                                  })
+                                }
+                              />
+                              {operation}
+                            </label>
+                          ),
+                        )}
+                      </div>
                       <button
                         type="button"
                         className="btn small"
@@ -401,7 +412,7 @@ export function AccessClients({
         </Modal>
       )}
       {token && (
-        <Modal title="Save the client credential" onClose={() => setToken("")}>
+        <Modal title="Save the client credential">
           <div className="panel-body">
             <p>
               This credential is shown once. Store it privately; it cannot be
@@ -411,6 +422,7 @@ export function AccessClients({
               One-time client token
               <textarea readOnly value={token} />
             </label>
+            <CopyButton value={token} label="Copy token" />
             <button className="btn primary" onClick={() => setToken("")}>
               I saved the credential
             </button>

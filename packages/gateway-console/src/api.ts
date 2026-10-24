@@ -25,16 +25,26 @@ export async function api<T = Record<string, unknown>>(
     },
     ...(body === undefined ? {} : { body: JSON.stringify(body) }),
   });
-  const data = await response.json();
+  const text = await response.text();
+  let data: Record<string, unknown> = {};
+  if (text && response.headers.get("content-type")?.includes("json")) {
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Proxies can mislabel their error pages as JSON.
+    }
+  }
   if (!response.ok) {
     if (response.status === 401 && !["login", "reauth"].includes(path))
       window.dispatchEvent(new Event("reach:unauthorized"));
     throw new ApiError(
-      data.error ?? "Request failed",
+      typeof data.error === "string"
+        ? data.error
+        : `Gateway returned HTTP ${response.status} ${response.statusText}`.trim(),
       response.status,
-      data.code,
+      typeof data.code === "string" ? data.code : undefined,
     );
   }
-  if (data.csrfToken) setCsrf(data.csrfToken);
+  if (typeof data.csrfToken === "string") setCsrf(data.csrfToken);
   return data as T;
 }

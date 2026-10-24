@@ -184,3 +184,49 @@ it("preserves the pending action through recent-auth and reveals no credential o
     "after-reauth-fixture-token",
   );
 });
+
+it("suggests workspaces from the selected Engine and submits unreported workspace names", async () => {
+  const second = {
+    ...engine,
+    id: "engine-b",
+    session: { ...engine.session, workspaces: ["media"] },
+  };
+  vi.mocked(api).mockResolvedValue({ clients: [client] });
+  const user = userEvent.setup();
+  render(<AccessClients engines={[engine, second]} sensitive={sensitive} />);
+  await user.click(
+    await screen.findByRole("button", { name: "Edit permissions" }),
+  );
+  const input = screen.getByLabelText("Workspace");
+  const suggestions = () =>
+    [
+      ...document
+        .getElementById(input.getAttribute("list")!)!
+        .querySelectorAll("option"),
+    ].map((option) => option.value);
+  expect(suggestions()).toEqual(["default", "scripts"]);
+  await user.selectOptions(screen.getByLabelText("Engine"), "engine-b");
+  expect(suggestions()).toEqual(["media"]);
+  await user.clear(input);
+  await user.type(input, "backup");
+  await user.click(screen.getByRole("button", { name: "Confirm change" }));
+  expect(api).toHaveBeenCalledWith(
+    "access-clients/client%3Afixture/policy",
+    {
+      permissions: [
+        { ...client.permissions[0], engineId: "engine-b", workspace: "backup" },
+      ],
+    },
+    "PATCH",
+  );
+});
+it("shows a styled load error and retries the permissions list", async () => {
+  vi.mocked(api)
+    .mockRejectedValueOnce(new Error("offline"))
+    .mockResolvedValue({ clients: [client] });
+  render(<AccessClients engines={[engine]} sensitive={sensitive} />);
+  expect(await screen.findByRole("alert")).toHaveClass("notice", "err");
+  await userEvent.setup().click(screen.getByText("Retry"));
+  expect(await screen.findByText("Daily client")).toBeVisible();
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});

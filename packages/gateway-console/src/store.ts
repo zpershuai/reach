@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from "react";
 import { api } from "./api";
+import { syncServerClock } from "./clock";
 import type { Activity, Client, LiveEvent, Snapshot } from "./types";
 
 export interface ConsoleState {
@@ -77,8 +78,7 @@ export function reduceEvent(
         ...engine,
         // An Engine holding a session socket does not heartbeat.
         online:
-          engine.online ||
-          ["ready", "connecting"].includes(event.status ?? ""),
+          engine.online || ["ready", "connecting"].includes(event.status ?? ""),
         session: {
           ...engine.session,
           status: event.status ?? "none",
@@ -128,12 +128,53 @@ export function reduceEvent(
   };
 }
 
+const STABLE_STREAM_MS = 10_000;
+
 export class ConsoleStore {
   private state: ConsoleState = initialState;
   private readonly listeners = new Set<() => void>();
   private abort: AbortController | undefined;
   private reconnect: ReturnType<typeof setTimeout> | undefined;
   private refreshTimer: ReturnType<typeof setInterval> | undefined;
+  private queue: LiveEvent[] = [];
+  private frame: number | undefined;
+  private batchTimer: ReturnType<typeof setTimeout> | undefined;
+  private generation = 0;
+  private failures = 0;
+  private hasConnected = false;
+  private refreshSeq = 0;
+  private appliedSeq = 0;
+  private resetPending = false;
+  private cancelBatch(): void {
+    if (this.frame !== undefined) cancelAnimationFrame(this.frame);
+    if (this.batchTimer !== undefined) clearTimeout(this.batchTimer);
+    this.frame = undefined;
+    this.batchTimer = undefined;
+  }
+  private flush = (): void => {
+    this.cancelBatch();
+    const events = this.queue;
+    this.queue = [];
+    const next = events.reduce(reduceEvent, this.state);
+    if (next !== this.state) this.set(next);
+  };
+  private schedule(): void {
+    if (
+      !this.queue.length ||
+      this.frame !== undefined ||
+      this.batchTimer !== undefined
+    )
+      return;
+    if (document.visibilityState === "hidden")
+      this.batchTimer = setTimeout(this.flush, 250);
+    else this.frame = requestAnimationFrame(this.flush);
+  }
+  private visibility = (): void => {
+    this.cancelBatch();
+    this.schedule();
+    if (document.visibilityState === "visible")
+      void this.refresh().catch(() => {});
+  };
   subscribe = (listener: () => void): (() => void) => {
     this.listeners.add(listener);
     return () => {
@@ -146,49 +187,83 @@ export class ConsoleStore {
     this.listeners.forEach((listener) => listener());
   }
   receive(event: LiveEvent): void {
-    this.set(reduceEvent(this.state, event));
+    this.queue.push(event);
+    this.schedule();
   }
-  async refresh(): Promise<void> {
+  async refresh(resetEpoch = false): Promise<void> {
+    this.flush();
+    const generation = this.generation;
+    const seq = ++this.refreshSeq;
+    if (resetEpoch) this.resetPending = true;
     const snapshot = await api<Snapshot>("snapshot");
+    // A snapshot requested earlier must not replace one requested later.
+    if (generation !== this.generation || seq < this.appliedSeq) return;
+    this.appliedSeq = seq;
+    syncServerClock(snapshot.ts);
+    this.flush();
     let next: ConsoleState = {
       snapshot,
       lastEventId: snapshot.eventId,
       recent: [],
       connected: this.state.connected,
     };
-    for (const event of this.state.recent)
+    // Events from before a Gateway restart belong to the previous id epoch.
+    const replay = this.resetPending ? [] : this.state.recent;
+    this.resetPending = false;
+    for (const event of replay)
       if (event.id > snapshot.eventId) next = reduceEvent(next, event);
     this.set(next);
   }
   async start(): Promise<void> {
     this.stop();
+    this.failures = 0;
+    this.hasConnected = false;
+    const generation = this.generation;
     await this.refresh();
+    if (generation !== this.generation) return;
+    document.addEventListener("visibilitychange", this.visibility);
     this.abort = new AbortController();
     void this.stream(this.abort.signal);
     this.refreshTimer = setInterval(() => {
-      void this.refresh().catch(() => {});
+      if (document.visibilityState === "visible")
+        void this.refresh().catch(() => {});
     }, 15_000);
   }
   private async stream(signal: AbortSignal): Promise<void> {
+    if (signal.aborted) return;
+    let openedAt: number | undefined;
     try {
       const response = await fetch("/api/console/events", {
         credentials: "same-origin",
         headers: { "last-event-id": String(this.state.lastEventId) },
         signal,
       });
+      if (signal.aborted) return;
       if (response.status === 401) {
         window.dispatchEvent(new Event("reach:unauthorized"));
         return;
       }
       if (!response.ok || !response.body)
         throw new Error("Live stream unavailable");
+      const reconnecting = this.hasConnected || this.failures > 0;
+      openedAt = Date.now();
+      if (reconnecting) {
+        // The new stream may belong to a restarted Gateway with a new event-id epoch.
+        try {
+          await this.refresh(true);
+        } catch {
+          /* Retry on the next periodic refresh. */
+        }
+        if (signal.aborted) return;
+      }
+      this.hasConnected = true;
       this.set({ ...this.state, connected: true });
       const reader = response.body.getReader();
       const decoder = new TextDecoder();
       let pending = "";
       while (!signal.aborted) {
         const chunk = await reader.read();
-        if (chunk.done) break;
+        if (signal.aborted || chunk.done) break;
         pending += decoder.decode(chunk.value, { stream: true });
         let end: number;
         while ((end = pending.indexOf("\n\n")) >= 0) {
@@ -206,30 +281,27 @@ export class ConsoleStore {
       /* Reconnect below; the snapshot remains visible. */
     }
     if (!signal.aborted) {
+      // Only a stream that stayed up resets the backoff; one that opens and
+      // closes at once (as some proxies do) keeps backing off.
+      if (openedAt !== undefined && Date.now() - openedAt >= STABLE_STREAM_MS)
+        this.failures = 0;
+      this.flush();
       this.set({ ...this.state, connected: false });
-      this.reconnect = setTimeout(() => {
-        void this.recover(signal);
-      }, 1000);
+      this.reconnect = setTimeout(
+        () => {
+          void this.stream(signal);
+        },
+        Math.random() *
+          Math.min(30_000, 1000 * 2 ** Math.min(this.failures++, 5)),
+      );
     }
-  }
-  private async recover(signal: AbortSignal): Promise<void> {
-    if (signal.aborted) return;
-    try {
-      const snapshot = await api<Snapshot>("snapshot");
-      // Gateway event ids restart with the process; a new snapshot establishes its epoch.
-      if (snapshot.eventId < this.state.lastEventId)
-        this.set({
-          snapshot,
-          lastEventId: snapshot.eventId,
-          recent: [],
-          connected: false,
-        });
-    } catch {
-      /* Replay still works if the snapshot request fails transiently. */
-    }
-    if (!signal.aborted) void this.stream(signal);
   }
   stop(): void {
+    this.generation++;
+    this.resetPending = false;
+    this.cancelBatch();
+    this.queue = [];
+    document.removeEventListener("visibilitychange", this.visibility);
     this.abort?.abort();
     if (this.reconnect) clearTimeout(this.reconnect);
     if (this.refreshTimer) clearInterval(this.refreshTimer);

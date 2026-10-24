@@ -11,6 +11,7 @@ import { consoleStore } from "./store";
 import { engine, snapshot } from "./test-fixture";
 vi.mock("./api", () => ({ api: vi.fn() }));
 beforeEach(() => {
+  history.replaceState(null, "", "/console/activity");
   vi.spyOn(consoleStore, "refresh").mockResolvedValue();
 });
 const sensitive = async (operation: () => Promise<void>) => operation();
@@ -120,7 +121,8 @@ it.each([["scripts"], [], undefined])(
           ...engine,
           session: { ...engine.session, processWorkspaces },
         }}
-        snapshot={snapshot()}
+        activity={[]}
+        heartbeatInterval={5}
         sensitive={sensitive}
         onClose={() => {}}
       />,
@@ -134,18 +136,26 @@ it.each([["scripts"], [], undefined])(
   },
 );
 
-it("glyph tint follows live status and offline overrides readiness", () => {
+it("glyph tint follows heartbeat freshness and preserves open-session readiness", () => {
   const view = render(<DeviceGlyph engine={engine} />);
   const glyph = () => view.container.querySelector(".dev-icon")!;
   expect(glyph()).toHaveClass("s-ready");
   expect(glyph().querySelector(".ind")).toBeInTheDocument();
   view.rerender(
     <DeviceGlyph
-      engine={{ ...engine, session: { ...engine.session, status: "pending" } }}
+      engine={{
+        ...engine,
+        lastSeenAt: Date.now(),
+        session: { ...engine.session, status: "pending" },
+      }}
     />,
   );
   expect(glyph()).toHaveClass("s-connecting");
-  view.rerender(<DeviceGlyph engine={{ ...engine, online: false }} />);
+  view.rerender(
+    <DeviceGlyph
+      engine={{ ...engine, online: false, session: { status: "none" } }}
+    />,
+  );
   expect(glyph()).toHaveClass("s-offline");
   expect(screen.getByRole("img")).toHaveAccessibleName("mac-mini, offline");
 });
@@ -172,17 +182,13 @@ it("Clients disconnect through the label route after an explicit action", async 
   expect(api).toHaveBeenCalledWith("clients/Test%20client%201/disconnect", {});
 });
 
-it("Settings saves retention, theme and heartbeat preference", async () => {
+it("Settings saves theme immediately with only the theme field", async () => {
   vi.mocked(api).mockResolvedValue({});
   const user = userEvent.setup();
   render(<SettingsView snapshot={snapshot()} sensitive={sensitive} />);
   await user.selectOptions(screen.getByLabelText("Theme"), "dark");
   await user.click(screen.getByRole("button", { name: "Save settings" }));
-  expect(api).toHaveBeenCalledWith(
-    "settings",
-    { retentionDays: 30, theme: "dark", heartbeatDisplay: true },
-    "PATCH",
-  );
+  expect(api).toHaveBeenCalledWith("settings", { theme: "dark" }, "PATCH");
   expect(await screen.findByRole("status")).toHaveTextContent("Settings saved");
 });
 
@@ -215,7 +221,9 @@ it("all platform commands carry the configured origin and private Engine configu
     expect(command).toContain("umask 077");
     if (platform === "Docker") {
       expect(command).toContain("set -a\n. ./engine.env\nset +a");
-      expect(command).toContain("-e REACH_GATEWAY_URL -e REACH_ENGINE_ID -e REACH_ENGINE_TOKEN");
+      expect(command).toContain(
+        "-e REACH_GATEWAY_URL -e REACH_ENGINE_ID -e REACH_ENGINE_TOKEN",
+      );
       expect(command).not.toContain("--env-file");
     }
   }
@@ -261,7 +269,9 @@ it("draws a distinct silhouette with a status LED for every device kind", () => 
   const drawings = new Set<string>();
   for (const kind of glyphKinds) {
     const view = render(
-      <DeviceGlyph engine={{ ...engine, hardware: { ...engine.hardware!, kind } }} />,
+      <DeviceGlyph
+        engine={{ ...engine, hardware: { ...engine.hardware!, kind } }}
+      />,
     );
     const svg = view.container.querySelector("svg")!;
     expect(svg.querySelectorAll(".ind")).toHaveLength(1);
@@ -269,4 +279,53 @@ it("draws a distinct silhouette with a status LED for every device kind", () => 
     view.unmount();
   }
   expect(drawings.size).toBe(glyphKinds.length);
+});
+
+it("prepends new live activity and keeps paginated rows without duplicates", async () => {
+  const first = {
+    id: 2,
+    ts: 2000,
+    type: "rpc.finished" as const,
+    requestId: "page-first",
+    method: "first",
+  };
+  const older = {
+    ...first,
+    id: 1,
+    ts: 1000,
+    requestId: "page-older",
+    method: "older",
+  };
+  const newest = {
+    ...first,
+    id: 3,
+    ts: 3000,
+    requestId: "live",
+    method: "newest",
+  };
+  vi.mocked(api)
+    .mockResolvedValueOnce({ rows: [first], cursor: "next" })
+    .mockResolvedValueOnce({ rows: [older], cursor: null });
+  const data = snapshot();
+  data.activity = [];
+  const view = render(<ActivityView snapshot={data} />);
+  await screen.findByText("first");
+  await userEvent
+    .setup()
+    .click(screen.getByRole("button", { name: "Load more" }));
+  const oldNode = await screen.findByText("older");
+  view.rerender(
+    <ActivityView snapshot={{ ...data, activity: [newest, first] }} />,
+  );
+  expect(
+    screen
+      .getAllByRole("row")
+      .slice(1)
+      .map((row) => row.textContent),
+  ).toEqual([
+    expect.stringContaining("newest"),
+    expect.stringContaining("first"),
+    expect.stringContaining("older"),
+  ]);
+  expect(screen.getByText("older")).toBe(oldNode);
 });

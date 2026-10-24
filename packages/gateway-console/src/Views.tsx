@@ -1,4 +1,5 @@
-import { useEffect, useState, type FormEvent } from "react";
+import { useNow } from "./clock";
+import { memo, useEffect, useMemo, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { ActivityTable } from "./Activity";
 import { DeviceGlyph } from "./Glyph";
@@ -8,11 +9,17 @@ import type { Snapshot } from "./types";
 import { ClientAvatar, EngineStatus, Modal, formatAgo, modelText } from "./ui";
 import { AccessClients } from "./AccessClients";
 
-export function Kpis({ snapshot }: { snapshot: Snapshot }) {
-  const { kpis } = snapshot;
-  const inSession = snapshot.engines.filter(
-    (engine) => engine.online && engine.session.status === "ready",
-  ).length;
+export function inSession(engines: Snapshot["engines"]): number {
+  return engines.filter((engine) => engine.session.status === "ready").length;
+}
+
+export const Kpis = memo(function Kpis({
+  kpis,
+  inSession,
+}: {
+  kpis: Snapshot["kpis"];
+  inSession: number;
+}) {
   return (
     <section className="kpis" aria-label="Key metrics">
       <div className="kpi">
@@ -44,12 +51,16 @@ export function Kpis({ snapshot }: { snapshot: Snapshot }) {
       </div>
     </section>
   );
-}
+});
 
 export function Overview({ snapshot }: { snapshot: Snapshot }) {
+  const recent = useMemo(
+    () => snapshot.activity.slice(0, 8),
+    [snapshot.activity],
+  );
   return (
     <>
-      <Kpis snapshot={snapshot} />
+      <Kpis kpis={snapshot.kpis} inSession={inSession(snapshot.engines)} />
       {snapshot.gateway.warnings.map((warning) => (
         <div className="notice warn" key={warning} role="status">
           {warning}
@@ -65,12 +76,18 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
           </div>
           {snapshot.engines.map((engine) => (
             <div className="device-row" key={engine.id}>
-              <DeviceGlyph engine={engine} />
+              <DeviceGlyph
+                heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                engine={engine}
+              />
               <div>
                 <strong>{engine.displayName}</strong>
                 <small>{modelText(engine)}</small>
               </div>
-              <EngineStatus engine={engine} />
+              <EngineStatus
+                heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                engine={engine}
+              />
             </div>
           ))}
           {!snapshot.engines.length && (
@@ -114,7 +131,7 @@ export function Overview({ snapshot }: { snapshot: Snapshot }) {
         <div className="panel-head">
           <h2>Recent activity</h2>
         </div>
-        <ActivityTable rows={snapshot.activity.slice(0, 8)} />
+        <ActivityTable rows={recent} />
       </section>
     </>
   );
@@ -127,6 +144,7 @@ export function ClientsView({
   snapshot: Snapshot;
   sensitive: SensitiveAction;
 }) {
+  const now = useNow();
   const [confirm, setConfirm] = useState("");
   return (
     <>
@@ -169,7 +187,7 @@ export function ClientsView({
                   <td className="mono">
                     {client.ownedEngines.join(", ") || "—"}
                   </td>
-                  <td>{formatAgo(client.lastSeenAt)}</td>
+                  <td>{formatAgo(client.lastSeenAt, now)}</td>
                   <td className="num">{client.calls24h}</td>
                   <td className="num">{client.errors24h}</td>
                   <td>
@@ -196,7 +214,17 @@ export function ClientsView({
           They attribute activity; they do not prove identity or grant access.
         </div>
       </section>
-      <AccessClients engines={snapshot.engines} sensitive={sensitive} revision={snapshot.activity.find(row => row.action?.startsWith("client.") || row.action?.startsWith("oauth."))?.id ?? 0} />
+      <AccessClients
+        engines={snapshot.engines}
+        sensitive={sensitive}
+        revision={
+          snapshot.activity.find(
+            (row) =>
+              row.action?.startsWith("client.") ||
+              row.action?.startsWith("oauth."),
+          )?.id ?? 0
+        }
+      />
       <AuthorizedApps
         sensitive={sensitive}
         revision={
@@ -205,7 +233,7 @@ export function ClientsView({
         }
       />
       {confirm && (
-        <Modal title={`Disconnect ${confirm}?`}>
+        <Modal title={`Disconnect ${confirm}?`} onCancel={() => setConfirm("")}>
           <p>
             Its MCP sessions end now. Device sessions it opened finish their
             current requests and close.
@@ -253,6 +281,7 @@ function AuthorizedApps({
   /** Id of the latest oauth.* admin action; approvals in other tabs reload the list. */
   revision: number;
 }) {
+  const now = useNow();
   const [apps, setApps] = useState<OAuthApp[] | undefined>();
   const [confirm, setConfirm] = useState<OAuthApp | undefined>();
   const load = () =>
@@ -289,8 +318,8 @@ function AuthorizedApps({
                 <td className="mono">
                   {app.redirectUris.map((uri) => new URL(uri).host).join(", ")}
                 </td>
-                <td>{formatAgo(app.approvedAt)}</td>
-                <td>{app.lastUsedAt ? formatAgo(app.lastUsedAt) : "—"}</td>
+                <td>{formatAgo(app.approvedAt, now)}</td>
+                <td>{app.lastUsedAt ? formatAgo(app.lastUsedAt, now) : "—"}</td>
                 <td className="num">{app.activeTokens}</td>
                 <td>
                   <button className="btn small" onClick={() => setConfirm(app)}>
@@ -311,7 +340,10 @@ function AuthorizedApps({
         code.
       </div>
       {confirm && (
-        <Modal title={`Revoke ${confirm.name}?`}>
+        <Modal
+          title={`Revoke ${confirm.name}?`}
+          onCancel={() => setConfirm(undefined)}
+        >
           <p>
             Its tokens stop working at once. It must be approved again before it
             can reconnect.
@@ -356,24 +388,69 @@ export function SettingsView({
     snapshot.settings.heartbeatDisplay,
   );
   const [saved, setSaved] = useState(false);
+  const [error, setError] = useState("");
+  const [themeBusy, setThemeBusy] = useState(false);
+  async function changeTheme(value: typeof theme): Promise<void> {
+    const previous = theme;
+    setTheme(value);
+    document.documentElement.dataset.theme = value;
+    setThemeBusy(true);
+    setError("");
+    setSaved(false);
+    try {
+      await api("settings", { theme: value }, "PATCH");
+    } catch (error) {
+      setTheme(previous);
+      document.documentElement.dataset.theme = previous;
+      setError(
+        error instanceof Error ? error.message : "Theme could not be saved",
+      );
+      return;
+    } finally {
+      setThemeBusy(false);
+    }
+    try {
+      await consoleStore.refresh();
+    } catch (error) {
+      setError(error instanceof Error ? error.message : "Settings unavailable");
+    }
+  }
   async function submit(event: FormEvent): Promise<void> {
     event.preventDefault();
     setSaved(false);
-    await sensitive(async () => {
-      await api(
-        "settings",
-        { retentionDays: days, theme, heartbeatDisplay: heartbeats },
-        "PATCH",
-      );
+    setError("");
+    const patch: Partial<Snapshot["settings"]> = {};
+    if (days !== snapshot.settings.retentionDays) patch.retentionDays = days;
+    if (heartbeats !== snapshot.settings.heartbeatDisplay)
+      patch.heartbeatDisplay = heartbeats;
+    const save = async () => {
+      if (Object.keys(patch).length) await api("settings", patch, "PATCH");
       await consoleStore.refresh();
       setSaved(true);
-    });
+    };
+    if (patch.retentionDays !== undefined) await sensitive(save);
+    else {
+      try {
+        await save();
+      } catch (error) {
+        setError(
+          error instanceof Error
+            ? error.message
+            : "Settings could not be saved",
+        );
+      }
+    }
   }
   return (
     <section className="panel" style={{ maxWidth: 640 }}>
       <div className="panel-head">
         <h2>Settings</h2>
       </div>
+      {error && (
+        <div className="notice err" role="alert">
+          {error}
+        </div>
+      )}
       <form className="panel-body" onSubmit={(event) => void submit(event)}>
         <label>
           Keep activity for (days)
@@ -394,7 +471,10 @@ export function SettingsView({
           Theme
           <select
             value={theme}
-            onChange={(event) => setTheme(event.target.value as typeof theme)}
+            disabled={themeBusy}
+            onChange={(event) =>
+              void changeTheme(event.target.value as typeof theme)
+            }
           >
             <option value="system">System</option>
             <option value="light">Light</option>

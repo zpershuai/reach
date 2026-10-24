@@ -1,3 +1,5 @@
+import { useNow } from "./clock";
+import { displayOnline } from "./online";
 import type { ReactNode } from "react";
 import type { Engine } from "./types";
 
@@ -26,11 +28,13 @@ export function executionState(
   return processWorkspaces.includes(workspace) ? "enabled" : "disabled";
 }
 
-/** Session state the glyph tints by; offline wins over any session status. */
+/** Use the same heartbeat and open-session rule as the Gateway. */
 export function glyphState(
-  engine: Pick<Engine, "online" | "session">,
+  engine: Pick<Engine, "lastSeenAt" | "session">,
+  now: number,
+  heartbeatInterval: number,
 ): "ready" | "connecting" | "idle" | "offline" {
-  if (!engine.online) return "offline";
+  if (!displayOnline(engine, now, heartbeatInterval)) return "offline";
   if (engine.session.status === "ready") return "ready";
   if (["wanted", "pending", "connecting"].includes(engine.session.status))
     return "connecting";
@@ -173,17 +177,19 @@ const glyphs: Record<string, ReactNode> = {
 export function DeviceGlyph({
   engine,
   large = false,
+  heartbeatInterval = 15,
 }: {
   engine: Engine;
   large?: boolean;
+  heartbeatInterval?: number;
 }) {
   const kind = glyphKind(engine);
-  const state = glyphState(engine);
+  const state = glyphState(engine, useNow(), heartbeatInterval);
   return (
     <span
       className={`dev-icon s-${state}${large ? " lg" : ""}`}
       role="img"
-      aria-label={`${kind}, ${engine.online ? engine.session.status : "offline"}`}
+      aria-label={`${kind}, ${state === "offline" ? "offline" : engine.session.status}`}
     >
       <svg viewBox="0 0 32 32" aria-hidden="true">
         {glyphs[kind]}

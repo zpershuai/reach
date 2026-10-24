@@ -1,7 +1,22 @@
 import "@testing-library/jest-dom/vitest";
 import { cleanup } from "@testing-library/react";
 import { afterEach, vi } from "vitest";
-afterEach(cleanup);
+import { resetServerClock } from "./clock";
+import { resetOverlayStack } from "./ui";
+afterEach(() => {
+  cleanup();
+  resetOverlayStack();
+  resetServerClock();
+});
+// Node 25+ defines its own Web Storage globals, which are undefined without
+// --localstorage-file and shadow jsdom's. Use jsdom's storage instead.
+const dom = (globalThis as { jsdom?: { window: Window } }).jsdom;
+for (const name of ["localStorage", "sessionStorage"] as const)
+  if (dom)
+    Object.defineProperty(globalThis, name, {
+      configurable: true,
+      value: dom.window[name],
+    });
 Object.defineProperty(window, "matchMedia", {
   value: vi.fn(() => ({
     matches: false,

@@ -59,3 +59,55 @@ it("highlights each received event once, clears reduced-motion feedback, and ope
     "true",
   );
 });
+
+it("stops scheduling Canvas frames when idle and wakes for received RPC events", () => {
+  const callbacks = new Map<number, FrameRequestCallback>();
+  let id = 0;
+  const raf = vi.fn((callback: FrameRequestCallback) => {
+    callbacks.set(++id, callback);
+    return id;
+  });
+  vi.stubGlobal("requestAnimationFrame", raf);
+  vi.stubGlobal("cancelAnimationFrame", (id: number) => callbacks.delete(id));
+  const context = new Proxy({}, { get: () => vi.fn(), set: () => true });
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
+    context as CanvasRenderingContext2D,
+  );
+  vi.mocked(window.matchMedia).mockReturnValue({
+    matches: false,
+  } as MediaQueryList);
+  const props = {
+    snapshot: snapshot(),
+    sensitive: async (action: () => Promise<void>) => action(),
+  };
+  const view = render(<TopologyView {...props} events={[]} />);
+  const frame = (time: number) => {
+    const pending = [...callbacks.values()];
+    callbacks.clear();
+    act(() => pending.forEach((cb) => cb(time)));
+  };
+  frame(0);
+  expect(callbacks.size).toBe(0);
+  const calls = raf.mock.calls.length;
+  view.rerender(
+    <TopologyView
+      {...props}
+      events={[
+        {
+          id: 1,
+          ts: 1,
+          type: "rpc.finished",
+          engineId: "engine-a",
+          requestId: "a",
+          outcome: "ok",
+          caller: { type: "mcp-http", label: "Test client 1", verified: false },
+        },
+      ]}
+    />,
+  );
+  expect(raf.mock.calls.length).toBeGreaterThan(calls);
+  frame(performance.now());
+  expect(callbacks.size).toBe(1);
+  frame(performance.now() + 4000);
+  expect(callbacks.size).toBe(0);
+});

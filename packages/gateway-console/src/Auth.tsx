@@ -205,7 +205,7 @@ export function ReauthDialog({
     }
   }
   return (
-    <Modal title="Confirm it’s you">
+    <Modal title="Confirm it’s you" onCancel={onCancel}>
       <p className="muted">
         Enter your password to continue. The confirmation lasts ten minutes.
       </p>
@@ -218,7 +218,6 @@ export function ReauthDialog({
             value={password}
             onChange={(event) => setPassword(event.target.value)}
             required
-            autoFocus
           />
         </label>
         {error && (

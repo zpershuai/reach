@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { navigate, useSearch } from "./router";
+import { memo, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "./api";
 import type { Activity, Snapshot } from "./types";
-import { MethodSwatch, formatBytes, formatTime } from "./ui";
+import { activityKey, MethodSwatch, formatBytes, formatTime } from "./ui";
 
 function resultText(row: Activity): string {
   const type = row.type ?? row.eventType;
@@ -13,7 +14,7 @@ function resultText(row: Activity): string {
   return type?.replace(/^\w+\./, "") ?? "Event";
 }
 
-export function ActivityTable({
+export const ActivityTable = memo(function ActivityTable({
   rows,
   tall = false,
 }: {
@@ -36,13 +37,13 @@ export function ActivityTable({
           </tr>
         </thead>
         <tbody>
-          {rows.map((row, index) => {
+          {rows.map((row) => {
             const target =
               [row.workspace, row.path ?? row.script ?? row.processId]
                 .filter(Boolean)
                 .join(" / ") || "—";
             return (
-              <tr key={`${row.type ?? row.eventType}-${row.id}-${index}`}>
+              <tr key={activityKey(row)}>
                 <td className="mono">{formatTime(row.ts)}</td>
                 <td>{row.clientLabel ?? row.caller?.label ?? "Gateway"}</td>
                 <td className="mono">{row.engineId ?? "—"}</td>
@@ -82,10 +83,14 @@ export function ActivityTable({
       )}
     </div>
   );
-}
+});
 
 export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
-  const [filters, setFilters] = useState<Record<string, string>>({});
+  const search = useSearch();
+  const filters = useMemo(
+    () => Object.fromEntries(new URLSearchParams(search)),
+    [search],
+  );
   const [rows, setRows] = useState(snapshot.activity);
   const [cursor, setCursor] = useState<string | null>(null);
   const [error, setError] = useState("");
@@ -102,9 +107,16 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
         `activity?${params}`,
       );
       if (requestGeneration !== generation.current) return;
-      setRows((previous) =>
-        more ? [...previous, ...result.rows] : result.rows,
-      );
+      setRows((previous) => {
+        if (more) return [...previous, ...result.rows];
+        // Keep live records that arrived while this page was loading.
+        const keys = new Set(result.rows.map(activityKey));
+        const newest = result.rows[0]?.ts ?? -Infinity;
+        const live = previous.filter(
+          (row) => row.ts >= newest && !keys.has(activityKey(row)),
+        );
+        return [...live, ...result.rows];
+      });
       setCursor(result.cursor);
       setError("");
     } catch (error) {
@@ -116,31 +128,36 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
   }
   useEffect(() => {
     generation.current++;
+    setRows([]);
+    setCursor(null);
     void load();
     return () => {
       generation.current++;
     };
-  }, [JSON.stringify(filters)]);
+  }, [search]);
   useEffect(() => {
     const live = snapshot.activity.filter((row) =>
       matchesActivity(row, filters),
     );
     setRows((previous) => {
-      const merged = new Map<string, Activity>();
-      for (const row of [
-        ...live,
-        ...previous.filter((row) => matchesActivity(row, filters)),
-      ]) {
-        const key = row.requestId
-          ? `${row.engineId}:${row.requestId}:${row.type ?? row.eventType}`
-          : `${row.ts}:${row.type ?? row.eventType}:${row.method ?? row.action}:${row.clientLabel ?? row.caller?.label}`;
-        if (!merged.has(key)) merged.set(key, row);
-      }
-      return [...merged.values()].sort((a, b) => b.ts - a.ts);
+      const keys = new Set(previous.map(activityKey));
+      const newest = previous[0]?.ts ?? -Infinity;
+      const added = live.filter((row) => {
+        const key = activityKey(row);
+        if (row.ts < newest || keys.has(key)) return false;
+        keys.add(key);
+        return true;
+      });
+      return added.length ? [...added, ...previous] : previous;
     });
-  }, [snapshot.activity, JSON.stringify(filters)]);
+  }, [snapshot.activity]);
   function select(key: string, value: string): void {
-    setFilters((previous) => ({ ...previous, [key]: value }));
+    const params = new URLSearchParams(search);
+    if (value) params.set(key, value);
+    else params.delete(key);
+    navigate(`activity${params.size ? `?${params}` : ""}`, {
+      replace: key === "from" || key === "to",
+    });
   }
   return (
     <section className="panel">
@@ -166,6 +183,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           Device
           <select
             aria-label="Filter device"
+            value={filters.engineId ?? ""}
             onChange={(event) => select("engineId", event.target.value)}
           >
             <option value="">All devices</option>
@@ -180,6 +198,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           Client
           <select
             aria-label="Filter client"
+            value={filters.clientLabel ?? ""}
             onChange={(event) => select("clientLabel", event.target.value)}
           >
             <option value="">All clients</option>
@@ -193,6 +212,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
         <label>
           Class
           <select
+            value={filters.methodClass ?? ""}
             onChange={(event) => select("methodClass", event.target.value)}
           >
             <option value="">All classes</option>
@@ -203,7 +223,10 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
         </label>
         <label>
           Result
-          <select onChange={(event) => select("outcome", event.target.value)}>
+          <select
+            value={filters.outcome ?? ""}
+            onChange={(event) => select("outcome", event.target.value)}
+          >
             <option value="">All results</option>
             <option value="ok">OK</option>
             <option value="error">Error</option>
@@ -215,6 +238,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           From
           <input
             type="datetime-local"
+            value={dateInput(filters.from)}
             onChange={(event) =>
               select(
                 "from",
@@ -229,6 +253,7 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
           To
           <input
             type="datetime-local"
+            value={dateInput(filters.to)}
             onChange={(event) =>
               select(
                 "to",
@@ -289,4 +314,12 @@ function matchesActivity(
     (filters.from && row.ts < Number(filters.from)) ||
     (filters.to && row.ts > Number(filters.to))
   );
+}
+
+function dateInput(value: string | undefined): string {
+  if (!value || !Number.isFinite(Number(value))) return "";
+  const date = new Date(Number(value));
+  if (!Number.isFinite(date.getTime())) return "";
+  date.setMinutes(date.getMinutes() - date.getTimezoneOffset());
+  return date.toISOString().slice(0, 16);
 }

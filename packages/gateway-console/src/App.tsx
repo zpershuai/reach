@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { ApiError, api } from "./api";
 import { AuthScreen, ReauthDialog } from "./Auth";
 import { ActivityView } from "./Activity";
@@ -57,7 +57,8 @@ export function App() {
     document.documentElement.dataset.theme =
       state.snapshot?.settings.theme ?? "system";
   }, [state.snapshot?.settings.theme]);
-  const sensitive: SensitiveAction = async (operation) => {
+  // Stable so memoized drawers do not re-render on every live event.
+  const sensitive = useCallback<SensitiveAction>(async (operation) => {
     try {
       await operation();
     } catch (error) {
@@ -67,7 +68,7 @@ export function App() {
       } else
         setError(error instanceof Error ? error.message : "Request failed");
     }
-  };
+  }, []);
   if (!identity)
     return (
       <main className="loading">
@@ -133,11 +134,15 @@ export function App() {
         </ul>
         <div className="nav-foot">
           <button
-            className="btn primary"
+            className="btn primary add-device"
+            aria-label="Add device"
             disabled={!snapshot}
             onClick={() => setAdding(true)}
           >
-            Add device
+            <span className="add-device-label">Add device</span>
+            <span className="add-device-symbol" aria-hidden="true">
+              +
+            </span>
           </button>
           <div className="owner">
             <span>Administrator</span>
@@ -167,7 +172,9 @@ export function App() {
                 <span className="mono">
                   {snapshot.gateway.publicOrigin.replace(/^https?:\/\//, "")}
                 </span>
-                <span className="pill">Gateway v{snapshot.gateway.version}</span>
+                <span className="pill">
+                  Gateway v{snapshot.gateway.version}
+                </span>
                 <span className={`pill ${warnings ? "warn" : "ok"}`}>
                   <span className="dot" />
                   {warnings

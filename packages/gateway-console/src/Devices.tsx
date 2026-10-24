@@ -1,15 +1,16 @@
-import { useState, type FormEvent } from "react";
+import { useNow } from "./clock";
+import { memo, useCallback, useState, type FormEvent } from "react";
 import { api } from "./api";
 import { DeviceGlyph, executionState, glyphKinds } from "./Glyph";
 import { consoleStore } from "./store";
-import type { Engine, Snapshot } from "./types";
+import type { Activity, Engine, Snapshot } from "./types";
 import {
+  CopyButton,
   Drawer,
   EngineStatus,
-  MethodSwatch,
+  MiniLog,
   Modal,
   formatAgo,
-  formatTime,
   modelText,
   platformText,
 } from "./ui";
@@ -38,17 +39,20 @@ export function installCommand(
   }
 }
 
-export function DeviceDrawer({
+export const DeviceDrawer = memo(function DeviceDrawer({
   engine,
-  snapshot,
+  activity,
+  heartbeatInterval,
   onClose,
   sensitive,
 }: {
   engine: Engine;
-  snapshot: Snapshot;
+  activity: Activity[];
+  heartbeatInterval: number;
   onClose: () => void;
   sensitive: SensitiveAction;
 }) {
+  const now = useNow();
   const [displayName, setName] = useState(engine.displayName);
   const [kind, setKind] = useState(engine.deviceOverride?.kind ?? "");
   const [model, setModel] = useState(engine.deviceOverride?.model ?? "");
@@ -72,7 +76,7 @@ export function DeviceDrawer({
       setError(error instanceof Error ? error.message : "Update failed");
     }
   }
-  const recent = snapshot.activity
+  const recent = activity
     .filter((row) => row.engineId === engine.id)
     .slice(0, 6);
   return (
@@ -80,9 +84,14 @@ export function DeviceDrawer({
       title={engine.displayName}
       label={`Device ${engine.displayName}`}
       onClose={onClose}
+      dismissible={!token}
     >
       <section className="dev-hero">
-        <DeviceGlyph engine={engine} large />
+        <DeviceGlyph
+          heartbeatInterval={heartbeatInterval}
+          engine={engine}
+          large
+        />
         <div>
           <b>{modelText(engine)}</b>
           <div className="muted">{platformText(engine)}</div>
@@ -95,7 +104,10 @@ export function DeviceDrawer({
         <dl className="kv">
           <dt>Status</dt>
           <dd>
-            <EngineStatus engine={engine} />
+            <EngineStatus
+              heartbeatInterval={heartbeatInterval}
+              engine={engine}
+            />
           </dd>
           <dt>Device ID</dt>
           <dd className="mono">{engine.id}</dd>
@@ -106,7 +118,7 @@ export function DeviceDrawer({
           <dt>Last heartbeat</dt>
           <dd>
             {engine.lastSeenAt
-              ? formatAgo(engine.lastSeenAt)
+              ? formatAgo(engine.lastSeenAt, now)
               : "Awaiting first heartbeat"}
           </dd>
           <dt>Session owner</dt>
@@ -129,7 +141,9 @@ export function DeviceDrawer({
               return (
                 <li key={workspace}>
                   <code>{workspace}</code>
-                  <span className={`pill ${state === "enabled" ? "accent" : ""}`}>
+                  <span
+                    className={`pill ${state === "enabled" ? "accent" : ""}`}
+                  >
                     Execution {state}
                   </span>
                 </li>
@@ -151,21 +165,7 @@ export function DeviceDrawer({
       </section>
       <section>
         <h4>Recent operations</h4>
-        {recent.length ? (
-          <div className="mini-log">
-            {recent.map((row, index) => (
-              <div key={`${row.id}-${index}`}>
-                <span className="method">
-                  <MethodSwatch methodClass={row.methodClass} />
-                  {row.method ?? row.action ?? row.eventType ?? row.type}
-                </span>
-                <span className="mono muted">{formatTime(row.ts)}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <div className="reserved">No operations recorded yet.</div>
-        )}
+        <MiniLog rows={recent} showEngine={false} />
       </section>
       <section>
         <h4>Display</h4>
@@ -218,6 +218,7 @@ export function DeviceDrawer({
             <div className="one-time">
               <strong>New Engine token · shown once</strong>
               <code>{token}</code>
+              <CopyButton value={token} label="Copy token" />
               <button className="btn small" onClick={() => setToken("")}>
                 I saved this token
               </button>
@@ -283,8 +284,8 @@ export function DeviceDrawer({
         </section>
       ) : (
         <div className="reserved">
-          This device is configured in the Gateway environment or engines
-          file. Change its token or remove it there.
+          This device is configured in the Gateway environment or engines file.
+          Change its token or remove it there.
         </div>
       )}
       {error && (
@@ -294,7 +295,7 @@ export function DeviceDrawer({
       )}
     </Drawer>
   );
-}
+});
 
 const platforms = ["Linux", "macOS", "OpenWrt", "Docker"];
 
@@ -314,7 +315,6 @@ export function AddDevice({
   const [token, setToken] = useState("");
   const [busy, setBusy] = useState(false);
   const [idEdited, setIdEdited] = useState(false);
-  const [copied, setCopied] = useState(false);
   const registered = snapshot.engines.find((engine) => engine.id === id);
   const command = token
     ? installCommand(platform, snapshot.gateway.publicOrigin, id, token)
@@ -338,6 +338,7 @@ export function AddDevice({
   return (
     <Modal
       title="Add device"
+      dismissible={!token}
       onClose={() => {
         setToken("");
         onClose();
@@ -367,7 +368,6 @@ export function AddDevice({
             <input
               value={name}
               maxLength={64}
-              autoFocus
               onChange={(event) => {
                 setName(event.target.value);
                 if (!idEdited)
@@ -442,18 +442,10 @@ export function AddDevice({
             Engine token
             <input readOnly value={token} aria-label="One-time Engine token" />
           </label>
+          <CopyButton value={token} label="Copy token" />
           <pre className="command">{command}</pre>
           <div className="actions">
-            <button
-              className="btn"
-              onClick={() =>
-                void navigator.clipboard
-                  ?.writeText(command)
-                  .then(() => setCopied(true))
-              }
-            >
-              {copied ? "Copied" : "Copy commands"}
-            </button>
+            <CopyButton value={command} label="Copy commands" />
             <button
               className="btn primary"
               onClick={() => {
@@ -470,7 +462,11 @@ export function AddDevice({
         <div className="waiting">
           {registered?.enrollmentStatus === "connected" ? (
             <>
-              <DeviceGlyph engine={registered} large />
+              <DeviceGlyph
+                heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                engine={registered}
+                large
+              />
               <h3>Device connected</h3>
               <p>{modelText(registered)}</p>
               <p className="muted">{platformText(registered)}</p>
@@ -483,8 +479,8 @@ export function AddDevice({
               <span className="spinner" aria-hidden="true" />
               <h3>Waiting for the first heartbeat</h3>
               <p className="muted">
-                You can close this window. The device stays in Devices until
-                its Engine connects.
+                You can close this window. The device stays in Devices until its
+                Engine connects.
               </p>
             </>
           )}
@@ -505,7 +501,9 @@ export function DevicesView({
   initialId?: string;
   onAdd: () => void;
 }) {
+  const now = useNow();
   const [selected, setSelected] = useState(initialId ?? "");
+  const closeDrawer = useCallback(() => setSelected(""), []);
   const device = snapshot.engines.find((engine) => engine.id === selected);
   return (
     <>
@@ -525,7 +523,10 @@ export function DevicesView({
                 onClick={() => setSelected(engine.id)}
               >
                 <div className="row">
-                  <DeviceGlyph engine={engine} />
+                  <DeviceGlyph
+                    heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                    engine={engine}
+                  />
                   <div className="eng-body">
                     <span className="name">{engine.displayName}</span>
                     <span className="meta">{modelText(engine)}</span>
@@ -538,9 +539,14 @@ export function DevicesView({
                   )}
                 </div>
                 <footer>
-                  <EngineStatus engine={engine} />
+                  <EngineStatus
+                    heartbeatInterval={snapshot.gateway.heartbeatInterval}
+                    engine={engine}
+                  />
                   <span>
-                    {engine.lastSeenAt ? formatAgo(engine.lastSeenAt) : "—"}
+                    {engine.lastSeenAt
+                      ? formatAgo(engine.lastSeenAt, now)
+                      : "—"}
                   </span>
                 </footer>
               </button>
@@ -556,8 +562,9 @@ export function DevicesView({
         <DeviceDrawer
           key={device.id}
           engine={device}
-          snapshot={snapshot}
-          onClose={() => setSelected("")}
+          activity={snapshot.activity}
+          heartbeatInterval={snapshot.gateway.heartbeatInterval}
+          onClose={closeDrawer}
           sensitive={sensitive}
         />
       )}
