@@ -96,10 +96,17 @@ export function App() {
         list.scrollLeft + list.clientWidth < list.scrollWidth - 1,
       );
     };
+    // Scroll only the tab row. scrollIntoView would also scroll the page, and
+    // mobile browsers fire resize while scrolling as the address bar moves.
     const revealCurrent = () => {
-      list
-        .querySelector<HTMLElement>('[aria-current="page"]')
-        ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+      const current = list.querySelector<HTMLElement>('[aria-current="page"]');
+      if (current) {
+        const box = list.getBoundingClientRect();
+        const item = current.getBoundingClientRect();
+        if (item.left < box.left) list.scrollLeft -= box.left - item.left;
+        else if (item.right > box.right)
+          list.scrollLeft += item.right - box.right;
+      }
       update();
     };
     revealCurrent();

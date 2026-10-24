@@ -3,7 +3,7 @@ import { useEffect, useId, useState } from "react";
 import { useNow } from "./clock";
 import { api, errorText } from "./api";
 import type { SensitiveAction } from "./Devices";
-import type { Engine } from "./types";
+import type { Activity, Engine } from "./types";
 import { CopyButton, Modal, formatAgo } from "./ui";
 
 const operationKeys = {
@@ -60,6 +60,17 @@ function credentialStatus(client: AccessClient): string {
       }).format(client.expiresAt),
     });
   return i18n.t("clients.oauthLifecycle");
+}
+
+// Access identities change only through client and OAuth admin actions, so the
+// newest such action id tells views when to reload them.
+export function accessRevision(activity: Activity[]): number {
+  return (
+    activity.find(
+      (row) =>
+        row.action?.startsWith("client.") || row.action?.startsWith("oauth."),
+    )?.id ?? 0
+  );
 }
 
 export function AccessClients({

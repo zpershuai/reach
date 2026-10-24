@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, type ReactNode } from "react";
 import { api } from "./api";
-import type { AccessClient } from "./AccessClients";
+import { accessRevision, type AccessClient } from "./AccessClients";
 import { useNow } from "./clock";
 import { useT } from "./i18n";
 import { displayOnline } from "./online";
+import { navigate } from "./router";
 import type { Engine, Snapshot } from "./types";
 import { formatAgo } from "./ui";
 
@@ -18,6 +19,31 @@ function commonVersion(engines: Engine[]): string | undefined {
   }
   const ranked = [...counts].sort((a, b) => b[1] - a[1]);
   if (ranked[0] && ranked[0][1] !== ranked[1]?.[1]) return ranked[0][0];
+}
+
+// Keeps console navigation in the single-page app: a plain link would reload
+// the page, re-fetch the snapshot and reopen the live stream.
+function ConsoleLink({ to, children }: { to: string; children: ReactNode }) {
+  return (
+    <a
+      href={`/console/${to}`}
+      onClick={(event) => {
+        // Let modified clicks open a new tab or window as usual.
+        if (
+          event.button !== 0 ||
+          event.metaKey ||
+          event.ctrlKey ||
+          event.shiftKey ||
+          event.altKey
+        )
+          return;
+        event.preventDefault();
+        navigate(to);
+      }}
+    >
+      {children}
+    </a>
+  );
 }
 
 function olderVersion(version: string | null, reference: string): boolean {
@@ -37,6 +63,9 @@ export function AttentionPanel({ snapshot }: { snapshot: Snapshot }) {
   const now = useNow();
   const [identities, setIdentities] = useState<AccessClient[]>();
   const [accessError, setAccessError] = useState(false);
+  const revision = accessRevision(snapshot.activity);
+  // Reload on access changes only: listing identities aggregates audit history,
+  // which is too costly to repeat on every snapshot refresh.
   useEffect(() => {
     let active = true;
     void api<{ clients: AccessClient[] }>("access-clients")
@@ -52,7 +81,7 @@ export function AttentionPanel({ snapshot }: { snapshot: Snapshot }) {
     return () => {
       active = false;
     };
-  }, [snapshot.ts]);
+  }, [revision]);
   const version = commonVersion(snapshot.engines);
   const offline = snapshot.engines.filter(
     (engine) => !displayOnline(engine, now, snapshot.gateway.heartbeatInterval),
@@ -87,34 +116,34 @@ export function AttentionPanel({ snapshot }: { snapshot: Snapshot }) {
         <ul className="attention-list">
           {offline.map((engine) => (
             <li key={`offline:${engine.id}`}>
-              <a href={`/console/devices/${encodeURIComponent(engine.id)}`}>
+              <ConsoleLink to={`devices/${encodeURIComponent(engine.id)}`}>
                 {t("attention.offline", { name: engine.displayName })}
-              </a>
+              </ConsoleLink>
               <small>{formatAgo(engine.lastSeenAt, now, lang)}</small>
             </li>
           ))}
           {outdated.map((engine) => (
             <li key={`version:${engine.id}`}>
-              <a href={`/console/devices/${encodeURIComponent(engine.id)}`}>
+              <ConsoleLink to={`devices/${encodeURIComponent(engine.id)}`}>
                 {t("attention.outdated", {
                   name: engine.displayName,
                   version: engine.engineVersion ?? "",
                 })}
-              </a>
+              </ConsoleLink>
             </li>
           ))}
           {pending.map((client) => (
             <li key={client.id}>
-              <a href="/console/clients">
+              <ConsoleLink to="clients">
                 {t("attention.review", { name: client.name })}
-              </a>
+              </ConsoleLink>
             </li>
           ))}
           {failures > 0 && (
             <li>
-              <a href="/console/activity?outcome=not_ok&excludeAuthFailed=1">
+              <ConsoleLink to="activity?outcome=not_ok&excludeAuthFailed=1">
                 {t("attention.failures", { count: failures })}
-              </a>
+              </ConsoleLink>
             </li>
           )}
           {accessError && (

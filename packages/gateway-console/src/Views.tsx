@@ -17,7 +17,7 @@ import {
   warningText,
 } from "./ui";
 import { AttentionPanel } from "./Attention";
-import { AccessClients } from "./AccessClients";
+import { AccessClients, accessRevision } from "./AccessClients";
 
 export function inSession(engines: Snapshot["engines"]): number {
   return engines.filter((engine) => engine.session.status === "ready").length;
@@ -212,13 +212,7 @@ export function ClientsView({
       <AccessClients
         engines={snapshot.engines}
         sensitive={sensitive}
-        revision={
-          snapshot.activity.find(
-            (row) =>
-              row.action?.startsWith("client.") ||
-              row.action?.startsWith("oauth."),
-          )?.id ?? 0
-        }
+        revision={accessRevision(snapshot.activity)}
       />
       <AuthorizedApps
         sensitive={sensitive}

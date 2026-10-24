@@ -1,5 +1,5 @@
 import { beforeEach, expect, it, vi } from "vitest";
-import { render, screen } from "@testing-library/react";
+import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { AttentionPanel } from "./Attention";
 import { api } from "./api";
 import { snapshot } from "./test-fixture";
@@ -96,7 +96,7 @@ it("keeps other attention items when access identities fail", async () => {
   expect(screen.getByRole("link", { name: /failed or denied/ })).toBeVisible();
   expect(screen.queryByText("Everything is healthy")).not.toBeInTheDocument();
 });
-it("states all healthy with Gateway/MCP versions and auto-update status and refreshes with snapshots", async () => {
+it("states all healthy with Gateway/MCP versions and auto-update status and reloads identities only after access changes", async () => {
   const data = healthySnapshot();
   data.gateway.version = "1.2";
   data.gateway.mcpVersion = "2.3";
@@ -106,5 +106,46 @@ it("states all healthy with Gateway/MCP versions and auto-update status and refr
   expect(screen.getByText("Gateway auto-update")).toBeVisible();
   expect(api).toHaveBeenCalledTimes(1);
   view.rerender(<AttentionPanel snapshot={{ ...data, ts: data.ts + 5000 }} />);
-  expect(api).toHaveBeenCalledTimes(2);
+  view.rerender(
+    <AttentionPanel
+      snapshot={{
+        ...data,
+        ts: data.ts + 10000,
+        activity: [{ id: 7, ts: data.ts, eventType: "rpc.finished" }],
+      }}
+    />,
+  );
+  expect(api).toHaveBeenCalledTimes(1);
+  view.rerender(
+    <AttentionPanel
+      snapshot={{
+        ...data,
+        ts: data.ts + 15000,
+        activity: [
+          {
+            id: 8,
+            ts: data.ts,
+            eventType: "admin.action",
+            action: "client.review-global",
+          },
+        ],
+      }}
+    />,
+  );
+  await waitFor(() => expect(api).toHaveBeenCalledTimes(2));
+});
+it("navigates within the console instead of reloading the page", async () => {
+  history.replaceState(null, "", "/console/overview");
+  const data = healthySnapshot();
+  data.engines[0].session.status = "none";
+  data.engines[0].lastSeenAt = Date.now() - 6000;
+  data.gateway.heartbeatInterval = 1;
+  render(<AttentionPanel snapshot={data} />);
+  const link = screen.getByRole("link", { name: "Example device · Offline" });
+  // fireEvent returns false when the handler cancelled the browser navigation.
+  expect(fireEvent.click(link, { ctrlKey: true })).toBe(true);
+  expect(location.pathname).toBe("/console/overview");
+  expect(fireEvent.click(link)).toBe(false);
+  expect(location.pathname).toBe("/console/devices/engine-a");
+  await screen.findByText("Gateway auto-update");
 });

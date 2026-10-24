@@ -329,6 +329,49 @@ it("preserves unknown denial stages and strips prefixes from unknown event resul
   expect(screen.getByText("foo.failed")).toBeVisible(); // Protocol type column stays verbatim.
 });
 
+// Lays out the tab row as 300 px wide with the current tab at 400–460 px, and
+// records scrolling so tests can tell row scrolling from page scrolling.
+function overflowingTabs() {
+  const pageScroll = vi.fn();
+  const restore = [
+    vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(
+      function (this: Element) {
+        const scrolled = this.closest("ul")?.scrollLeft ?? 0;
+        const [left, right] =
+          this.tagName === "UL"
+            ? [0, 300]
+            : this.getAttribute("aria-current") === "page"
+              ? [400 - scrolled, 460 - scrolled]
+              : [0, 0];
+        return new DOMRect(left, 0, right - left, 20);
+      },
+    ),
+  ];
+  const offsets = new WeakMap<Element, number>();
+  Object.defineProperty(HTMLElement.prototype, "scrollLeft", {
+    configurable: true,
+    get(this: HTMLElement) {
+      return offsets.get(this) ?? 0;
+    },
+    set(this: HTMLElement, value: number) {
+      offsets.set(this, value);
+    },
+  });
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: pageScroll,
+  });
+  return {
+    pageScroll,
+    restore() {
+      for (const spy of restore) spy.mockRestore();
+      delete (HTMLElement.prototype as { scrollLeft?: unknown }).scrollLeft;
+      delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+        .scrollIntoView;
+    },
+  };
+}
+
 it("keeps language in the page header and Gateway status in navigation and reveals the active tab", async () => {
   history.replaceState(null, "", "/console/devices");
   vi.mocked(api).mockResolvedValue({ authenticated: true });
@@ -340,33 +383,34 @@ it("keeps language in the page header and Gateway status in navigation and revea
   });
   vi.spyOn(store.consoleStore, "start").mockResolvedValue();
   vi.spyOn(store.consoleStore, "stop").mockImplementation(() => {});
-  const scroll = vi.fn();
-  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-    configurable: true,
-    value: scroll,
-  });
-  const view = render(<App />);
-  await screen.findByRole("navigation");
-  expect(
-    view.container.querySelector("header.topbar .language-toggle"),
-  ).toBeInTheDocument();
-  const nav = view.container.querySelector("nav")!;
-  expect(nav.querySelector(".language-toggle")).not.toBeInTheDocument();
-  expect(nav).toHaveTextContent("Gateway v1.0");
-  expect(nav).toHaveTextContent("Reconnecting");
-  expect(view.container.querySelector("header.topbar")).not.toHaveTextContent(
-    "Gateway v",
-  );
-  expect(
-    view.container.querySelector("header.topbar .pill"),
-  ).not.toBeInTheDocument();
-  scroll.mockClear();
-  fireEvent.click(screen.getByRole("link", { name: "Settings" }));
-  expect(scroll).toHaveBeenCalledWith({ inline: "nearest", block: "nearest" });
-  delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+  const tabs = overflowingTabs();
+  try {
+    const view = render(<App />);
+    await screen.findByRole("navigation");
+    expect(
+      view.container.querySelector("header.topbar .language-toggle"),
+    ).toBeInTheDocument();
+    const nav = view.container.querySelector("nav")!;
+    expect(nav.querySelector(".language-toggle")).not.toBeInTheDocument();
+    expect(nav).toHaveTextContent("Gateway v1.0");
+    expect(nav).toHaveTextContent("Reconnecting");
+    expect(
+      view.container.querySelector("header.topbar"),
+    ).not.toHaveTextContent("Gateway v");
+    expect(
+      view.container.querySelector("header.topbar .pill"),
+    ).not.toBeInTheDocument();
+    const list = nav.querySelector("ul")!;
+    list.scrollLeft = 0;
+    fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+    expect(list.scrollLeft).toBe(160);
+    expect(tabs.pageScroll).not.toHaveBeenCalled();
+  } finally {
+    tabs.restore();
+  }
 });
 
-it("reveals the current tab again when loaded counts or fonts change item widths", async () => {
+it("reveals the current tab again when item widths change without scrolling the page", async () => {
   history.replaceState(null, "", "/console/settings");
   vi.mocked(api).mockResolvedValue({ authenticated: true });
   vi.spyOn(store, "useConsole").mockReturnValue({
@@ -387,23 +431,22 @@ it("reveals the current tab again when loaded counts or fonts change item widths
     unobserve() {}
     disconnect() {}
   };
-  const scroll = vi.fn();
-  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
-    configurable: true,
-    value: scroll,
-  });
+  const tabs = overflowingTabs();
   try {
     render(<App />);
-    await screen.findByRole("navigation");
-    scroll.mockClear();
+    const nav = await screen.findByRole("navigation");
+    const list = nav.querySelector("ul")!;
+    list.scrollLeft = 0;
     act(() => resized([], {} as ResizeObserver));
-    expect(scroll).toHaveBeenCalledWith({
-      inline: "nearest",
-      block: "nearest",
+    expect(list.scrollLeft).toBe(160);
+    list.scrollLeft = 0;
+    act(() => {
+      window.dispatchEvent(new Event("resize"));
     });
+    expect(list.scrollLeft).toBe(160);
+    expect(tabs.pageScroll).not.toHaveBeenCalled();
   } finally {
     globalThis.ResizeObserver = previousObserver;
-    delete (HTMLElement.prototype as { scrollIntoView?: unknown })
-      .scrollIntoView;
+    tabs.restore();
   }
 });
