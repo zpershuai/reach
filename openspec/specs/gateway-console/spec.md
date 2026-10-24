@@ -128,16 +128,15 @@ Leaving the wizard before step 4 MUST keep the registration and show it as await
 - **THEN** the token appears only in that step and is never written to browser storage
 
 ### Requirement: Clients view
-The Clients view SHALL list observed ingress clients with the following columns:
-- label and type, marked unverified when self-reported;
-- active HTTP MCP sessions;
-- owned Engine sessions;
-- last activity;
-- 24-hour call and error counts.
+The Clients view SHALL list observed ingress clients and show approval time, last-used time and a shortened, copyable identifier for each access identity. Numeric columns MUST be right-aligned and sized to their content; columns empty for every listed client MUST be hidden. A recently re-authenticated owner MUST be able to disconnect a client's HTTP MCP sessions.
 
-Numeric columns MUST be right-aligned and sized to their content. A column whose value is empty for every listed client MUST be hidden. Each access identity MUST show when it was approved and last used, and its identifier MUST be shortened with a control that copies the full value.
+#### Scenario: Client activity columns
+- **WHEN** the owner opens Clients with observed ingress clients
+- **THEN** the table shows label and type (marked unverified when self-reported), active HTTP MCP sessions, owned Engine sessions, last activity, and 24-hour call and error counts, except columns empty for every listed client
 
-A recently re-authenticated owner MUST be able to disconnect a client's HTTP MCP sessions.
+#### Scenario: Numeric column layout
+- **WHEN** the Clients table contains numeric values
+- **THEN** the numeric columns are right-aligned and sized to their content
 
 #### Scenario: Disconnect a client
 - **WHEN** the owner disconnects `grok-bot`
@@ -152,13 +151,24 @@ A recently re-authenticated owner MUST be able to disconnect a client's HTTP MCP
 - **THEN** each row shows its approval time, last-used time and a shortened identifier, and copying the identifier yields the full value
 
 ### Requirement: Overview health
-The Overview view SHALL show the following:
-- ingress client count, online and registered Engine counts with the number of Engines in session as a caption beneath them, active MCP sessions, requests per minute, the five-minute error rate and today's policy denials;
-- an attention panel listing offline Engines, Engines reporting a version older than the most common Engine version, access identities with global access awaiting review, and failed or denied requests in the last 24 hours excluding unauthenticated requests, each linking to the view where it can be handled;
-- the Gateway and MCP versions with auto-update status;
-- warnings for audit storage failure or an incomplete console security configuration.
+The Overview view SHALL show health metrics, an actionable attention panel, Gateway and MCP versions with auto-update status, and warnings for audit storage failure or incomplete console security configuration. It MUST state when nothing needs attention. Metrics MUST use equal columns with no singleton row, reduce emphasis for zero values and use the warning colour for a non-zero error rate or policy-denial count.
 
-When nothing needs attention, the attention panel MUST say so. Zero-valued metrics MUST be shown with reduced emphasis, and a non-zero error rate or policy-denial count MUST use the warning colour. The metrics MUST lay out in equal columns without leaving a single metric alone on a row.
+#### Scenario: Health metrics and versions
+- **WHEN** the owner opens Overview
+- **THEN** it shows ingress client count, online and registered Engine counts with the number of Engines in session as a caption beneath them, active MCP sessions, requests per minute, the five-minute error rate and today's policy denials
+- **AND** it shows the Gateway and MCP versions with auto-update status
+
+#### Scenario: Attention items link to remediation
+- **WHEN** there are offline Engines, Engines older than the most common Engine version, access identities with global access awaiting review, or failed or denied requests in the last 24 hours
+- **THEN** the attention panel lists each applicable item with a link to the view where it can be handled, excluding unauthenticated requests
+
+#### Scenario: Metric emphasis
+- **WHEN** Overview contains zero-valued metrics and a non-zero error rate or policy-denial count
+- **THEN** zero-valued metrics have reduced emphasis and the non-zero error rate or policy-denial count uses the warning colour
+
+#### Scenario: Incomplete console security configuration
+- **WHEN** the console security configuration is incomplete
+- **THEN** Overview shows a security configuration warning
 
 #### Scenario: Audit storage failing
 - **WHEN** audit persistence has failed since startup
