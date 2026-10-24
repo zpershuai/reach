@@ -44,7 +44,7 @@
 
 ## 8. 集成验收
 
-- [ ] 8.1 运行 `npm --prefix packages/gateway-console run build` 和两个包的 test，全部通过，`check-build.mjs` 与 CSP 检查通过。在本地 dev server 中按以下矩阵逐页截图：宽度 1440 / 800 / 375 × 主题浅色 / 深色 × 页面 概览、拓扑、客户端、设备、活动、设置。对照 `specs/` 中每个 Scenario 逐条打勾，截图附在 PR 中。
+- [x] 8.1 运行 `npm --prefix packages/gateway-console run build` 和两个包的 test，全部通过，`check-build.mjs` 与 CSP 检查通过。在本地 dev server 中按以下矩阵逐页截图：宽度 1440 / 800 / 375 × 主题浅色 / 深色 × 页面 概览、拓扑、客户端、设备、活动、设置。对照 `specs/` 中每个 Scenario 逐条打勾，截图附在 PR 中。
 
 ## Workflow follow-up
 
