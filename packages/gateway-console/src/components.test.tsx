@@ -10,7 +10,8 @@ import { ActivityView } from "./Activity";
 import { consoleStore } from "./store";
 import { engine, snapshot } from "./test-fixture";
 vi.mock("./api", async (original) => ({
-  ...await original<typeof import("./api")>(), api: vi.fn(),
+  ...(await original<typeof import("./api")>()),
+  api: vi.fn(),
 }));
 beforeEach(() => {
   history.replaceState(null, "", "/console/activity");
@@ -330,4 +331,82 @@ it("prepends new live activity and keeps paginated rows without duplicates", asy
     expect.stringContaining("older"),
   ]);
   expect(screen.getByText("older")).toBe(oldNode);
+});
+
+it("uses success for idle and a neutral distinct offline status with heartbeat age", async () => {
+  const { EngineStatus } = await import("./ui");
+  const now = Date.now();
+  const idle = {
+    ...engine,
+    session: { status: "none" },
+    lastSeenAt: now - 4000,
+  };
+  const view = render(<EngineStatus engine={idle} />);
+  const pill = view.container.querySelector(".pill")!;
+  expect(pill).toHaveClass("ok");
+  expect(pill).toHaveTextContent("4 s ago");
+  view.rerender(
+    <EngineStatus
+      engine={{ ...idle, lastSeenAt: now - 60_000, online: false }}
+    />,
+  );
+  expect(pill).toHaveClass("off");
+  expect(pill).not.toHaveClass("err");
+});
+
+it("de-emphasizes zero metrics and highlights non-zero errors", async () => {
+  const { Kpis } = await import("./Views");
+  render(
+    <Kpis
+      kpis={{ ...snapshot().kpis, errorRate5m: 0.02, policyDenialsToday: 0 }}
+      inSession={0}
+    />,
+  );
+  expect(screen.getByText("2.0%").closest(".kpi")).toHaveClass("alert");
+  expect(screen.getByText("0").closest(".kpi")).toHaveClass("zero");
+  expect(screen.getByText("0 in session").parentElement).toHaveClass("kpi");
+});
+
+it("hides an entirely empty owned Engine sessions column", async () => {
+  vi.mocked(api).mockResolvedValue({ clients: [] });
+  const data = snapshot();
+  data.clients[0].ownedEngines = [];
+  const view = render(<ClientsView snapshot={data} sensitive={sensitive} />);
+  expect(
+    screen.queryByRole("columnheader", { name: "Devices in session" }),
+  ).not.toBeInTheDocument();
+  data.clients[0].ownedEngines = ["engine-a"];
+  view.rerender(<ClientsView snapshot={{ ...data }} sensitive={sensitive} />);
+  expect(
+    screen.getByRole("columnheader", { name: "Devices in session" }),
+  ).toBeInTheDocument();
+  expect(screen.getByText("MCP sessions", { selector: "th" })).toHaveClass(
+    "num",
+  );
+  await waitFor(() => expect(api).toHaveBeenCalled());
+});
+
+it("shows device card owner, latest method and workspace count and groups Settings", async () => {
+  const { DevicesView } = await import("./Devices");
+  const data = snapshot();
+  data.engines[0].session.ownerLabel = "Example client";
+  data.activity = [
+    {
+      id: 1,
+      ts: 1000,
+      type: "rpc.finished",
+      engineId: "engine-a",
+      method: "fs.read",
+    },
+  ];
+  const view = render(
+    <DevicesView snapshot={data} sensitive={sensitive} onAdd={() => {}} />,
+  );
+  expect(screen.getByText("fs.read")).toBeVisible();
+  expect(screen.getByText(/Example client/)).toBeVisible();
+  expect(screen.getByText("2 workspaces")).toBeVisible();
+  view.unmount();
+  render(<SettingsView snapshot={data} sensitive={sensitive} />);
+  for (const name of ["Activity retention", "Appearance", "Topology"])
+    expect(screen.getByRole("heading", { name })).toBeVisible();
 });

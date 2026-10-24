@@ -154,3 +154,28 @@ test("invalid delegated credentials have a credential-specific code and retain H
     });
   } finally { f.close(); }
 });
+
+test("identity list exposes approval and retained last usage without stale authorization cache metadata", () => {
+  const f = fixture();
+  try {
+    const delegated = f.access.create("Delegated fixture", 10000).client;
+    const insert = f.store.db.prepare("INSERT INTO activity(ts,event_type,principal_id) VALUES (?,?,?)");
+    insert.run(1500, "rpc.finished", delegated.id);
+    insert.run(1800, "admin.action", delegated.id);
+    insert.run(1900, "rpc.finished", "other-principal");
+    assert.equal(f.access.list()[0].approvedAt, 1000);
+    assert.equal(f.access.list()[0].lastUsedAt, 1500);
+    insert.run(2000, "rpc.denied", delegated.id);
+    assert.equal(f.access.list()[0].lastUsedAt, 2000);
+    f.store.db.prepare("INSERT INTO oauth_clients(id,name,redirect_uris,auth_method,created_at,approved_at,last_used_at) VALUES ('fixture-app','ChatGPT','[]','none',500,1200,2500)").run();
+    f.access.approveOAuth("fixture-app", "ChatGPT", readOnly);
+    const oauth = () => f.access.list().find(client => client.kind === "oauth")!;
+    assert.equal(oauth().approvedAt, 1200);
+    assert.equal(oauth().lastUsedAt, 2500);
+    insert.run(3000, "rpc.finished", "oauth:fixture-app");
+    assert.equal(oauth().lastUsedAt, 3000);
+    f.store.db.prepare("DELETE FROM activity").run();
+    assert.equal(f.access.list().find(client => client.id === delegated.id)!.lastUsedAt, null);
+    assert.equal(oauth().lastUsedAt, 2500);
+  } finally { f.close(); }
+});

@@ -85,7 +85,7 @@ Devices → Add device：输入名称与唯一 ID，选择 Linux、macOS、OpenW
 
 Engine 报告的硬件字段和类型覆盖见 [Engine 部署](engine_cn.md)。设备详情显示 `session.ready` 报告的工作区及进程执行配置；旧 Engine 未报告该配置时显示 not reported，不以方法列表猜测权限。
 
-Activity 只保存元数据，不保存文件正文、搜索模式、进程参数或输出。可按时间、设备、客户端、方法类和结果筛选，导出 CSV/JSONL；导出本身有审计记录。Settings 的保留期为 1–365 天，默认 30 天，每日清理。Skills 入口仅预留。
+Activity 只保存元数据，不保存文件正文、搜索模式、进程参数或输出。可按时间、设备、客户端、方法类和结果筛选，或勾选“隐藏未认证请求”，在分页前排除身份验证失败记录。该筛选保存在 URL（`excludeAuthFailed=1`）中，对 CSV/JSONL 导出同样生效；导出本身有审计记录。Settings 的保留期为 1–365 天，默认 30 天，每日清理。Skills 入口仅预留。
 
 ## 备份、恢复与回滚
 

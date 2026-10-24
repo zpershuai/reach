@@ -15,6 +15,8 @@ const sensitive = async (operation: () => Promise<void>) => operation();
 const client: AccessClient = {
   id: "client:fixture",
   name: "Daily client",
+  approvedAt: Date.now() - 60_000,
+  lastUsedAt: Date.now() - 4000,
   kind: "delegated",
   revokedAt: null,
   expiresAt: Date.now() + 86_400_000,
@@ -229,4 +231,46 @@ it("shows a styled load error and retries the permissions list", async () => {
   await userEvent.setup().click(screen.getByText("Retry"));
   expect(await screen.findByText("Daily client")).toBeVisible();
   expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+});
+
+it("puts outlined revoke last and fills only the destructive confirmation", async () => {
+  vi.mocked(api).mockResolvedValue({
+    clients: [{ ...client, legacyGlobal: true, reviewRequired: true }],
+  });
+  render(<AccessClients engines={[engine]} sensitive={sensitive} />);
+  const revoke = await screen.findByRole("button", { name: "Revoke identity" });
+  expect(revoke).toHaveClass("danger-outline");
+  expect(revoke).not.toHaveClass("danger");
+  expect(within(revoke.closest("td")!).getAllByRole("button").at(-1)).toBe(
+    revoke,
+  );
+  await userEvent.setup().click(revoke);
+  expect(
+    within(screen.getByRole("dialog")).getByRole("button", {
+      name: "Confirm change",
+    }),
+  ).toHaveClass("danger");
+});
+
+it("shortens identity ids, copies the full value and displays approval and last usage", async () => {
+  vi.mocked(api).mockResolvedValue({
+    clients: [
+      {
+        ...client,
+        approvedAt: Date.now() - 60_000,
+        lastUsedAt: Date.now() - 4000,
+      },
+    ],
+  });
+  const user = userEvent.setup();
+  const writeText = vi
+    .spyOn(navigator.clipboard, "writeText")
+    .mockResolvedValue();
+  render(<AccessClients engines={[engine]} sensitive={sensitive} />);
+  const id = await screen.findByText("client:f…");
+  const row = id.closest("tr")!;
+  expect(within(row).getByText(/^Approved:/)).toBeVisible();
+  expect(within(row).getByText(/^Last used:/)).toHaveTextContent("4 s ago");
+  await user.click(within(row).getByRole("button", { name: "Copy" }));
+  expect(writeText).toHaveBeenCalledWith(client.id);
 });

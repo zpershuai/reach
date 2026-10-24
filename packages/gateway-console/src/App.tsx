@@ -1,3 +1,4 @@
+import type { Snapshot } from "./types";
 import { formatNumber } from "./ui";
 import { LanguageToggle } from "./LanguageToggle";
 import { useT } from "./i18n";
@@ -20,6 +21,57 @@ const navigation = [
   ["skills", "nav.skills"],
   ["settings", "nav.settings"],
 ] as const;
+function ThemeToggle({
+  theme,
+  onError,
+}: {
+  theme: Snapshot["settings"]["theme"];
+  onError: (error: unknown) => void;
+}) {
+  const { t } = useT();
+  const [current, setCurrent] = useState(theme);
+  const [busy, setBusy] = useState(false);
+  useEffect(() => setCurrent(theme), [theme]);
+  const next = ({ system: "light", light: "dark", dark: "system" } as const)[
+    current
+  ];
+  async function cycle(): Promise<void> {
+    const previous = current;
+    setCurrent(next);
+    setBusy(true);
+    document.documentElement.dataset.theme = next;
+    try {
+      await api("settings", { theme: next }, "PATCH");
+    } catch (error) {
+      setCurrent(previous);
+      document.documentElement.dataset.theme = previous;
+      onError(error);
+      setBusy(false);
+      return;
+    }
+    try {
+      await consoleStore.refresh();
+    } catch (error) {
+      onError(error);
+    } finally {
+      setBusy(false);
+    }
+  }
+  return (
+    <button
+      className="btn small theme-toggle"
+      disabled={busy}
+      aria-label={t("settings.switchTheme", { theme: t(`settings.${next}`) })}
+      title={t(`settings.${current}`)}
+      onClick={() => void cycle()}
+    >
+      <span aria-hidden="true">
+        {{ system: "◐", light: "☀", dark: "☾" }[current]}
+      </span>
+    </button>
+  );
+}
+
 export function App() {
   const { t, lang } = useT();
   const [identity, setIdentity] = useState<{
@@ -29,10 +81,40 @@ export function App() {
   const [error, setError] = useState<unknown>();
   const [reauth, setReauth] = useState(false);
   const [adding, setAdding] = useState(false);
+  const [statusOpen, setStatusOpen] = useState(false);
+  const navList = useRef<HTMLUListElement>(null);
   const pending = useRef<(() => Promise<void>) | undefined>(undefined);
   const state = useConsole();
   const route = useRoute();
   const section = route.split("/")[0];
+  useEffect(() => {
+    const list = navList.current;
+    if (!list) return;
+    const update = () => {
+      list.dataset.overflowStart = String(list.scrollLeft > 1);
+      list.dataset.overflowEnd = String(
+        list.scrollLeft + list.clientWidth < list.scrollWidth - 1,
+      );
+    };
+    const revealCurrent = () => {
+      list
+        .querySelector<HTMLElement>('[aria-current="page"]')
+        ?.scrollIntoView?.({ inline: "nearest", block: "nearest" });
+      update();
+    };
+    revealCurrent();
+    list.addEventListener("scroll", update, { passive: true });
+    window.addEventListener("resize", revealCurrent);
+    const observer = new ResizeObserver(revealCurrent);
+    observer.observe(list);
+    for (const item of list.querySelectorAll(".nav-item"))
+      observer.observe(item);
+    return () => {
+      list.removeEventListener("scroll", update);
+      window.removeEventListener("resize", revealCurrent);
+      observer.disconnect();
+    };
+  }, [section, identity?.authenticated, lang]);
   async function loadIdentity(): Promise<void> {
     try {
       setIdentity(await api("me"));
@@ -116,7 +198,7 @@ export function App() {
           <b>Reach</b>
           <span>Gateway</span>
         </a>
-        <ul>
+        <ul ref={navList}>
           {navigation.map(([path, label]) => (
             <li key={path}>
               <a
@@ -134,8 +216,36 @@ export function App() {
             </li>
           ))}
         </ul>
+        {snapshot && (
+          <div className="nav-status" data-expanded={statusOpen}>
+            <button
+              className={`status-toggle btn small ${state.connected ? "connected" : "reconnecting"} ${warnings || !state.connected ? "warn" : "ok"}`}
+              aria-label={t("nav.gatewayStatus")}
+              aria-expanded={statusOpen}
+              onClick={() => setStatusOpen(!statusOpen)}
+            >
+              <span className="dot" />
+              <span className="connection-label" role="status">
+                {state.connected ? t("nav.live") : t("nav.reconnecting")}
+              </span>
+            </button>
+            <div className="status-details">
+              <span className="pill">Gateway v{snapshot.gateway.version}</span>
+              <span className={`pill ${warnings ? "warn" : "ok"}`}>
+                <span className="dot" />
+                {warnings
+                  ? t("nav.warning", { count: warnings })
+                  : t("nav.healthy")}
+              </span>
+              <span>
+                {t("nav.heartbeat", {
+                  seconds: snapshot.gateway.heartbeatInterval,
+                })}
+              </span>
+            </div>
+          </div>
+        )}
         <div className="nav-foot">
-          <LanguageToggle />
           <button
             className="btn primary add-device"
             aria-label={t("nav.add")}
@@ -143,9 +253,6 @@ export function App() {
             onClick={() => setAdding(true)}
           >
             <span className="add-device-label">{t("nav.add")}</span>
-            <span className="add-device-symbol" aria-hidden="true">
-              +
-            </span>
           </button>
           <div className="owner">
             <span>{t("nav.administrator")}</span>
@@ -175,31 +282,14 @@ export function App() {
                 <span className="mono">
                   {snapshot.gateway.publicOrigin.replace(/^https?:\/\//, "")}
                 </span>
-                <span className="pill">
-                  Gateway v{snapshot.gateway.version}
-                </span>
-                <span className={`pill ${warnings ? "warn" : "ok"}`}>
-                  <span className="dot" />
-                  {warnings
-                    ? t("nav.warning", { count: warnings })
-                    : t("nav.healthy")}
-                </span>
-                <span>
-                  {t("nav.heartbeat", {
-                    seconds: snapshot.gateway.heartbeatInterval,
-                  })}
-                </span>
               </div>
             )}
           </div>
-          <div className="tools">
-            <span
-              className={`pill ${state.connected ? "accent live" : "warn"}`}
-              role="status"
-            >
-              <span className="dot" />
-              {state.connected ? t("nav.live") : t("nav.reconnecting")}
-            </span>
+          <div className="tools appearance">
+            <LanguageToggle />
+            {snapshot && (
+              <ThemeToggle theme={snapshot.settings.theme} onError={setError} />
+            )}
           </div>
         </header>
         {Boolean(error) && (

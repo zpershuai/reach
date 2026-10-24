@@ -247,9 +247,19 @@ it("renders the Chinese Gateway drawer and health warnings", () => {
     "Audit storage failure: /tmp/example",
   ];
   data.gateway.warningDetails = [
-    { code: "INSECURE_HTTP", message: "HTTP warning with changed punctuation!" },
-    { code: "NO_TRUSTED_PROXIES", message: "Proxy warning with changed wording." },
-    { code: "AUDIT_STORAGE_FAILURE", message: "Storage unavailable!", params: { path: "/tmp/example" } },
+    {
+      code: "INSECURE_HTTP",
+      message: "HTTP warning with changed punctuation!",
+    },
+    {
+      code: "NO_TRUSTED_PROXIES",
+      message: "Proxy warning with changed wording.",
+    },
+    {
+      code: "AUDIT_STORAGE_FAILURE",
+      message: "Storage unavailable!",
+      params: { path: "/tmp/example" },
+    },
   ];
   render(
     <TopologyView
@@ -304,13 +314,96 @@ it.each(["theme", "activity"])(
 
 it("preserves unknown denial stages and strips prefixes from unknown event results", () => {
   setLang("zh-CN");
-  render(<ActivityTable rows={[
-    { id: 1, ts: 1000, type: "rpc.denied", stage: "quota", code: "LIMIT" },
-    { id: 2, ts: 1001, eventType: "foo.failed" },
-    { id: 3, ts: 1002, type: "rpc.denied", stage: "constructor" },
-  ]} />);
+  render(
+    <ActivityTable
+      rows={[
+        { id: 1, ts: 1000, type: "rpc.denied", stage: "quota", code: "LIMIT" },
+        { id: 2, ts: 1001, eventType: "foo.failed" },
+        { id: 3, ts: 1002, type: "rpc.denied", stage: "constructor" },
+      ]}
+    />,
+  );
   expect(screen.getByText("已拒绝 · quota (LIMIT)")).toBeVisible();
   expect(screen.getByText("已拒绝 · constructor")).toBeVisible();
   expect(screen.getByText("failed")).toBeVisible();
   expect(screen.getByText("foo.failed")).toBeVisible(); // Protocol type column stays verbatim.
+});
+
+it("keeps language in the page header and Gateway status in navigation and reveals the active tab", async () => {
+  history.replaceState(null, "", "/console/devices");
+  vi.mocked(api).mockResolvedValue({ authenticated: true });
+  vi.spyOn(store, "useConsole").mockReturnValue({
+    snapshot: snapshot(),
+    lastEventId: 0,
+    recent: [],
+    connected: false,
+  });
+  vi.spyOn(store.consoleStore, "start").mockResolvedValue();
+  vi.spyOn(store.consoleStore, "stop").mockImplementation(() => {});
+  const scroll = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scroll,
+  });
+  const view = render(<App />);
+  await screen.findByRole("navigation");
+  expect(
+    view.container.querySelector("header.topbar .language-toggle"),
+  ).toBeInTheDocument();
+  const nav = view.container.querySelector("nav")!;
+  expect(nav.querySelector(".language-toggle")).not.toBeInTheDocument();
+  expect(nav).toHaveTextContent("Gateway v1.0");
+  expect(nav).toHaveTextContent("Reconnecting");
+  expect(view.container.querySelector("header.topbar")).not.toHaveTextContent(
+    "Gateway v",
+  );
+  expect(
+    view.container.querySelector("header.topbar .pill"),
+  ).not.toBeInTheDocument();
+  scroll.mockClear();
+  fireEvent.click(screen.getByRole("link", { name: "Settings" }));
+  expect(scroll).toHaveBeenCalledWith({ inline: "nearest", block: "nearest" });
+  delete (HTMLElement.prototype as { scrollIntoView?: unknown }).scrollIntoView;
+});
+
+it("reveals the current tab again when loaded counts or fonts change item widths", async () => {
+  history.replaceState(null, "", "/console/settings");
+  vi.mocked(api).mockResolvedValue({ authenticated: true });
+  vi.spyOn(store, "useConsole").mockReturnValue({
+    snapshot: snapshot(),
+    lastEventId: 0,
+    recent: [],
+    connected: true,
+  });
+  vi.spyOn(store.consoleStore, "start").mockResolvedValue();
+  vi.spyOn(store.consoleStore, "stop").mockImplementation(() => {});
+  let resized!: ResizeObserverCallback;
+  const previousObserver = globalThis.ResizeObserver;
+  globalThis.ResizeObserver = class {
+    constructor(callback: ResizeObserverCallback) {
+      resized = callback;
+    }
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  };
+  const scroll = vi.fn();
+  Object.defineProperty(HTMLElement.prototype, "scrollIntoView", {
+    configurable: true,
+    value: scroll,
+  });
+  try {
+    render(<App />);
+    await screen.findByRole("navigation");
+    scroll.mockClear();
+    act(() => resized([], {} as ResizeObserver));
+    expect(scroll).toHaveBeenCalledWith({
+      inline: "nearest",
+      block: "nearest",
+    });
+  } finally {
+    globalThis.ResizeObserver = previousObserver;
+    delete (HTMLElement.prototype as { scrollIntoView?: unknown })
+      .scrollIntoView;
+  }
 });

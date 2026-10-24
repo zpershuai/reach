@@ -28,6 +28,7 @@ export const en = {
     storageWarning: "Audit storage failure: {{path}}",
   },
   nav: {
+    gatewayStatus: "Gateway status",
     overview: "Overview",
     topology: "Topology",
     clients: "Clients",
@@ -80,6 +81,16 @@ export const en = {
       "Enter your password to continue. The confirmation lasts ten minutes.",
     cancel: "Cancel",
     confirm: "Confirm",
+  },
+  attention: {
+    title: "Needs attention",
+    offline: "{{name}} · Offline",
+    outdated: "{{name}} · Older version (v{{version}})",
+    review: "{{name}} · Review global access",
+    failures: "{{count}} failed or denied requests in 24 hours",
+    healthy: "Everything is healthy",
+    accessError: "Unable to load access identities",
+    loading: "Checking access identities…",
   },
   overview: {
     metrics: "Key metrics",
@@ -135,6 +146,9 @@ export const en = {
     revokeTitle: "Revoke {{name}}?",
   },
   settings: {
+    activityRetention: "Activity retention",
+    appearance: "Appearance",
+    switchTheme: "Switch to {{theme}} theme",
     title: "Settings",
     retention: "Keep activity for (days)",
     retentionNote:
@@ -156,6 +170,7 @@ export const en = {
     mcp: "let bots discover and run them through MCP.",
   },
   clients: {
+    usageUnavailable: "No record (limited by activity retention)",
     revoked: "Revoked",
     oauthLifecycle: "OAuth token lifecycle",
     title: "Client identities & permissions",
@@ -214,6 +229,7 @@ export const en = {
     delegated: "delegated",
   },
   devices: {
+    latestOperation: "Latest operation",
     manualType: "Type set manually",
     detectedType: "Type detected",
     status: "Status",
@@ -393,6 +409,8 @@ export const en = {
     ok: "OK",
     error: "Error",
     authFailed: "Auth failed",
+    unauthenticated: "Unauthenticated request",
+    hideUnauthenticated: "Hide unauthenticated requests",
     event: "Event",
     time: "Time",
     client: "Client",

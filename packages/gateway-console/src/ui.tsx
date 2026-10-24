@@ -18,11 +18,12 @@ export function resetOverlayStack(): void {
 function useOverlay(close: (() => void) | undefined, trap: boolean) {
   const ref = useRef<HTMLElement>(null);
   const closeRef = useRef(close);
+  const overlayId = useRef(Symbol());
   closeRef.current = close;
   useLayoutEffect(() => {
     const element = ref.current!;
     const previous = document.activeElement as HTMLElement | null;
-    const id = Symbol();
+    const id = overlayId.current;
     overlays.push(id);
     const controls = () =>
       Array.from(
@@ -69,7 +70,12 @@ function useOverlay(close: (() => void) | undefined, trap: boolean) {
       if (wasTop && owned && previous?.isConnected) previous.focus();
     };
   }, [trap]);
-  return ref;
+  return {
+    ref,
+    dismiss: () => {
+      if (overlays.at(-1) === overlayId.current) closeRef.current?.();
+    },
+  };
 }
 
 export function Drawer({
@@ -87,23 +93,31 @@ export function Drawer({
   children: ReactNode;
 }) {
   const { t } = useT();
-  const ref = useOverlay(dismissible ? onClose : undefined, false);
+  const { ref, dismiss } = useOverlay(dismissible ? onClose : undefined, false);
   return (
-    <aside
-      ref={ref}
-      tabIndex={-1}
-      className="drawer"
-      role="dialog"
-      aria-label={label}
-    >
-      <div className="drawer-head">
-        <h3>{title}</h3>
-        <button className="btn small" type="button" onClick={onClose}>
-          {t("common.close")}
-        </button>
-      </div>
-      <div className="drawer-body">{children}</div>
-    </aside>
+    <>
+      <div
+        className="drawer-backdrop"
+        data-testid="drawer-backdrop"
+        onClick={dismiss}
+        aria-hidden="true"
+      />
+      <aside
+        ref={ref}
+        tabIndex={-1}
+        className="drawer"
+        role="dialog"
+        aria-label={label}
+      >
+        <div className="drawer-head">
+          <h3>{title}</h3>
+          <button className="btn small" type="button" onClick={onClose}>
+            {t("common.close")}
+          </button>
+        </div>
+        <div className="drawer-body">{children}</div>
+      </aside>
+    </>
   );
 }
 
@@ -122,7 +136,10 @@ export function Modal({
   children: ReactNode;
 }) {
   const { t } = useT();
-  const ref = useOverlay(dismissible ? (onCancel ?? onClose) : undefined, true);
+  const { ref } = useOverlay(
+    dismissible ? (onCancel ?? onClose) : undefined,
+    true,
+  );
   return (
     <div className="modal-backdrop">
       <section
@@ -150,8 +167,9 @@ export function Modal({
 const statusText = {
   ready: ["common.inSession", "ok"],
   connecting: ["common.connecting", "warn"],
-  idle: ["common.idle", ""],
-  offline: ["common.offline", "err"],
+  idle: ["common.idle", "ok"],
+  offline: ["common.offline", "off"],
+  awaiting: ["common.awaiting", "warn"],
 } as const;
 
 export function EngineStatus({
@@ -161,16 +179,22 @@ export function EngineStatus({
   engine: Engine;
   heartbeatInterval?: number;
 }) {
-  const { t } = useT();
+  const { t, lang } = useT();
   const now = useNow();
   const [textKey, tone] =
     engine.enrollmentStatus === "awaiting_heartbeat"
-      ? (["common.awaiting", "warn"] as const)
+      ? statusText.awaiting
       : statusText[glyphState(engine, now, heartbeatInterval)];
   return (
     <span className={`pill ${tone}`}>
       <span className="dot" />
-      {t(textKey)}
+      <span>{t(textKey)}</span>
+      {engine.session.status !== "ready" && (
+        <>
+          {" "}
+          · <span>{formatAgo(engine.lastSeenAt, now, lang)}</span>
+        </>
+      )}
     </span>
   );
 }
@@ -194,14 +218,14 @@ export function MethodSwatch({ methodClass }: { methodClass?: string }) {
   return <i className={`sw c-${methodClass ?? "control"}`} />;
 }
 
-const hues = [
-  "#0F6B7A",
-  "#2F6FE4",
-  "#7A4FD6",
-  "#B0562F",
-  "#10A37F",
-  "#3B3F46",
-  "#B8456B",
+export const hues = [
+  "#35434b",
+  "#454552",
+  "#4a414c",
+  "#3f4c50",
+  "#4c4850",
+  "#414b4a",
+  "#4b4652",
 ];
 export function ClientAvatar({ label }: { label: string }) {
   const words = label
@@ -268,7 +292,7 @@ export function formatBytes(
 export function activityKey(row: Activity): string {
   const type = row.type ?? row.eventType;
   if (row.requestId) return `${type}:${row.engineId ?? ""}:${row.requestId}`;
-  return `${type}:${row.ts}:${row.engineId ?? ""}:${row.method ?? row.action ?? ""}:${row.clientLabel ?? row.caller?.label ?? ""}`;
+  return `${type}:${row.ts}:${row.engineId ?? ""}:${row.method ?? row.action ?? ""}:${row.path ?? ""}:${row.clientLabel ?? row.caller?.label ?? ""}`;
 }
 
 export function MiniLog({

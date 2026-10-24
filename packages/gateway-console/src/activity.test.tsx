@@ -7,13 +7,35 @@ import {
 } from "@testing-library/react";
 import { beforeEach, expect, it, vi } from "vitest";
 import { api } from "./api";
-import { ActivityView } from "./Activity";
+import { ActivityTable, ActivityView } from "./Activity";
 import { snapshot } from "./test-fixture";
 vi.mock("./api", async (original) => ({
-  ...await original<typeof import("./api")>(), api: vi.fn(),
+  ...(await original<typeof import("./api")>()),
+  api: vi.fn(),
 }));
 beforeEach(() => {
   vi.mocked(api).mockReset().mockResolvedValue({ rows: [], cursor: null });
+});
+it("attributes auth failures to unauthenticated requests and shows only supplied repeat counts", () => {
+  render(
+    <ActivityTable
+      rows={[
+        {
+          id: 1,
+          ts: 1000,
+          type: "auth.failed",
+          path: "/unknown",
+          count: 3,
+          outcome: "error",
+        },
+        { id: 2, ts: 2000, eventType: "auth.failed", path: "/probe" },
+      ]}
+    />,
+  );
+  expect(screen.queryByText("Gateway")).not.toBeInTheDocument();
+  expect(screen.getAllByText("Unauthenticated request")).toHaveLength(2);
+  expect(screen.getByText("Auth failed ×3")).toBeVisible();
+  expect(screen.getByText("Auth failed", { exact: true })).toBeVisible();
 });
 it("restores URL filters, requests and export links and follows popstate", async () => {
   const data = snapshot();
@@ -123,4 +145,94 @@ it("keeps live records that arrive while the first page is loading", async () =>
   );
   expect(screen.getByText("engine.rotate")).toBeVisible();
   expect(screen.getByText("settings.update")).toBeVisible();
+});
+
+it("orders activity columns and hides latency and size only when both are empty", () => {
+  const rows = [
+    { id: 1, ts: 1000, eventType: "auth.failed" },
+    { id: 2, ts: 2000, eventType: "admin.login" },
+  ];
+  const view = render(<ActivityTable rows={rows} />);
+  expect(
+    screen.getAllByRole("columnheader").map((node) => node.textContent),
+  ).toEqual(["Time", "Client", "Method", "Result", "Target", "Device"]);
+  view.rerender(
+    <ActivityTable
+      rows={[
+        ...rows,
+        { id: 3, ts: 3000, eventType: "rpc.finished", latencyMs: 0 },
+      ]}
+    />,
+  );
+  expect(
+    screen
+      .getAllByRole("columnheader")
+      .slice(-2)
+      .map((node) => node.textContent),
+  ).toEqual(["Latency", "Size"]);
+});
+
+it("collapses adjacent same-path auth failures, sums counts and retains the latest time", async () => {
+  const { collapseAuthFailures } = await import("./Activity");
+  const rows = Array.from({ length: 12 }, (_, id) => ({
+    id,
+    ts: 1000 + id,
+    eventType: "auth.failed",
+    path: "/unknown",
+  }));
+  const groups = collapseAuthFailures(rows);
+  expect(groups).toHaveLength(1);
+  expect(groups[0]).toMatchObject({ count: 12, ts: 1011 });
+  expect(
+    collapseAuthFailures([{ ...rows[0], count: 3 }, rows[1]])[0].count,
+  ).toBe(4);
+  expect(
+    collapseAuthFailures([
+      ...rows,
+      { id: 20, ts: 2000, eventType: "admin.login" },
+      ...rows,
+    ]).filter((group) => group.auth),
+  ).toHaveLength(2);
+  expect(
+    collapseAuthFailures([rows[0], { ...rows[1], path: "/other" }]),
+  ).toHaveLength(2);
+  render(<ActivityTable rows={rows} collapse />);
+  const toggle = screen.getByRole("button", {
+    name: /Auth failed ≥12 · \/unknown/,
+  });
+  expect(toggle).toHaveAttribute("aria-expanded", "false");
+  expect(screen.getAllByRole("row")).toHaveLength(2);
+  fireEvent.click(toggle);
+  expect(toggle).toHaveAttribute("aria-expanded", "true");
+  expect(screen.getAllByText("Unauthenticated request")).toHaveLength(12);
+});
+
+it("restores the unauthenticated filter in queries and exports and removes it when unchecked", async () => {
+  history.replaceState(null, "", "/console/activity?excludeAuthFailed=1");
+  const data = snapshot();
+  data.activity = [{ id: 1, ts: 1000, type: "auth.failed" }];
+  const view = render(<ActivityView snapshot={data} />);
+  const toggle = screen.getByRole("checkbox", {
+    name: "Hide unauthenticated requests",
+  });
+  expect(toggle).toBeChecked();
+  await waitFor(() =>
+    expect(api).toHaveBeenLastCalledWith("activity?excludeAuthFailed=1"),
+  );
+  expect(screen.getByRole("link", { name: "Export CSV" })).toHaveAttribute(
+    "href",
+    expect.stringContaining("excludeAuthFailed=1"),
+  );
+  view.rerender(
+    <ActivityView
+      snapshot={{
+        ...data,
+        activity: [{ id: 2, ts: 2000, type: "auth.failed" }],
+      }}
+    />,
+  );
+  expect(screen.queryByText("Unauthenticated request")).not.toBeInTheDocument();
+  fireEvent.click(toggle);
+  expect(location.search).toBe("");
+  await waitFor(() => expect(api).toHaveBeenLastCalledWith("activity?"));
 });

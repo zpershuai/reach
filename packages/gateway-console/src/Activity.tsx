@@ -1,9 +1,15 @@
 import { useT, i18n } from "./i18n";
 import { navigate, useSearch } from "./router";
-import { memo, useEffect, useMemo, useRef, useState } from "react";
+import { Fragment, memo, useEffect, useMemo, useRef, useState } from "react";
 import { api, errorText } from "./api";
 import type { Activity, Snapshot } from "./types";
-import { activityKey, MethodSwatch, formatBytes, formatTime } from "./ui";
+import {
+  activityKey,
+  MethodSwatch,
+  formatBytes,
+  formatTime,
+  formatNumber,
+} from "./ui";
 
 const stageKeys = {
   auth: "topology.auth",
@@ -23,6 +29,7 @@ const eventKeys = {
 
 function resultText(row: Activity): string {
   const type = row.type ?? row.eventType;
+  if (type === "auth.failed") return i18n.t("activity.authFailed");
   if (type === "rpc.denied") {
     const stageKey = Object.hasOwn(stageKeys, row.stage ?? "")
       ? stageKeys[row.stage as keyof typeof stageKeys]
@@ -30,7 +37,7 @@ function resultText(row: Activity): string {
     return i18n.t("activity.deniedAt", {
       stage: stageKey
         ? i18n.t(stageKey)
-        : row.stage ?? i18n.t("topology.policy"),
+        : (row.stage ?? i18n.t("topology.policy")),
       code: row.code ? ` (${row.code})` : "",
     });
   }
@@ -39,7 +46,6 @@ function resultText(row: Activity): string {
       ? i18n.t("activity.ok")
       : i18n.t("activity.done");
   if (row.outcome === "error") return row.code ?? i18n.t("activity.error");
-  if (type === "auth.failed") return i18n.t("activity.authFailed");
   const key = Object.hasOwn(eventKeys, type ?? "")
     ? eventKeys[type as keyof typeof eventKeys]
     : undefined;
@@ -47,14 +53,106 @@ function resultText(row: Activity): string {
   return type?.replace(/^\w+\./, "") ?? i18n.t("activity.event");
 }
 
+interface ActivityGroup {
+  rows: Activity[];
+  auth: boolean;
+  path?: string;
+  count: number;
+  ts: number;
+}
+
+export function collapseAuthFailures(rows: Activity[]): ActivityGroup[] {
+  const groups: ActivityGroup[] = [];
+  for (const row of rows) {
+    const auth = (row.type ?? row.eventType) === "auth.failed";
+    const previous = groups.at(-1);
+    if (auth && previous?.auth && previous.path === row.path) {
+      previous.rows.push(row);
+      previous.count += row.count ?? 1;
+      previous.ts = Math.max(previous.ts, row.ts);
+    } else {
+      groups.push({
+        rows: [row],
+        auth,
+        path: row.path,
+        count: row.count ?? 1,
+        ts: row.ts,
+      });
+    }
+  }
+  return groups;
+}
+
 export const ActivityTable = memo(function ActivityTable({
   rows,
   tall = false,
+  collapse = false,
+  maxRows,
 }: {
   rows: Activity[];
   tall?: boolean;
+  collapse?: boolean;
+  maxRows?: number;
 }) {
   const { t, lang } = useT();
+  const [expanded, setExpanded] = useState<Set<string>>(() => new Set());
+  const groups = useMemo(() => {
+    const entries = collapse
+      ? collapseAuthFailures(rows)
+      : rows.map((row) => ({ rows: [row], auth: false, ts: row.ts, count: 1 }));
+    return maxRows === undefined ? entries : entries.slice(0, maxRows);
+  }, [rows, collapse, maxRows]);
+  const showMetrics = groups
+    .flatMap((group) => group.rows)
+    .some((row) => row.latencyMs != null || row.responseBytes != null);
+  function renderRow(row: Activity) {
+    const target =
+      [row.workspace, row.path ?? row.script ?? row.processId]
+        .filter(Boolean)
+        .join(" / ") || "—";
+    return (
+      <tr key={activityKey(row)}>
+        <td className="mono">{formatTime(row.ts, lang)}</td>
+        <td>
+          {(row.type ?? row.eventType) === "auth.failed"
+            ? t("activity.unauthenticated")
+            : (row.clientLabel ?? row.caller?.label ?? "Gateway")}
+        </td>
+        <td>
+          <span className="method">
+            <MethodSwatch methodClass={row.methodClass} />
+            {row.method ?? row.action ?? row.eventType ?? row.type}
+          </span>
+        </td>
+        <td>
+          <span
+            className={`res ${row.outcome ?? ""}${(row.type ?? row.eventType) === "rpc.denied" ? " denied" : ""}`}
+          >
+            {resultText(row)}
+            {row.count !== undefined && ` ×${row.count}`}
+          </span>
+        </td>
+        <td>
+          <span className="target" title={target}>
+            {target}
+          </span>
+        </td>
+        <td className="mono">{row.engineId ?? "—"}</td>
+        {showMetrics && (
+          <>
+            <td className="num">
+              {row.latencyMs === undefined || row.latencyMs === null
+                ? "—"
+                : t("common.milliseconds", {
+                    count: Math.round(row.latencyMs),
+                  })}
+            </td>
+            <td className="num">{formatBytes(row.responseBytes, lang)}</td>
+          </>
+        )}
+      </tr>
+    );
+  }
   return (
     <div className={`table-wrap${tall ? " tall" : ""}`}>
       <table>
@@ -62,52 +160,48 @@ export const ActivityTable = memo(function ActivityTable({
           <tr>
             <th>{t("activity.time")}</th>
             <th>{t("activity.client")}</th>
-            <th>{t("activity.device")}</th>
             <th>{t("activity.method")}</th>
-            <th>{t("activity.target")}</th>
             <th>{t("activity.result")}</th>
-            <th className="num">{t("activity.latency")}</th>
-            <th className="num">{t("activity.size")}</th>
+            <th>{t("activity.target")}</th>
+            <th>{t("activity.device")}</th>
+            {showMetrics && (
+              <>
+                <th className="num">{t("activity.latency")}</th>
+                <th className="num">{t("activity.size")}</th>
+              </>
+            )}
           </tr>
         </thead>
         <tbody>
-          {rows.map((row) => {
-            const target =
-              [row.workspace, row.path ?? row.script ?? row.processId]
-                .filter(Boolean)
-                .join(" / ") || "—";
+          {groups.map((group) => {
+            const key = activityKey(group.rows[0]);
+            if (!group.auth) return renderRow(group.rows[0]);
+            const open = expanded.has(key);
             return (
-              <tr key={activityKey(row)}>
-                <td className="mono">{formatTime(row.ts, lang)}</td>
-                <td>{row.clientLabel ?? row.caller?.label ?? "Gateway"}</td>
-                <td className="mono">{row.engineId ?? "—"}</td>
-                <td>
-                  <span className="method">
-                    <MethodSwatch methodClass={row.methodClass} />
-                    {row.method ?? row.action ?? row.eventType ?? row.type}
-                  </span>
-                </td>
-                <td>
-                  <span className="target" title={target}>
-                    {target}
-                  </span>
-                </td>
-                <td>
-                  <span
-                    className={`res ${row.outcome ?? ""}${(row.type ?? row.eventType) === "rpc.denied" ? " denied" : ""}`}
-                  >
-                    {resultText(row)}
-                  </span>
-                </td>
-                <td className="num">
-                  {row.latencyMs === undefined || row.latencyMs === null
-                    ? "—"
-                    : t("common.milliseconds", {
-                        count: Math.round(row.latencyMs),
-                      })}
-                </td>
-                <td className="num">{formatBytes(row.responseBytes, lang)}</td>
-              </tr>
+              <Fragment key={`group:${key}`}>
+                <tr className="auth-group">
+                  <td className="mono">{formatTime(group.ts, lang)}</td>
+                  <td colSpan={showMetrics ? 7 : 5}>
+                    <button
+                      className="btn small ghost"
+                      aria-expanded={open}
+                      onClick={() =>
+                        setExpanded((previous) => {
+                          const next = new Set(previous);
+                          if (open) next.delete(key);
+                          else next.add(key);
+                          return next;
+                        })
+                      }
+                    >
+                      {open ? "▾" : "▸"} {t("activity.authFailed")} ≥
+                      {formatNumber(group.count, lang)} ·{" "}
+                      {group.rows[0].path ?? "—"}
+                    </button>
+                  </td>
+                </tr>
+                {open && group.rows.map(renderRow)}
+              </Fragment>
             );
           })}
         </tbody>
@@ -209,6 +303,16 @@ export function ActivityView({ snapshot }: { snapshot: Snapshot }) {
         </div>
       </div>
       <div className="filters">
+        <label className="checkbox">
+          <input
+            type="checkbox"
+            checked={["1", "true"].includes(filters.excludeAuthFailed)}
+            onChange={(event) =>
+              select("excludeAuthFailed", event.target.checked ? "1" : "")
+            }
+          />
+          {t("activity.hideUnauthenticated")}
+        </label>
         <label>
           {t("activity.device")}
           <select
@@ -328,6 +432,11 @@ function matchesActivity(
   row: Activity,
   filters: Record<string, string>,
 ): boolean {
+  if (
+    ["1", "true"].includes(filters.excludeAuthFailed) &&
+    (row.type ?? row.eventType) === "auth.failed"
+  )
+    return false;
   if (filters.engineId && row.engineId !== filters.engineId) return false;
   if (
     filters.clientLabel &&
