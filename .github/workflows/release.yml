@@ -58,7 +58,7 @@ jobs:
         include:
           - os: ubuntu-24.04
             asset: engine-linux-x64-musl
-          - os: macos-14
+          - os: macos-15
             asset: engine-darwin-arm64
           - os: macos-15-intel
             asset: engine-darwin-x64
