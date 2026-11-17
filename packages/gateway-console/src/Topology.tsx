@@ -33,6 +33,10 @@ type Selection =
   | { kind: "gateway" };
 const clientKey = (type: string | undefined, label: string) =>
   `${type ?? "controller"}-${label}`;
+// Beyond this many clients, idle ones fold into a single summary node so the
+// lane stays roughly as tall as the Gateway and Engine lanes.
+const CLIENT_LIMIT = 6;
+const MORE = "ingress-__more";
 const classes = ["read", "write", "exec", "skill", "control"] as const;
 const legend = {
   read: "topology.read",
@@ -80,7 +84,32 @@ export function TopologyView({
   const previousId = useRef(0);
   pausedRef.current = paused;
   const lastEvent = events.at(-1)?.id;
-  const { clients, engines } = snapshot;
+  const { engines } = snapshot;
+  const [expanded, setExpanded] = useState(false);
+  const clients = useMemo(
+    () =>
+      [...snapshot.clients].sort(
+        (a, b) =>
+          Number(b.activeSessions > 0 || b.ownedEngines.length > 0) -
+            Number(a.activeSessions > 0 || a.ownedEngines.length > 0) ||
+          b.lastSeenAt - a.lastSeenAt,
+      ),
+    [snapshot.clients],
+  );
+  const foldable = clients.length > CLIENT_LIMIT + 1;
+  const visible =
+    foldable && !expanded
+      ? clients.filter(
+          (item, index) =>
+            index < CLIENT_LIMIT ||
+            item.activeSessions > 0 ||
+            item.ownedEngines.length > 0 ||
+            (drawer?.kind === "client" && drawer.id === item.label),
+        )
+      : clients;
+  const hidden = clients.filter((item) => !visible.includes(item));
+  const hiddenKeys = useRef<string[]>([]);
+  hiddenKeys.current = hidden.map((item) => clientKey(item.type, item.label));
 
   const clientSelected =
     selection?.kind === "client" ? selection.id : undefined;
@@ -126,7 +155,13 @@ export function TopologyView({
     const engineRoutes = new Map<string, Route>();
     for (const [key, element] of nodes.current) {
       const r = rel(element);
-      if (key.startsWith("ingress-"))
+      if (key === MORE) {
+        const route = bezier({ x: r.x + r.w, y: r.y + r.h / 2 }, gL);
+        clientRoutes.set(key, route);
+        // Particles from folded clients travel along the summary edge.
+        for (const hiddenKey of hiddenKeys.current)
+          clientRoutes.set(hiddenKey, route);
+      } else if (key.startsWith("ingress-"))
         clientRoutes.set(
           key.slice(8),
           bezier({ x: r.x + r.w, y: r.y + r.h / 2 }, gL),
@@ -152,7 +187,8 @@ export function TopologyView({
   }
 
   const shape = [
-    ...clients.map((client) => clientKey(client.type, client.label)),
+    ...visible.map((client) => clientKey(client.type, client.label)),
+    hidden.length,
     "|",
     ...engines.map((engine) => engine.id),
   ].join("\0");
@@ -381,7 +417,13 @@ export function TopologyView({
                   d={`M${geo.gL.x},${geo.gL.y} L${geo.gR.x},${geo.gR.y}`}
                 />
               )}
-              {clients.map((item) => {
+              {hidden.length > 0 && geo?.clients.get(MORE) && (
+                <path
+                  className={`edge c-idle${selection ? " dim" : ""}`}
+                  d={geo.clients.get(MORE)!.d}
+                />
+              )}
+              {visible.map((item) => {
                 const key = clientKey(item.type, item.label);
                 const route = geo?.clients.get(key);
                 if (!route) return null;
@@ -459,7 +501,7 @@ export function TopologyView({
                   <span>{t("topology.clients")}</span>
                   <span>{formatNumber(clients.length, lang)}</span>
                 </div>
-                {clients.map((item) => {
+                {visible.map((item) => {
                   const key = clientKey(item.type, item.label);
                   const selected =
                     drawer?.kind === "client" && drawer.id === item.label;
@@ -467,7 +509,7 @@ export function TopologyView({
                     <div
                       key={key}
                       ref={nodeRef(`ingress-${key}`)}
-                      className={`node${clientDim(item) ? " dim" : ""}${selected ? " selected" : ""}`}
+                      className={`node client${item.activeSessions ? " active" : ""}${clientDim(item) ? " dim" : ""}${selected ? " selected" : ""}`}
                       role="button"
                       tabIndex={0}
                       onClick={() => choose({ kind: "client", id: item.label })}
@@ -475,33 +517,49 @@ export function TopologyView({
                         choose({ kind: "client", id: item.label }),
                       )}
                     >
-                      <div className="row">
-                        <span className="who">
-                          <ClientAvatar label={item.label} />
+                      <ClientAvatar label={item.label} />
+                      <span className="client-body">
+                        <span className="row">
                           <span className="name">{item.label}</span>
-                        </span>
-                        <span
-                          className={`pill ${item.activeSessions ? "ok" : ""}`}
-                        >
-                          {item.activeSessions
-                            ? t("topology.sessions", {
+                          {item.activeSessions ? (
+                            <span className="pill ok">
+                              <span className="dot" />
+                              {t("topology.sessions", {
                                 count: item.activeSessions,
-                              })
-                            : t("topology.idle")}
+                              })}
+                            </span>
+                          ) : (
+                            <span className="client-idle">
+                              {t("topology.idle")}
+                            </span>
+                          )}
                         </span>
-                      </div>
-                      <div className="meta">
-                        <span>
-                          {item.type === "mcp-http"
-                            ? t("topology.remote")
-                            : t("topology.controller")}{" "}
-                          {t("topology.unverified")}
+                        <span className="meta">
+                          <span className="client-kind">
+                            {item.type === "mcp-http"
+                              ? t("topology.remote")
+                              : t("topology.controller")}{" "}
+                            {t("topology.unverified")}
+                          </span>
+                          <span>{formatAgo(item.lastSeenAt, now, lang)}</span>
                         </span>
-                        <span>{formatAgo(item.lastSeenAt, now, lang)}</span>
-                      </div>
+                      </span>
                     </div>
                   );
                 })}
+                {foldable && (
+                  <button
+                    ref={nodeRef(MORE)}
+                    type="button"
+                    className={`node client more${selection && hidden.length ? " dim" : ""}`}
+                    aria-expanded={expanded}
+                    onClick={() => setExpanded(!expanded)}
+                  >
+                    {expanded
+                      ? t("topology.fewerClients")
+                      : t("topology.moreClients", { count: hidden.length })}
+                  </button>
+                )}
                 {!clients.length && (
                   <div className="lane-empty">{t("topology.emptyClients")}</div>
                 )}
@@ -542,6 +600,23 @@ export function TopologyView({
                       <b>{t("topology.route")}</b>
                       <span>engineId</span>
                     </div>
+                  </div>
+                  <div className="gw-kpis">
+                    <span>
+                      <b>{formatNumber(snapshot.kpis.requestsPerMinute, lang)}</b>
+                      {t("topology.kpiRpm")}
+                    </span>
+                    <span>
+                      <b>
+                        {formatNumber(snapshot.kpis.onlineEngines, lang)}/
+                        {formatNumber(snapshot.kpis.registeredEngines, lang)}
+                      </b>
+                      {t("topology.kpiOnline")}
+                    </span>
+                    <span>
+                      <b>{formatNumber(snapshot.kpis.activeMcpSessions, lang)}</b>
+                      {t("topology.kpiSessions")}
+                    </span>
                   </div>
                   <div className="gw-foot">
                     <span>{t("topology.audit")}</span>
@@ -587,7 +662,21 @@ export function TopologyView({
                             <span className="name">{engine.displayName}</span>
                           </div>
                           <div className="meta">
-                            <span>{modelText(engine, lang)}</span>
+                            <span className="eng-model">
+                              {modelText(engine, lang)}
+                            </span>
+                            {displayOnline(
+                              engine,
+                              now,
+                              snapshot.gateway.heartbeatInterval,
+                            ) &&
+                              engine.session.workspaces && (
+                                <span className="eng-ws">
+                                  {t("topology.workspaces", {
+                                    count: engine.session.workspaces.length,
+                                  })}
+                                </span>
+                              )}
                           </div>
                           <div className="meta">
                             <EngineStatus
@@ -596,18 +685,6 @@ export function TopologyView({
                               }
                               engine={engine}
                             />
-                            {displayOnline(
-                              engine,
-                              now,
-                              snapshot.gateway.heartbeatInterval,
-                            ) &&
-                              engine.session.workspaces && (
-                                <span>
-                                  {t("topology.workspaces", {
-                                    count: engine.session.workspaces.length,
-                                  })}
-                                </span>
-                              )}
                           </div>
                         </div>
                       </div>
@@ -619,6 +696,16 @@ export function TopologyView({
                 )}
               </div>
             </div>
+            {geo && (
+              <svg
+                className="ports"
+                aria-hidden="true"
+                viewBox={`0 0 ${geo.w} ${geo.h}`}
+              >
+                <circle className="port" cx={geo.gL.x} cy={geo.gL.y} r={4} />
+                <circle className="port" cx={geo.gR.x} cy={geo.gR.y} r={4} />
+              </svg>
+            )}
             <canvas ref={canvas} className="flow" aria-hidden="true" />
           </div>
         </div>

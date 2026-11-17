@@ -169,10 +169,11 @@ input[readonly] { background: var(--surface-2); font-family: var(--f-mono); font
 
 /* Topology */
 .topo-scroll { overflow-x: auto; }
-.topo { position: relative; min-width: 940px; padding: 18px 22px 22px; }
-.lanes { position: relative; z-index: 2; display: grid; grid-template-columns: 232px 340px 264px; justify-content: space-between; align-items: center; min-height: 420px; }
-.lane { display: flex; flex-direction: column; gap: 10px; }
-.lane-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); font-weight: 600; display: flex; justify-content: space-between; }
+.topo { position: relative; min-width: 940px; padding: 20px 24px 24px; background-image: radial-gradient(circle, color-mix(in srgb, var(--line) 70%, transparent) 1px, transparent 1.2px); background-size: 18px 18px; background-position: 9px 9px; }
+.lanes { position: relative; z-index: 2; display: grid; grid-template-columns: 248px 356px 268px; justify-content: space-between; align-items: center; min-height: 360px; }
+.lane { display: flex; flex-direction: column; gap: 8px; }
+.lane-title { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--faint); font-weight: 600; display: flex; justify-content: space-between; align-items: center; padding: 0 2px 2px; }
+.lane-title span:last-child { font-family: var(--f-mono); letter-spacing: 0; text-transform: none; padding: 0 7px; border-radius: 999px; background: var(--surface); border: 1px solid var(--line); color: var(--muted); }
 .lane-empty { padding: 14px 12px; border: 1px dashed var(--line); border-radius: 10px; color: var(--faint); font-size: 12.5px; }
 .node { position: relative; background: var(--surface); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 4px; transition: border-color 0.2s, opacity 0.2s, box-shadow 0.2s; text-align: left; width: 100%; }
 .node:hover { border-color: var(--faint); }
@@ -186,34 +187,65 @@ input[readonly] { background: var(--surface-2); font-family: var(--f-mono); font
 .node.hit { animation: hit 0.5s ease-out; }
 @keyframes hit { from { box-shadow: 0 0 0 4px var(--accent-soft); } to { box-shadow: 0 0 0 0 transparent; } }
 .eng { display: flex; gap: 10px; align-items: center; }
+.eng .dev-icon { width: 38px; height: 38px; border-radius: 9px; }
+.eng .dev-icon svg { width: 28px; height: 28px; }
+.eng .pill { padding: 1px 8px; font-size: 11.5px; }
+.eng .meta { flex-wrap: nowrap; gap: 4px 6px; }
+.eng-model { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.eng-ws { flex: none; color: var(--faint); }
+.eng-ws::before { content: "· "; }
+/* Clients are compact rows: avatar, name and one muted meta line. */
+.node.client { flex-direction: row; align-items: center; gap: 10px; padding: 8px 10px; }
+.node.client .avatar { width: 28px; height: 28px; border-radius: 8px; font-size: 11.5px; }
+.node.client .name { font-size: 13.5px; }
+.client-body { display: flex; flex-direction: column; gap: 1px; min-width: 0; flex: 1; }
+.node.client .meta { flex-wrap: nowrap; justify-content: space-between; font-size: 11.5px; color: var(--faint); }
+.client-kind { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
+.node.client .meta > span:last-child { flex: none; }
+.node.client .pill { padding: 1px 8px; font-size: 11.5px; }
+.client-idle { flex: none; font-size: 11.5px; color: var(--faint); display: inline-flex; align-items: center; gap: 5px; }
+.client-idle::before { content: ""; width: 6px; height: 6px; border-radius: 50%; border: 1px solid currentColor; }
+.node.client.active { border-color: color-mix(in srgb, var(--ok) 45%, var(--line)); }
+.node.client.more { justify-content: center; padding: 9px 10px; border-style: dashed; background: var(--surface-2); color: var(--muted); font: inherit; font-size: 12.5px; font-weight: 500; }
+.node.client.more:hover { color: var(--ink); }
 .eng-body { display: flex; flex-direction: column; gap: 4px; min-width: 0; flex: 1; }
 /* Avatars use muted neutrals: reserve read/write/exec/skill hues for method semantics.
    White initials retain AA contrast on these backgrounds in either theme. */
 .avatar { width: 22px; height: 22px; border-radius: 6px; display: inline-grid; place-items: center; font-size: 11px; font-weight: 600; color: #fff; flex: none; }
 .who { display: flex; align-items: center; gap: 8px; min-width: 0; }
 
-.gw { padding: 14px; gap: 12px; border-color: var(--accent); box-shadow: var(--shadow); cursor: pointer; }
+.gw { padding: 16px; gap: 14px; border-color: color-mix(in srgb, var(--accent) 55%, var(--line)); box-shadow: 0 0 0 4px var(--accent-soft), var(--shadow); background: linear-gradient(180deg, var(--accent-soft), var(--surface) 46%); cursor: pointer; }
+.gw:hover { border-color: var(--accent); }
+.gw.selected { border-color: var(--accent); box-shadow: 0 0 0 4px color-mix(in srgb, var(--accent) 28%, transparent), var(--shadow); }
 .gw-head { display: flex; justify-content: space-between; align-items: baseline; gap: 8px; }
-.gw-head .name { font-family: var(--f-display); font-size: 17px; }
-.stages { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; position: relative; }
-.stage { position: relative; z-index: 2; background: var(--surface-2); border: 1px solid var(--line); border-radius: 8px; padding: 6px 8px; text-align: center; display: flex; flex-direction: column; gap: 1px; transition: background 0.25s, border-color 0.25s; }
+.gw-head .name { font-family: var(--f-display); font-size: 18px; }
+.stages { display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; position: relative; }
+/* Chevrons between stages read as one left-to-right pipeline. */
+.stage + .stage::before { content: ""; position: absolute; left: -12px; top: 50%; width: 7px; height: 7px; border-top: 1.5px solid var(--faint); border-right: 1.5px solid var(--faint); transform: translateY(-50%) rotate(45deg); }
+.stage { position: relative; z-index: 2; background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 7px 8px; text-align: center; display: flex; flex-direction: column; gap: 1px; transition: background 0.25s, border-color 0.25s; }
 .stage b { font-size: 12.5px; font-weight: 600; }
 .stage span { font-size: 11px; color: var(--muted); }
 .stage.flash, .stage.stage-highlight { background: var(--accent-soft); border-color: var(--accent); }
 .stage.policy-denied { background: var(--err-soft); border-color: var(--err); }
+.gw-kpis { display: grid; grid-template-columns: repeat(3, 1fr); border: 1px solid var(--line); border-radius: 8px; background: var(--surface); }
+.gw-kpis span { display: flex; flex-direction: column; gap: 1px; padding: 7px 10px; font-size: 11px; color: var(--muted); min-width: 0; }
+.gw-kpis span + span { border-left: 1px solid var(--line); }
+.gw-kpis b { font-family: var(--f-mono); font-size: 15px; font-weight: 500; color: var(--ink); }
 .gw-foot { display: flex; flex-wrap: wrap; justify-content: space-between; gap: 6px; color: var(--muted); font-size: 12px; }
 
-svg.edges, canvas.flow { position: absolute; inset: 0; width: 100%; height: 100%; }
+svg.edges, svg.ports, canvas.flow { position: absolute; inset: 0; width: 100%; height: 100%; }
+svg.ports { z-index: 3; pointer-events: none; }
 svg.edges { z-index: 1; }
 canvas.flow { z-index: 3; pointer-events: none; }
 .edge { fill: none; stroke-width: 1.6; transition: stroke 0.3s, opacity 0.3s; }
-.edge.c-active { stroke: var(--faint); }
-.edge.c-idle { stroke: var(--line); stroke-dasharray: 4 5; }
+.edge.c-active { stroke: var(--ok); stroke-width: 2; }
+.edge.c-idle { stroke: var(--line); stroke-width: 1.3; }
 .edge.e-ready { stroke: var(--accent); stroke-width: 2; }
 .edge.e-idle { stroke: var(--faint); stroke-dasharray: 3 6; }
 .edge.e-connecting { stroke: var(--warn); stroke-dasharray: 6 6; animation: dash 0.9s linear infinite; }
 .edge.e-offline { stroke: var(--line); stroke-dasharray: 1 6; stroke-linecap: round; }
 .edge.gwline { stroke: var(--line); stroke-dasharray: 2 4; }
+.port { fill: var(--surface); stroke: var(--accent); stroke-width: 2; }
 .edge.dim { opacity: 0.25; }
 .edge.event-highlight { stroke: var(--accent); stroke-width: 3; }
 @keyframes dash { to { stroke-dashoffset: -24; } }
@@ -369,7 +401,7 @@ pre.command { margin: 0; padding: 12px; border-radius: 8px; background: var(--su
   .lanes { grid-template-columns: minmax(0, 1fr); min-height: 0; gap: 14px; }
   .lane { min-width: 0; }
   .lane-direction { display: block; text-align: center; color: var(--faint); font-size: 12px; }
-  svg.edges, canvas.flow { display: none; }
+  svg.edges, svg.ports, canvas.flow { display: none; }
   .node .row { flex-wrap: wrap; }
   .stages { gap: 6px; }
   .stage { padding-inline: 4px; }
