@@ -324,6 +324,12 @@ export const en = {
     closing: "closing",
   },
   topology: {
+    moreClients_one: "+{{count, number}} idle client",
+    moreClients_other: "+{{count, number}} idle clients",
+    fewerClients: "Show fewer",
+    kpiRpm: "req/min",
+    kpiOnline: "devices online",
+    kpiSessions: "MCP sessions",
     read: "Read",
     write: "Write",
     exec: "Exec",

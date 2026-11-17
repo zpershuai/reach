@@ -157,3 +157,35 @@ it("stops Canvas frames on narrow screens while keeping device drawers and activ
   expect(screen.queryByText("fs.write")).not.toBeInTheDocument();
   expect(view.container.querySelectorAll(".lane-direction")).toHaveLength(2);
 });
+
+it("folds idle clients beyond the lane limit while keeping active clients visible", () => {
+  vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(null);
+  const data = snapshot();
+  const [active] = data.clients;
+  data.clients = [
+    ...Array.from({ length: 9 }, (_, index) => ({
+      ...active,
+      label: `Idle client ${index}`,
+      lastSeenAt: 900 - index,
+      activeSessions: 0,
+      ownedEngines: [],
+    })),
+    active,
+  ];
+  render(
+    <TopologyView
+      snapshot={data}
+      events={[]}
+      sensitive={async (action) => action()}
+    />,
+  );
+  expect(screen.getByText("Test client 1")).toBeVisible();
+  expect(screen.getByText("Idle client 4")).toBeVisible();
+  expect(screen.queryByText("Idle client 5")).toBeNull();
+  const more = screen.getByRole("button", { name: "+4 idle clients" });
+  expect(more).toHaveAttribute("aria-expanded", "false");
+  fireEvent.click(more);
+  expect(screen.getByText("Idle client 8")).toBeVisible();
+  fireEvent.click(screen.getByRole("button", { name: "Show fewer" }));
+  expect(screen.queryByText("Idle client 8")).toBeNull();
+});

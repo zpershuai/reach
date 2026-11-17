@@ -314,6 +314,12 @@ export const zhCN: Messages = {
     closing: "正在关闭",
   },
   topology: {
+    moreClients_one: "+{{count, number}} 个空闲客户端",
+    moreClients_other: "+{{count, number}} 个空闲客户端",
+    fewerClients: "收起",
+    kpiRpm: "请求/分钟",
+    kpiOnline: "在线设备",
+    kpiSessions: "MCP 会话",
     read: "读取",
     write: "写入",
     exec: "执行",
