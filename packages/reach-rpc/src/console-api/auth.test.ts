@@ -44,40 +44,59 @@ async function fixture(setupToken: string | undefined = "test-setup-token") {
   };
   const setup = async (token = setupToken!) => {
     await call("me");
-    const enrollment = await call("setup", { token });
-    assert.equal(enrollment.response.status, 200);
-    const secret = enrollment.data.secret as string;
-    const created = await call("setup", { token, password: "a long owner password", code: totp(secret, now) });
-    assert.equal(created.response.status, 200);
-    return { secret, ...created };
+    const created = await call("setup", { token, username: "owner", password: "a long owner password" });
+    assert.equal(created.response.status, 200, JSON.stringify(created.data));
+    return created;
+  };
+  /** Enrols the signed-in user's authenticator and returns its secret and recovery codes. */
+  const enableTotp = async () => {
+    const begun = await call("account/totp/begin", {});
+    assert.equal(begun.response.status, 200, JSON.stringify(begun.data));
+    const secret = begun.data.secret as string;
+    const confirmed = await call("account/totp/confirm", { code: totp(secret, now) });
+    assert.equal(confirmed.response.status, 200, JSON.stringify(confirmed.data));
+    return { secret, recoveryCodes: confirmed.data.recoveryCodes as string[] };
+  };
+  /** Signs out and signs in again as another account. */
+  const signInAs = async (username: string, password: string, code?: string) => {
+    cookies = new Map(); csrfToken = "";
+    await call("me");
+    return call("login", { username, password, ...(code ? { code } : {}) });
   };
   return {
-    gateway, base, directory, logs, origin, controllerToken, call, setup,
+    gateway, base, directory, logs, origin, controllerToken, call, setup, enableTotp, signInAs,
     cookies: () => new Map(cookies), reset: () => { cookies = new Map(); csrfToken = ""; },
     advance: (ms: number) => { now += ms; }, now: () => now,
     close: async () => { await new Promise<void>(resolve => gateway.close(() => resolve())); rmSync(directory, { recursive: true, force: true }); },
   };
 }
 
-test("setup requires its token, confirms TOTP, hashes sessions, and refuses a second administrator", async () => {
+test("setup requires its token, creates an admin without TOTP, hashes sessions, and refuses a second setup", async () => {
   const f = await fixture();
   try {
     await f.call("me");
-    assert.equal((await f.call("setup", { token: "wrong" })).response.status, 403);
+    assert.equal((await f.call("setup", { token: "wrong", username: "owner", password: "a long owner password" })).response.status, 403);
+    assert.equal((await f.call("setup", { token: "test-setup-token", username: "x", password: "a long owner password" })).data.code, "USERNAME_INVALID");
+    assert.equal((await f.call("setup", { token: "test-setup-token", username: "owner", password: "short" })).data.code, "PASSWORD_LENGTH");
     const setup = await f.setup();
-    assert.equal(setup.data.recoveryCodes.length, 10);
+    assert.deepEqual(setup.data.user, { id: 1, username: "owner", role: "admin", totpEnabled: false });
+    assert.ok(!("recoveryCodes" in setup.data) && !("secret" in setup.data));
     const sessionCookie = setup.response.headers.getSetCookie().find(value => value.startsWith("reach_console="))!;
     for (const attribute of ["HttpOnly", "SameSite=Strict", "Path=/", "Secure"]) assert.ok(sessionCookie.includes(attribute));
     const store = new ConsoleStore(f.directory);
     try {
       const row = store.db.prepare("SELECT * FROM console_sessions").get()!;
       assert.notEqual(row.digest, f.cookies().get("reach_console"));
-      assert.ok(!JSON.stringify(store.db.prepare("SELECT * FROM recovery_codes").all()).includes(setup.data.recoveryCodes[0]));
+      assert.equal(store.db.prepare("SELECT count(*) AS n FROM recovery_codes").get()!.n, 0);
     } finally { store.close(); }
     const me = await f.call("me");
     assert.equal(me.data.authenticated, true);
-    assert.ok(!("recoveryCodes" in me.data));
-    assert.equal((await f.call("setup", { token: "test-setup-token" })).response.status, 409);
+    assert.equal(me.data.user.username, "owner");
+    assert.equal((await f.call("setup", { token: "test-setup-token", username: "second", password: "a long owner password" })).response.status, 409);
+    const snapshot = await f.call("snapshot");
+    assert.ok(snapshot.data.gateway.warningDetails.some((warning: { code: string }) => warning.code === "ADMIN_WITHOUT_TOTP"));
+    await f.enableTotp();
+    assert.ok(!(await f.call("snapshot")).data.gateway.warningDetails.some((warning: { code: string }) => warning.code === "ADMIN_WITHOUT_TOTP"));
   } finally { await f.close(); }
 });
 
@@ -96,32 +115,40 @@ test("generated setup tokens use a private file, never logs, and disappear after
   } finally { await f.close(); }
 });
 
-test("factor failures are generic, logout revokes immediately, and TOTP cannot be replayed", async () => {
+test("credential failures are generic, TOTP is asked only after a correct password, and codes cannot be replayed", async () => {
   const f = await fixture();
   try {
-    const setup = await f.setup();
+    await f.setup();
+    const { secret, recoveryCodes } = await f.enableTotp();
     const oldCookie = f.cookies().get("reach_console")!;
     await f.call("logout", {});
     assert.equal((await f.call("engines", undefined, { cookie: `reach_console=${oldCookie}` })).response.status, 401);
     await f.call("me");
     f.advance(30_000);
-    const code = totp(setup.secret, f.now());
+    const code = totp(secret, f.now());
     const wrong = String((Number(code) + 1) % 1_000_000).padStart(6, "0");
-    const wrongPassword = await f.call("login", { password: "wrong password", code });
-    const wrongCode = await f.call("login", { password: "a long owner password", code: wrong });
+    const wrongPassword = await f.call("login", { username: "owner", password: "wrong password", code });
+    const wrongCode = await f.call("login", { username: "owner", password: "a long owner password", code: wrong });
+    const unknownUser = await f.call("login", { username: "nobody", password: "a long owner password", code });
     assert.equal(wrongPassword.response.status, 401);
     assert.equal(wrongPassword.data.code, "INVALID_CREDENTIALS");
     assert.equal(wrongPassword.data.error, "Invalid credentials");
-    assert.equal(wrongCode.response.status, 401);
     assert.deepEqual(wrongPassword.data, wrongCode.data);
-    assert.equal((await f.call("login", { password: "a long owner password", code })).response.status, 200);
+    assert.deepEqual(wrongPassword.data, unknownUser.data);
+    const missingCode = await f.call("login", { username: "OWNER", password: "a long owner password" });
+    assert.equal(missingCode.response.status, 401);
+    assert.equal(missingCode.data.code, "TOTP_REQUIRED");
+    assert.ok(!missingCode.response.headers.getSetCookie().some(value => value.startsWith("reach_console=")));
+    assert.equal((await f.call("login", { username: "owner", password: "a long owner password", code })).response.status, 200);
     await f.call("logout", {});
     await f.call("me");
-    assert.equal((await f.call("login", { password: "a long owner password", code })).response.status, 401);
-    assert.equal((await f.call("login", { password: "a long owner password", code: setup.data.recoveryCodes[0] })).response.status, 200);
+    assert.equal((await f.call("login", { username: "owner", password: "a long owner password", code })).response.status, 401);
+    assert.equal((await f.call("login", { username: "owner", password: "a long owner password", code: recoveryCodes[0] })).response.status, 200);
     const events = f.gateway.events!.replay(0);
-    for (const action of ["admin.setup", "admin.login", "admin.logout"]) assert.ok(events.some(event => event.action === action));
-    assert.ok(events.some(event => event.type === "auth.failed"));
+    for (const action of ["admin.setup", "admin.login", "admin.logout", "account.totp.enable"]) assert.ok(events.some(event => event.action?.startsWith(action)), action);
+    const login = events.find(event => event.action === "admin.login")!;
+    assert.deepEqual(login.caller, { type: "console", label: "owner", verified: true });
+    assert.equal(events.filter(event => event.type === "auth.failed").length >= 1, true);
   } finally { await f.close(); }
 });
 
@@ -313,11 +340,11 @@ test("console end-to-end: setup, enrollment, real Engine reads and writes, SSE, 
 test("console sessions expire after twelve hours idle and seven days absolute", async () => {
   const f = await fixture();
   try {
-    const setup = await f.setup();
+    await f.setup();
     f.advance(12 * 60 * 60_000);
     assert.equal((await f.call("engines")).response.status, 401);
     await f.call("me");
-    assert.equal((await f.call("login", { password: "a long owner password", code: setup.data.recoveryCodes[0] })).response.status, 200);
+    assert.equal((await f.call("login", { username: "owner", password: "a long owner password" })).response.status, 200);
     for (let hour = 0; hour < 7 * 24; hour++) {
       f.advance(60 * 60_000);
       const result = await f.call("me");
@@ -337,7 +364,7 @@ test("CSRF, Origin and credential isolation protect the console and data plane",
     assert.equal(dataPlane.status, 401);
     assert.equal((await f.call("engines", undefined, { cookie: "", authorization: `Bearer ${f.controllerToken}` })).response.status, 401);
     const events = f.gateway.events!.replay(0);
-    assert.ok(events.some(event => event.action === "admin.setup"));
+    assert.ok(events.some(event => event.action?.startsWith("admin.setup")));
     assert.ok(events.some(event => event.type === "auth.failed"));
   } finally { await f.close(); }
 });
@@ -346,12 +373,13 @@ test("five failed setup attempts apply back-off even when credentials become cor
   const f = await fixture();
   try {
     await f.call("me");
-    for (let attempt = 0; attempt < 5; attempt++) assert.equal((await f.call("setup", { token: "wrong" })).response.status, 403);
-    const limited = await f.call("setup", { token: "test-setup-token" });
+    const body = { username: "owner", password: "a long owner password" };
+    for (let attempt = 0; attempt < 5; attempt++) assert.equal((await f.call("setup", { token: "wrong", ...body })).response.status, 403);
+    const limited = await f.call("setup", { token: "test-setup-token", ...body });
     assert.equal(limited.response.status, 429);
     assert.equal(limited.response.headers.get("retry-after"), "30");
     f.advance(30_000);
-    assert.equal((await f.call("setup", { token: "test-setup-token" })).response.status, 200);
+    assert.equal((await f.call("setup", { token: "test-setup-token", ...body })).response.status, 200);
   } finally { await f.close(); }
 });
 
@@ -418,5 +446,156 @@ test("console resource errors keep distinct meanings and snapshots expose stable
     const warning = data.gateway.warningDetails.find((warning: { code: string }) => warning.code === "NO_TRUSTED_PROXIES");
     assert.ok(warning);
     assert.ok(data.gateway.warnings.includes(warning.message));
+  } finally { await f.close(); }
+});
+
+test("read-only users can read everything but every non-self-service mutation is ROLE_FORBIDDEN", async () => {
+  const f = await fixture();
+  try {
+    await f.setup();
+    assert.equal((await f.call("engines", { id: "engine-b", displayName: "Device B" })).response.status, 201);
+    const created = await f.call("users", { username: "viewer", password: "a long viewer password", role: "user" });
+    assert.equal(created.response.status, 201, JSON.stringify(created.data));
+    assert.deepEqual(Object.keys(created.data.user).sort(), ["createdAt", "disabled", "id", "lastLoginAt", "role", "totpEnabled", "username"]);
+    const signedIn = await f.signInAs("viewer", "a long viewer password");
+    assert.equal(signedIn.response.status, 200);
+    assert.equal(signedIn.data.user.role, "user");
+    for (const path of ["snapshot", "engines", "clients", "activity", "settings", "access-clients", "oauth"]) {
+      assert.equal((await f.call(path)).response.status, 200, path);
+    }
+    assert.equal((await f.call("users")).data.code, "ROLE_FORBIDDEN", "user management is hidden from viewers");
+    // Recent re-authentication does not lift the role check.
+    assert.equal((await f.call("reauth", { password: "a long viewer password" })).response.status, 200);
+    const mutations: Array<[string, unknown, string]> = [
+      ["engines", { id: "engine-c", displayName: "C" }, "POST"], ["engines/engine-b", { displayName: "Renamed" }, "PATCH"],
+      ["engines/engine-b/rotate", {}, "POST"], ["engines/engine-b", {}, "DELETE"],
+      ["clients/x/disconnect", {}, "POST"], ["oauth/x", {}, "DELETE"],
+      ["access-clients", { name: "x", expiresAt: f.now() + 3_600_000, permissions: [] }, "POST"], ["access-clients/x", {}, "DELETE"],
+      ["settings", { theme: "dark" }, "PATCH"], ["settings", { retentionDays: 9 }, "PATCH"],
+      ["users", { username: "other", password: "a long other password", role: "admin" }, "POST"], ["users/1", { role: "user" }, "PATCH"],
+      ["users/1/password", { password: "a long new password" }, "POST"], ["users/1/totp", {}, "DELETE"], ["users/1", {}, "DELETE"],
+    ];
+    for (const [path, body, method] of mutations) {
+      const result = await f.call(path, body, {}, method);
+      assert.equal(result.response.status, 403, `${method} ${path}`);
+      assert.equal(result.data.code, "ROLE_FORBIDDEN", `${method} ${path}`);
+    }
+    assert.ok(f.gateway.registry.engines.has("engine-b"));
+    assert.equal(f.gateway.registry.engines.get("engine-b")!.displayName, "Device B");
+    // Self-service stays open.
+    assert.equal((await f.call("account/password", { current: "a long viewer password", password: "a newer viewer password" })).response.status, 200);
+    assert.equal((await f.call("logout", {})).response.status, 200);
+  } finally { await f.close(); }
+});
+
+test("admins manage users with re-authentication, the last enabled admin is protected and revocations are immediate", async () => {
+  const f = await fixture();
+  try {
+    await f.setup();
+    const ops = (await f.call("users", { username: "ops", password: "a long ops password", role: "admin" })).data.user;
+    assert.equal((await f.call("users", { username: "OPS", password: "a long ops password", role: "user" })).data.code, "USERNAME_TAKEN");
+    assert.equal((await f.call("users", { username: "o", password: "a long ops password", role: "user" })).data.code, "USERNAME_INVALID");
+    assert.equal((await f.call("users", { username: "short", password: "too short", role: "user" })).data.code, "PASSWORD_LENGTH");
+    const listed = await f.call("users");
+    assert.deepEqual(listed.data.users.map((user: { username: string }) => user.username), ["owner", "ops"]);
+    assert.ok(!/scrypt|password_hash|totp_secret/.test(JSON.stringify(listed.data)));
+    // ops signs in, then owner demotes ops: the next ops mutation is forbidden without signing in again.
+    assert.equal((await f.signInAs("ops", "a long ops password")).response.status, 200);
+    const opsCookies = f.cookies();
+    assert.equal((await f.call("engines", { id: "engine-b", displayName: "B" })).response.status, 201);
+    f.reset();
+    assert.equal((await f.signInAs("owner", "a long owner password")).response.status, 200);
+    assert.equal((await f.call(`users/${ops.id}`, { role: "user" }, {}, "PATCH")).response.status, 200);
+    const opsCookie = [...opsCookies].map(([k, v]) => `${k}=${v}`).join("; ");
+    const opsMe = await fetch(`${f.base}/api/console/me`, { headers: { cookie: opsCookie } });
+    const opsCsrf = (await opsMe.json() as { csrfToken: string }).csrfToken;
+    const demoted = await fetch(`${f.base}/api/console/engines/engine-b`, { method: "DELETE", headers: { cookie: opsCookie, origin: f.origin, "x-csrf-token": opsCsrf } });
+    assert.equal(demoted.status, 403);
+    assert.equal((await demoted.json() as { code: string }).code, "ROLE_FORBIDDEN");
+    // Disabling revokes ops's sessions at once and blocks sign-in.
+    assert.equal((await f.call(`users/${ops.id}`, { disabled: true }, {}, "PATCH")).response.status, 200);
+    assert.equal((await fetch(`${f.base}/api/console/snapshot`, { headers: { cookie: opsCookie } })).status, 401);
+    const events = f.gateway.events!.replay(0).filter(event => event.type === "admin.action").map(event => event.action);
+    for (const action of [`user.create:ops`, `user.role.user:ops`, `user.disable:ops`]) assert.ok(events.includes(action), action);
+    // Last enabled admin.
+    for (const [path, body, method] of [["users/1", { role: "user" }, "PATCH"], ["users/1", { disabled: true }, "PATCH"], ["users/1", {}, "DELETE"]] as const) {
+      const result = await f.call(path, body, {}, method);
+      assert.equal(result.response.status, 409, `${method} ${JSON.stringify(body)}`);
+      assert.equal(result.data.code, "LAST_ADMIN");
+    }
+    // Stale sessions must re-authenticate before managing users.
+    f.advance(10 * 60_000);
+    const stale = await f.call("users", { username: "late", password: "a long late password", role: "user" });
+    assert.equal(stale.data.code, "REAUTH_REQUIRED");
+    assert.equal((await f.call("users")).data.users.length, 2);
+    assert.equal((await f.call("reauth", { password: "a long owner password" })).response.status, 200);
+    assert.equal((await f.call(`users/${ops.id}/password`, { password: "a reset ops password" })).response.status, 200);
+    assert.equal((await f.call(`users/${ops.id}`, { disabled: false }, {}, "PATCH")).response.status, 200);
+    assert.equal((await f.signInAs("ops", "a long ops password")).data.code, "INVALID_CREDENTIALS");
+    assert.equal((await f.signInAs("ops", "a reset ops password")).response.status, 200);
+    f.reset();
+    assert.equal((await f.signInAs("owner", "a long owner password")).response.status, 200);
+    assert.equal((await f.call(`users/${ops.id}`, {}, {}, "DELETE")).response.status, 200);
+    assert.equal((await f.signInAs("ops", "a reset ops password")).data.code, "INVALID_CREDENTIALS");
+  } finally { await f.close(); }
+});
+
+test("self-service password and TOTP changes keep the current session and revoke the others", async () => {
+  const f = await fixture();
+  try {
+    await f.setup();
+    const first = f.cookies();
+    assert.equal((await f.signInAs("owner", "a long owner password")).response.status, 200);
+    const firstCookie = [...first].map(([k, v]) => `${k}=${v}`).join("; ");
+    assert.equal((await fetch(`${f.base}/api/console/snapshot`, { headers: { cookie: firstCookie } })).status, 200);
+    const wrong = await f.call("account/password", { current: "not my password", password: "a brand new password" });
+    assert.equal(wrong.data.code, "INVALID_CREDENTIALS");
+    assert.ok(f.gateway.events!.replay(0).some(event => event.type === "auth.failed"));
+    assert.equal((await f.call("account/password", { current: "a long owner password", password: "a brand new password" })).response.status, 200);
+    assert.equal((await f.call("me")).data.authenticated, true, "the current session survives");
+    assert.equal((await fetch(`${f.base}/api/console/snapshot`, { headers: { cookie: firstCookie } })).status, 401, "other sessions are revoked");
+    const { secret, recoveryCodes } = await f.enableTotp();
+    assert.equal(recoveryCodes.length, 10);
+    assert.equal((await f.call("account/totp/begin", {})).data.code, "TOTP_ALREADY_ENABLED");
+    f.advance(30_000);
+    assert.equal((await f.call("account/totp", { code: "000000" }, {}, "DELETE")).data.code, "INVALID_CREDENTIALS");
+    assert.equal((await f.call("account/totp", { code: totp(secret, f.now()) }, {}, "DELETE")).response.status, 200);
+    const store = new ConsoleStore(f.directory);
+    try { assert.equal(store.db.prepare("SELECT count(*) AS n FROM recovery_codes").get()!.n, 0); } finally { store.close(); }
+    assert.equal((await f.signInAs("owner", "a brand new password")).response.status, 200, "no code needed once TOTP is off");
+  } finally { await f.close(); }
+});
+
+test("a demotion or revocation while a request body is still arriving stops its write", async () => {
+  const { request: httpRequest } = await import("node:http");
+  const f = await fixture();
+  try {
+    await f.setup();
+    assert.equal((await f.call("users", { username: "ops", password: "a long ops password", role: "admin" })).response.status, 201);
+    assert.equal((await f.signInAs("ops", "a long ops password")).response.status, 200);
+    const opsCookie = [...f.cookies()].map(([key, value]) => `${key}=${value}`).join("; ");
+    const opsCsrf = (await f.call("me")).data.csrfToken as string;
+    // Start a create-device request as ops, but hold back the end of its body.
+    const slow = (path: string, body: string) => {
+      const url = new URL(`/api/console/${path}`, f.base);
+      const pending = httpRequest(url, { method: "POST", headers: { origin: f.origin, "content-type": "application/json", "x-csrf-token": opsCsrf, cookie: opsCookie, "content-length": Buffer.byteLength(body) } });
+      const done = new Promise<{ status: number; body: Record<string, any> }>((resolve, reject) => {
+        pending.on("response", response => { let text = ""; response.on("data", chunk => { text += chunk; }); response.on("end", () => resolve({ status: response.statusCode!, body: JSON.parse(text) })); });
+        pending.on("error", reject);
+      });
+      pending.write(body.slice(0, 5));
+      return { finish: () => { pending.end(body.slice(5)); return done; } };
+    };
+    const device = slow("engines", JSON.stringify({ id: "engine-late", displayName: "Late" }));
+    await new Promise(resolve => setTimeout(resolve, 50));
+    // Meanwhile the owner demotes ops.
+    f.reset();
+    assert.equal((await f.signInAs("owner", "a long owner password")).response.status, 200);
+    const opsId = (await f.call("users")).data.users.find((user: { username: string }) => user.username === "ops").id;
+    assert.equal((await f.call(`users/${opsId}`, { role: "user" }, {}, "PATCH")).response.status, 200);
+    const result = await device.finish();
+    assert.equal(result.status, 403);
+    assert.equal(result.body.code, "ROLE_FORBIDDEN");
+    assert.equal(f.gateway.registry.engines.has("engine-late"), false, "no device was created by the demoted request");
   } finally { await f.close(); }
 });

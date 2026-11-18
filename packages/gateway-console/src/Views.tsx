@@ -5,6 +5,8 @@ import { api, errorText } from "./api";
 import { ActivityTable } from "./Activity";
 import { DeviceGlyph } from "./Glyph";
 import { consoleStore } from "./store";
+import { setLocalTheme, useLocalTheme, useSession } from "./session";
+import { AccountSettings } from "./Account";
 import type { SensitiveAction } from "./Devices";
 import type { Snapshot } from "./types";
 import {
@@ -133,6 +135,7 @@ export function ClientsView({
   sensitive: SensitiveAction;
 }) {
   const { t, lang } = useT();
+  const { isAdmin } = useSession();
   const now = useNow();
   const [confirm, setConfirm] = useState("");
   const showOwnedEngines = snapshot.clients.some(
@@ -189,7 +192,8 @@ export function ClientsView({
                     {formatNumber(client.errors24h, lang)}
                   </td>
                   <td>
-                    {client.type === "mcp-http" &&
+                    {isAdmin &&
+                      client.type === "mcp-http" &&
                       client.activeSessions > 0 && (
                         <button
                           className="btn small danger-outline"
@@ -271,6 +275,7 @@ function AuthorizedApps({
   revision: number;
 }) {
   const { t, lang } = useT();
+  const { isAdmin } = useSession();
   const now = useNow();
   const [apps, setApps] = useState<OAuthApp[] | undefined>();
   const [confirm, setConfirm] = useState<OAuthApp | undefined>();
@@ -314,12 +319,14 @@ function AuthorizedApps({
                 </td>
                 <td className="num">{formatNumber(app.activeTokens, lang)}</td>
                 <td>
-                  <button
-                    className="btn small danger-outline"
-                    onClick={() => setConfirm(app)}
-                  >
-                    {t("overview.revoke")}
-                  </button>
+                  {isAdmin && (
+                    <button
+                      className="btn small danger-outline"
+                      onClick={() => setConfirm(app)}
+                    >
+                      {t("overview.revoke")}
+                    </button>
+                  )}
                 </td>
               </tr>
             ))}
@@ -371,9 +378,12 @@ export function SettingsView({
   sensitive: SensitiveAction;
 }) {
   const { t, lang, setLang } = useT();
+  const { isAdmin } = useSession();
+  const ownTheme = useLocalTheme();
   const [days, setDays] = useState(snapshot.settings.retentionDays);
-  const [theme, setTheme] = useState(snapshot.settings.theme);
-  useEffect(() => setTheme(snapshot.settings.theme), [snapshot.settings.theme]);
+  const sharedTheme = isAdmin ? snapshot.settings.theme : (ownTheme ?? snapshot.settings.theme);
+  const [theme, setTheme] = useState(sharedTheme);
+  useEffect(() => setTheme(sharedTheme), [sharedTheme]);
   const [heartbeats, setHeartbeats] = useState(
     snapshot.settings.heartbeatDisplay,
   );
@@ -383,6 +393,10 @@ export function SettingsView({
   async function changeTheme(value: typeof theme): Promise<void> {
     const previous = theme;
     setTheme(value);
+    if (!isAdmin) {
+      setLocalTheme(value);
+      return;
+    }
     document.documentElement.dataset.theme = value;
     setThemeBusy(true);
     setError("");
@@ -433,7 +447,9 @@ export function SettingsView({
           {errorText(error, t)}
         </div>
       )}
+      <AccountSettings sensitive={sensitive} />
       <form className="settings-form" onSubmit={(event) => void submit(event)}>
+        {isAdmin && (
         <section className="panel">
           <div className="panel-head">
             <h3>{t("settings.activityRetention")}</h3>
@@ -453,6 +469,7 @@ export function SettingsView({
             <div className="reserved">{t("settings.retentionNote")}</div>
           </div>
         </section>
+        )}
         <section className="panel">
           <div className="panel-head">
             <h3>{t("settings.appearance")}</h3>
@@ -484,6 +501,7 @@ export function SettingsView({
             </label>
           </div>
         </section>
+        {isAdmin && (
         <section className="panel">
           <div className="panel-head">
             <h3>{t("nav.topology")}</h3>
@@ -499,6 +517,8 @@ export function SettingsView({
             </label>
           </div>
         </section>
+        )}
+        {isAdmin && (
         <div className="actions">
           <button className="btn primary">{t("settings.save")}</button>
           {saved && (
@@ -507,6 +527,7 @@ export function SettingsView({
             </span>
           )}
         </div>
+        )}
       </form>
     </section>
   );

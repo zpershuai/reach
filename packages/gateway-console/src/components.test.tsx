@@ -1,7 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { api } from "./api";
+import { ApiError, api } from "./api";
 import { AuthScreen, ReauthDialog } from "./Auth";
 import { AddDevice, DeviceDrawer, installCommand } from "./Devices";
 import { DeviceGlyph, glyphKinds } from "./Glyph";
@@ -14,59 +14,73 @@ vi.mock("./api", async (original) => ({
   api: vi.fn(),
 }));
 beforeEach(() => {
+  vi.mocked(api).mockReset();
   history.replaceState(null, "", "/console/activity");
   vi.spyOn(consoleStore, "refresh").mockResolvedValue();
 });
 const sensitive = async (operation: () => Promise<void>) => operation();
 
-it("setup bundles a QR, shows recovery codes once and writes no browser storage", async () => {
+it("setup creates the administrator from token, username and password and writes no browser storage", async () => {
   const storage = vi.spyOn(Storage.prototype, "setItem");
   const authenticated = vi.fn();
-  vi.mocked(api)
-    .mockResolvedValueOnce({
-      secret: "JBSWY3DPEHPK3PXP",
-      otpauthUrl: "otpauth://totp/Reach?secret=JBSWY3DPEHPK3PXP",
-    })
-    .mockResolvedValueOnce({ recoveryCodes: ["RECOVERY01", "RECOVERY02"] });
+  vi.mocked(api).mockResolvedValueOnce({ authenticated: true, user: { id: 1, username: "owner", role: "admin", totpEnabled: false } });
   const user = userEvent.setup();
   render(<AuthScreen setup onAuthenticated={authenticated} />);
+  expect(screen.queryByRole("img")).not.toBeInTheDocument();
   await user.type(screen.getByLabelText("Setup token"), "setup-token");
-  await user.click(screen.getByRole("button", { name: "Continue →" }));
-  expect(
-    await screen.findByAltText("Scan this QR code with your authenticator"),
-  ).toHaveAttribute("src", expect.stringContaining("data:image/gif;base64,"));
-  await user.type(screen.getByLabelText("Password"), "a long owner password");
-  await user.type(screen.getByLabelText("Authenticator code"), "123456");
-  await user.click(
-    screen.getByRole("button", { name: "Create administrator →" }),
-  );
-  expect(await screen.findByText("RECOVERY01")).toBeInTheDocument();
-  expect(authenticated).not.toHaveBeenCalled();
-  await user.click(
-    screen.getByRole("button", { name: "I saved my recovery codes →" }),
-  );
-  expect(authenticated).toHaveBeenCalledOnce();
-  expect(screen.queryByText("RECOVERY01")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("Username"), "owner");
+  await user.type(screen.getByLabelText("Password (at least 12 characters)"), "a long owner password");
+  await user.click(screen.getByRole("button", { name: "Create administrator →" }));
+  await waitFor(() => expect(authenticated).toHaveBeenCalledOnce());
+  expect(api).toHaveBeenCalledWith("setup", { token: "setup-token", username: "owner", password: "a long owner password" });
   expect(storage).not.toHaveBeenCalled();
+  storage.mockRestore();
 });
 
-it("sign-in accepts recovery codes and displays generic failures", async () => {
+it("sign-in asks for a code only after TOTP_REQUIRED and displays generic failures", async () => {
   const user = userEvent.setup();
-  vi.mocked(api).mockRejectedValueOnce(new Error("Invalid credentials"));
-  render(<AuthScreen setup={false} onAuthenticated={() => {}} />);
-  await user.type(screen.getByLabelText("Password"), "owner password");
-  await user.type(
-    screen.getByLabelText("Authenticator or recovery code"),
-    "recovery01",
-  );
+  const authenticated = vi.fn();
+  vi.mocked(api)
+    .mockRejectedValueOnce(new ApiError("Invalid credentials", 401, "INVALID_CREDENTIALS"))
+    .mockRejectedValueOnce(new ApiError("Authentication code required", 401, "TOTP_REQUIRED"))
+    .mockResolvedValueOnce({ authenticated: true });
+  render(<AuthScreen setup={false} onAuthenticated={authenticated} />);
+  expect(screen.queryByLabelText("Authentication code")).not.toBeInTheDocument();
+  await user.type(screen.getByLabelText("Username"), "owner");
+  await user.type(screen.getByLabelText("Password"), "wrong password");
   await user.click(screen.getByRole("button", { name: "Sign in →" }));
-  expect(await screen.findByRole("alert")).toHaveTextContent(
-    "Invalid credentials",
-  );
-  expect(api).toHaveBeenCalledWith("login", {
-    password: "owner password",
-    code: "RECOVERY01",
-  });
+  expect(await screen.findByRole("alert")).toHaveTextContent("Invalid credentials");
+  expect(api).toHaveBeenLastCalledWith("login", { username: "owner", password: "wrong password" });
+  await user.clear(screen.getByLabelText("Password"));
+  await user.type(screen.getByLabelText("Password"), "owner password");
+  await user.click(screen.getByRole("button", { name: "Sign in →" }));
+  const code = await screen.findByLabelText("Authentication code");
+  expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+  expect(screen.getByText("owner")).toBeInTheDocument();
+  await user.type(code, "recovery01");
+  await user.click(screen.getByRole("button", { name: "Verify →" }));
+  await waitFor(() => expect(authenticated).toHaveBeenCalledOnce());
+  expect(api).toHaveBeenLastCalledWith("login", { username: "owner", password: "owner password", code: "RECOVERY01" });
+});
+
+it("the sign-in brand visual is decorative, data-free and still under reduced motion", () => {
+  const { container, unmount } = render(<AuthScreen setup={false} onAuthenticated={() => {}} />);
+  // jsdom has no WebGL, so the 3D scene never loads and the flat diagram stays.
+  expect(container.querySelector(".brand-stage")).not.toHaveAttribute("data-rendered");
+  expect(container.querySelector(".brand-scene canvas")).toBeNull();
+  const visual = container.querySelector("svg.brand-visual")!;
+  expect(visual).toHaveAttribute("aria-hidden", "true");
+  expect(visual.querySelectorAll(".bv-particle").length).toBeGreaterThan(0);
+  expect(api).not.toHaveBeenCalled();
+  expect(screen.getByText("Let AI assistants reach your private devices — safely.")).toBeInTheDocument();
+  unmount();
+  const matchMedia = vi.spyOn(window, "matchMedia").mockImplementation((query: string) => ({
+    matches: query.includes("reduce"), media: query, onchange: null,
+    addEventListener: () => {}, removeEventListener: () => {}, addListener: () => {}, removeListener: () => {}, dispatchEvent: () => false,
+  }) as MediaQueryList);
+  const still = render(<AuthScreen setup={false} onAuthenticated={() => {}} />);
+  expect(still.container.querySelectorAll(".bv-particle")).toHaveLength(0);
+  matchMedia.mockRestore();
 });
 
 it("reauthentication prompts for a password and submits it in memory", async () => {
@@ -164,6 +178,7 @@ it("glyph tint follows heartbeat freshness and preserves open-session readiness"
 });
 
 it("Overview includes health warnings, versions and KPIs; Skills stays reserved", () => {
+  vi.mocked(api).mockResolvedValue({ clients: [] });
   const data = snapshot();
   data.gateway.warnings = ["Audit storage failure: /tmp/reach-data"];
   const view = render(<Overview snapshot={data} />);

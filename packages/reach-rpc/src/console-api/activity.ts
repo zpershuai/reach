@@ -87,10 +87,10 @@ export class ActivityLog {
     return { rows, cursor: more && last ? Buffer.from(JSON.stringify([last.ts, last.id])).toString("base64url") : null };
   }
 
-  async export(response: ServerResponse, format: "csv" | "jsonl", filters: ActivityFilters, events: GatewayEvents): Promise<void> {
+  async export(response: ServerResponse, format: "csv" | "jsonl", filters: ActivityFilters, events: GatewayEvents, actor: string): Promise<void> {
     // Validate the query before committing HTTP headers or recording an export.
     this.query({ ...filters, cursor: undefined, limit: 1 });
-    events.emit("admin.action", { caller: { type: "console", label: "Administrator", verified: false }, action: `activity.export.${format}`, outcome: "ok" });
+    events.emit("admin.action", { caller: { type: "console", label: actor, verified: true }, action: `activity.export.${format}`, outcome: "ok" });
     const date = new Date(this.now()).toISOString().slice(0, 10);
     response.writeHead(200, {
       "content-type": format === "csv" ? "text/csv; charset=utf-8" : "application/x-ndjson",

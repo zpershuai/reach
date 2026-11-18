@@ -18,7 +18,8 @@ export function serveEvents(events: GatewayEvents, request: IncomingMessage, res
     if (response.writableLength > 1024 * 1024) { response.destroy(); close(); }
   };
   const send = (event: GatewayEvent): void => {
-    if (event.type === "admin.action" && event.action === "admin.logout" && !sessionValid()) { response.destroy(); close(); return; }
+    // Account changes can revoke this stream's session; re-check on every console action.
+    if (event.type === "admin.action" && !sessionValid()) { response.destroy(); close(); return; }
     write(`id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
   };
   response.once("close", close);

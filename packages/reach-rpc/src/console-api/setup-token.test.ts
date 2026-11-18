@@ -80,9 +80,9 @@ test("auth reuses generated bootstrap on restart, preserves env delivery and exi
       new ConsoleAuth(store, { ...config, setupToken: "explicit-private-fixture-token" }, new GatewayEvents(), Date.now, message => logs.push(message));
       assert.equal(existsSync(path), false); assert.ok(!logs.join("\n").includes("explicit-private-fixture-token"));
       loadSetupToken(directory);
-      store.db.prepare("INSERT INTO admin (id,password_hash,totp_secret,created_at) VALUES (1,?,?,?)").run("fixture-hash", "fixture-secret", Date.now());
+      store.db.prepare("INSERT INTO users (id,username,username_key,password_hash,role,created_at,password_changed_at) VALUES (1,'admin','admin',?,'admin',?,?)").run("fixture-hash", Date.now(), Date.now());
       new ConsoleAuth(store, config, new GatewayEvents(), Date.now, message => logs.push(message));
-      assert.equal(existsSync(path), false); assert.equal(store.db.prepare("SELECT password_hash FROM admin").get()!.password_hash, "fixture-hash");
+      assert.equal(existsSync(path), false); assert.equal(store.db.prepare("SELECT password_hash FROM users").get()!.password_hash, "fixture-hash");
       // A leftover file that cannot be removed safely must not stop an already configured Gateway.
       writeFileSync(path, "leftover fixture", { mode: 0o644 });
       new ConsoleAuth(store, config, new GatewayEvents(), Date.now, message => logs.push(message));

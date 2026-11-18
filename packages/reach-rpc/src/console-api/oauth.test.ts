@@ -13,10 +13,11 @@ import { totp } from "./credentials.js";
 const origin = "https://gateway.example.com";
 const redirectUri = "https://chatgpt.com/connector_platform_oauth_redirect";
 const password = "a long owner password";
+const username = "owner";
 const mcpHeaders = { "content-type": "application/json", accept: "application/json, text/event-stream" };
 const initialize = { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "openai-mcp", version: "1.0.0" } } };
 
-async function fixture(options: { idleMs?: number } = {}) {
+async function fixture(options: { idleMs?: number; totp?: boolean } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "reach-oauth-"));
   let now = Date.now();
   const gateway = createGateway({ logger: () => {}, now: () => now, heartbeatIntervalSeconds: 1,
@@ -43,8 +44,13 @@ async function fixture(options: { idleMs?: number } = {}) {
     return { response, data };
   };
   await consoleCall("me");
-  const secret = (await consoleCall("setup", { token: "setup-token" })).data.secret as string;
-  assert.equal((await consoleCall("setup", { token: "setup-token", password, code: totp(secret, now) })).response.status, 200);
+  assert.equal((await consoleCall("setup", { token: "setup-token", username, password })).response.status, 200);
+  // Most flows run with the owner's authenticator enabled; setup itself no longer enrols one.
+  let secret = "";
+  if (options.totp !== false) {
+    secret = (await consoleCall("account/totp/begin", {})).data.secret as string;
+    assert.equal((await consoleCall("account/totp/confirm", { code: totp(secret, now) })).response.status, 200);
+  }
 
   const form = (path: string, values: Record<string, string>, headers: Record<string, string> = {}) => fetch(`${base}${path}`, {
     method: "POST", redirect: "manual", headers: { "content-type": "application/x-www-form-urlencoded", ...headers }, body: new URLSearchParams(values).toString(),
@@ -71,7 +77,7 @@ async function fixture(options: { idleMs?: number } = {}) {
     assert.ok(!html.includes(" checked"), "no permissions selected by default");
     const request = /name="request" value="([^"]+)"/.exec(html)![1];
     now += 30_000; // A fresh TOTP step; the setup code was consumed.
-    return form("/oauth/authorize", { request, password, code: totp(secret, now), decision, ...permissions }, { origin });
+    return form("/oauth/authorize", { request, username, password, ...(secret ? { code: totp(secret, now) } : {}), decision, ...permissions }, { origin });
   };
   /** Completes authorization for a public client and returns its tokens. */
   const grant = async (clientId: string, permissions?: Record<string, string>) => {
@@ -175,9 +181,9 @@ test("OAuth approval requires the owner's second factor, honours denial and cons
 
     const query = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: redirectUri, code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256" });
     const request = /name="request" value="([^"]+)"/.exec(await (await fetch(`${f.base}/oauth/authorize?${query}`)).text())![1];
-    const forged = await f.form("/oauth/authorize", { request, password, code: "000000", decision: "approve" }, { origin: "https://evil.example" });
+    const forged = await f.form("/oauth/authorize", { request, username, password, code: "000000", decision: "approve" }, { origin: "https://evil.example" });
     assert.equal(forged.status, 403);
-    const wrong = await f.form("/oauth/authorize", { request, password, code: "000000", decision: "approve" }, { origin });
+    const wrong = await f.form("/oauth/authorize", { request, username, password, code: "000000", decision: "approve" }, { origin });
     assert.equal(wrong.status, 401);
 
     const denied = await f.approve(client.client_id, verifier, "deny");
@@ -363,7 +369,7 @@ test("approval pages follow the console cookie or browser language, including fa
     assert.equal(chinese.headers.get("vary"), "Accept-Language, Cookie");
     const html = await chinese.text();
     assert.match(html, /<html lang="zh-CN">/);
-    for (const text of ["管理员密码", "身份验证码或恢复码", "批准", "拒绝"]) assert.ok(html.includes(text));
+    for (const text of ["管理员用户名", "密码", "身份验证码或恢复码", "批准", "拒绝"]) assert.ok(html.includes(text));
     const english = await fetch(url, { headers: { cookie: "reach_lang=en", "accept-language": "zh-CN" } });
     assert.match(await english.text(), /<html lang="en">/);
     const tampered = await fetch(url, { headers: { cookie: "reach_lang=<script>", "accept-language": "zh-CN" } });
@@ -371,7 +377,7 @@ test("approval pages follow the console cookie or browser language, including fa
     assert.match(safe, /<html lang="zh-CN">/);
     assert.ok(!safe.includes("<script>"));
     const request = /name="request" value="([^"]+)"/.exec(html)![1];
-    const values = { request, password, code: "wrong", decision: "approve" };
+    const values = { request, username, password, code: "wrong", decision: "approve" };
     const headers = { origin, cookie: "reach_lang=zh-CN", "accept-language": "en" };
     const wrong = await f.form("/oauth/authorize", values, headers);
     assert.equal(wrong.status, 401);
@@ -393,4 +399,41 @@ test("non-OAuth requests do not inspect language headers", async () => {
   for (const path of ["/mcp", "/api/console/snapshot", "/heartbeat"]) {
     assert.equal(await handler.handle(new URL(path, origin), request, {} as import("node:http").ServerResponse), false);
   }
+});
+
+test("approval needs an enabled admin account; TOTP is asked only when that account enabled it", async () => {
+  const f = await fixture({ totp: false });
+  try {
+    const client = await f.register();
+    const verifier = randomBytes(32).toString("base64url");
+    const approved = await f.approve(client.client_id, verifier);
+    assert.equal(approved.status, 302);
+    assert.ok(new URL(approved.headers.get("location")!).searchParams.get("code"), "an admin without TOTP approves with username and password");
+    const actions = f.gateway.events!.replay(0).filter(event => event.type === "admin.action" && event.action === "oauth.authorize:ChatGPT");
+    assert.equal(actions.at(-1)?.caller?.label, username);
+
+    assert.equal((await f.consoleCall("users", { username: "viewer", password: "a long viewer password", role: "user" })).response.status, 201);
+    const query = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: redirectUri, code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256" });
+    const request = /name="request" value="([^"]+)"/.exec(await (await fetch(`${f.base}/oauth/authorize?${query}`)).text())![1];
+    const failuresBefore = f.gateway.events!.replay(0).filter(event => event.type === "auth.failed").length;
+    const viewer = await f.form("/oauth/authorize", { request, username: "viewer", password: "a long viewer password", decision: "approve",
+      "permission.0.engineId": "engine-a", "permission.0.workspace": "docs", "permission.0.read": "on" }, { origin });
+    assert.equal(viewer.status, 401);
+    assert.equal(viewer.headers.get("location"), null, "no code is issued to a read-only account");
+    assert.match(await viewer.text(), /cannot approve applications/);
+    assert.ok(f.gateway.events!.replay(0).filter(event => event.type === "auth.failed").length > failuresBefore, "the refused approval is audited");
+  } finally { await f.close(); }
+});
+
+test("an admin with TOTP who omits the code is asked for it and no code is issued", async () => {
+  const f = await fixture();
+  try {
+    const client = await f.register();
+    const verifier = randomBytes(32).toString("base64url");
+    const query = new URLSearchParams({ response_type: "code", client_id: client.client_id, redirect_uri: redirectUri, code_challenge: createHash("sha256").update(verifier).digest("base64url"), code_challenge_method: "S256" });
+    const request = /name="request" value="([^"]+)"/.exec(await (await fetch(`${f.base}/oauth/authorize?${query}`)).text())![1];
+    const missing = await f.form("/oauth/authorize", { request, username, password, decision: "approve", "permission.0.engineId": "engine-a", "permission.0.workspace": "docs", "permission.0.read": "on" }, { origin });
+    assert.equal(missing.headers.get("location"), null);
+    assert.match(await missing.text(), /uses an authenticator/);
+  } finally { await f.close(); }
 });

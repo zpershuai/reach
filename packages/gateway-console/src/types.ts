@@ -1,3 +1,4 @@
+export type Theme = "light" | "dark" | "system";
 export interface Hardware {
   kind: string;
   model: string;
@@ -54,7 +55,7 @@ export interface LiveEvent {
   requestId?: string;
   method?: string;
   methodClass?: string;
-  caller?: { type: string; label: string; verified: false };
+  caller?: { type: string; label: string; verified: boolean };
   status?: string;
   sessionId?: string;
   ownerLabel?: string;
@@ -106,7 +107,7 @@ export interface Snapshot {
   };
   settings: {
     retentionDays: number;
-    theme: "light" | "dark" | "system";
+    theme: Theme;
     heartbeatDisplay: boolean;
   };
   kpis: {

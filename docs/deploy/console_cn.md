@@ -2,7 +2,7 @@
 
 [English](console.md) | 简体中文
 
-控制台与 Gateway 共用监听端口，入口为 `/console/`，管理 API 位于 `/api/console/`。它管理一个 owner 账户，使用密码与 TOTP 登录；Controller/Engine token 不提供控制台权限，控制台 cookie 也不提供 RPC 权限。客户端标签均为自报、未验证的审计信息。
+控制台与 Gateway 共用监听端口，入口为 `/console/`，管理 API 位于 `/api/console/`。控制台账号保存在 Gateway 数据库中，每个账号有用户名、密码、角色（`admin` 或只读的 `user`）以及可选的身份验证器（TOTP）；Controller/Engine token 不提供控制台权限，控制台 cookie 也不提供 RPC 权限。客户端标签均为自报、未验证的审计信息。
 
 ## 启用与首次设置
 
@@ -31,9 +31,27 @@ docker compose up -d gateway
 docker compose logs gateway
 ```
 
-只在没有管理员且未显式配置 `REACH_ADMIN_SETUP_TOKEN` 时，Gateway 将随机 setup token 写入 `REACH_DATA_DIR/admin-setup-token`，文件必须是本用户所有的 `0600` 普通文件；数据目录不能是符号链接，也不能对所有用户可写（带 sticky 位的除外），组可写的卷（如 Kubernetes `fsGroup`）可以使用。重启复用该文件；symlink、不安全权限或损坏文件会拒绝启动，不会覆盖它们。已有管理员时残留的 setup 文件已无法使用；若无法安全删除，Gateway 照常启动并记录 `CONSOLE_SETUP_TOKEN_NOT_REMOVED`，请手动删除该文件。日志只提示私有读取方式，不打印 token。可在自己的私有终端读取，例如 Compose 中运行 `docker compose exec -T gateway sh -c 'cat "$REACH_DATA_DIR/admin-setup-token"'`；直接运行时读取自己配置数据目录中的该文件。不要将输出转入服务日志、公开工单或仓库。也可预先在私有 env 中设置 `REACH_ADMIN_SETUP_TOKEN`。打开 `https://gateway.example.com/console/`，输入 token、扫描验证器二维码、设置至少 12 字符的密码并确认 TOTP。保存只显示一次的十个单次恢复码。管理员创建后 setup token 立即失效，自动文件被删除。已有管理员不会重新生成 token。旧版本只写日志的临时 token 不再有效；首次设置改用私有文件或显式 env 凭据。
+只在没有任何控制台账号且未显式配置 `REACH_ADMIN_SETUP_TOKEN` 时，Gateway 将随机 setup token 写入 `REACH_DATA_DIR/admin-setup-token`，文件必须是本用户所有的 `0600` 普通文件；数据目录不能是符号链接，也不能对所有用户可写（带 sticky 位的除外），组可写的卷（如 Kubernetes `fsGroup`）可以使用。重启复用该文件；symlink、不安全权限或损坏文件会拒绝启动，不会覆盖它们。已有账号时残留的 setup 文件已无法使用；若无法安全删除，Gateway 照常启动并记录 `CONSOLE_SETUP_TOKEN_NOT_REMOVED`，请手动删除该文件。日志只提示私有读取方式，不打印 token。可在自己的私有终端读取，例如 Compose 中运行 `docker compose exec -T gateway sh -c 'cat "$REACH_DATA_DIR/admin-setup-token"'`；直接运行时读取自己配置数据目录中的该文件。不要将输出转入服务日志、公开工单或仓库。也可预先在私有 env 中设置 `REACH_ADMIN_SETUP_TOKEN`。打开 `https://gateway.example.com/console/`，输入 token，设置管理员用户名（3–64 个字母、数字、`.`、`_` 或 `-`）和至少 12 字符的密码。首个管理员创建后 setup token 立即失效，自动文件被删除；已有安装不会重新生成 token。只要有启用的管理员未开启身份验证器，Overview 就会提示；公网部署请在 **Settings → Account** 中开启（扫描二维码、确认验证码、保存只显示一次的十个恢复码）。旧版本只写日志的临时 token 不再有效；首次设置改用私有文件或显式 env 凭据。
 
-会话 cookie 使用 HttpOnly、SameSite=Strict、Path=/；HTTPS origin 下增加 Secure。会话空闲十二小时或创建七天后过期，退出立即撤销。添加/删除设备、轮换 token、断开客户端和改变保留期需要十分钟内重新输入过密码。更换浏览器后使用密码与新鲜 TOTP 登录；恢复码可代替一次 TOTP。
+会话 cookie 使用 HttpOnly、SameSite=Strict、Path=/；HTTPS origin 下增加 Secure。会话空闲十二小时或创建七天后过期，退出立即撤销。添加/删除设备、轮换 token、断开客户端、改变保留期、管理用户和更改身份验证器需要十分钟内重新输入过密码。登录需要用户名和密码；只有开启了身份验证器的账号还需要新鲜的 TOTP 验证码，恢复码可代替一次 TOTP。
+
+## 账号与角色
+
+- `admin` 账号拥有完整控制权，可在 **Users** 中管理用户，并且只有 admin 能批准 MCP OAuth 应用。
+- `user` 账号只读：可查看 Overview、Topology、Clients、Devices 和 Activity，其他修改一律返回 `ROLE_FORBIDDEN`。其主题选择只保存在自己的浏览器中。
+- 每个账号都可在 **Settings → Account** 中修改自己的密码、开启或关闭自己的身份验证器。
+- 禁用或删除账号、重置其密码、移除其身份验证器都会让该账号在所有地方退出登录。最后一个启用的管理员不能被降级、禁用或删除。
+- 控制台操作的审计记录会写明操作者用户名。
+
+### 在主机上重置密码
+
+如果所有管理员都无法登录（忘记密码，或丢失身份验证器和恢复码），在 Gateway 主机上重置账号。命令从交互提示读取新密码；不在终端运行时读取标准输入的第一行，绝不通过参数传递密码。它会设置密码、清除身份验证器和恢复码、启用账号并撤销其所有会话：
+
+```sh
+docker compose exec gateway node dist/gateway-main.js admin reset-password admin
+```
+
+直接运行时，使用相同的 `REACH_DATA_DIR` 执行 `node packages/reach-rpc/dist/gateway-main.js admin reset-password <username>`。Gateway 运行中也可安全执行，Activity 中记为 `Host CLI`。
 
 ## 语言
 
@@ -89,7 +107,7 @@ Activity 只保存元数据，不保存文件正文、搜索模式、进程参�
 
 ## 备份、恢复与回滚
 
-`reach.db` 包含管理员 TOTP secret、会话、恢复码哈希、Engine token 摘要、设备信息和审计路径，须作为私有凭证数据保护。客户端权限与认证 principal 审计字段由前向 migration 保存，旧版本不能打开新 schema。数据库权限为 0600；不要把数据库、备份、真实安装记录或恢复码放入公开仓库。源码 checkout 内仅使用忽略的 `.reach/` 保存私有状态，实际部署状态与备份应在仓库之外。
+`reach.db` 包含账号密码哈希与 TOTP secret、会话、恢复码哈希、Engine token 摘要、设备信息和审计路径，须作为私有凭证数据保护。客户端权限与认证 principal 审计字段由前向 migration 保存，旧版本不能打开新 schema。数据库权限为 0600；不要把数据库、备份、真实安装记录或恢复码放入公开仓库。源码 checkout 内仅使用忽略的 `.reach/` 保存私有状态，实际部署状态与备份应在仓库之外。
 
 最简单的一致性备份是停止 Gateway 后复制整个数据目录，包含仍存在的 WAL/SHM 文件。备份目录由操作者配置并置于私有存储：
 
@@ -105,8 +123,12 @@ docker compose up -d gateway
 
 同时另行备份私有 env、`engines.json` 与 Compose 配置。在线备份应使用 SQLite backup API 或一致性快照，不要只复制活动中的 `reach.db` 而忽略 WAL。
 
-恢复时先停止 Gateway，保存当前目录，再解包选定备份，恢复 uid/gid 1000 和目录 0700、数据库 0600，然后启动与数据库版本匹配的 Gateway。验证 owner 登录、设备注册和活动查询。不要用新建空数据目录覆盖原安装来修复登录问题。
+恢复时先停止 Gateway，保存当前目录，再解包选定备份，恢复 uid/gid 1000 和目录 0700、数据库 0600，然后启动与数据库版本匹配的 Gateway。验证管理员登录、设备注册和活动查询。不要用新建空数据目录覆盖原安装来修复登录问题。
 
 自动发布 helper 保留现有 `data/`、env、注册表和 Compose 文件，不自动启用或迁移已有安装。数据库仅前向迁移；旧版本遇到更新的数据库版本会拒绝打开。回滚到没有控制台的版本前，console 设备需以新签发的 token 迁回私有 `engines.json` 并更新对应 Engine 配置，因为旧版本无法恢复摘要中的原 token。保留数据库备份后移除 `REACH_DATA_DIR` 或部署旧镜像；环境和 seed 配置保持原样。重新部署支持的版本并恢复原数据目录后可恢复控制台。
+
+### 升级到多账号控制台
+
+带账号体系的 Gateway 首次启动时，会把原单一 owner 管理员迁移为账号 `admin`（角色 `admin`），保留其密码、身份验证器和未用的恢复码；已打开的会话会退出一次。使用用户名 `admin`、原密码和验证码登录。升级前请备份数据目录：旧版 Gateway 无法打开迁移后的数据库，回滚只能恢复该备份，之后的改动会丢失。
 
 客户端策略和 legacy 迁移的独立恢复要求见 [客户端权限：升级和回滚](client-access_cn.md#升级和回滚)。

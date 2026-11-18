@@ -13,7 +13,7 @@
 | Git、curl、Python 3 | Python 生成下面的私有配置 |
 | Node.js 24 与 npm | CI 使用 scripts/toolchain.json 固定版本验证 |
 | Rust 工具链与 cargo | CI 使用 scripts/toolchain.json 固定版本验证；其他版本未经测试 |
-| 浏览器与 TOTP 验证器应用 | 控制台首次设置管理员所需 |
+| 浏览器 | 控制台首次设置管理员所需；TOTP 验证器应用可选 |
 
 ## 1. 构建
 
@@ -83,8 +83,8 @@ node packages/reach-rpc/dist/gateway-main.js
 ## 4. 创建管理员
 
 1. 在自己的终端读取一次性设置凭据：`cat ~/reach-demo/gateway-data/admin-setup-token`。不要粘贴到日志、工单或聊天。
-2. 打开 http://127.0.0.1:8787/console/，输入设置凭据，将 TOTP 密钥扫描到验证器，设置至少 12 字符密码并确认 TOTP 验证码。
-3. 私有保存恢复码。设置成功后删除设置文件。
+2. 打开 http://127.0.0.1:8787/console/，输入设置凭据，设置管理员用户名和至少 12 字符的密码。设置成功后删除设置文件。
+3. 可选：在 **Settings → Account** 中开启身份验证器，并私有保存恢复码。公网暴露控制台前请完成这一步。
 4. 用 EN / 中 切换语言，也可在导航或设置中选择。语言即时生效、保留表单内容并保存在当前浏览器，无需重新验证身份。OAuth 审批页面优先跟随控制台语言 Cookie，其次跟随浏览器语言。
 
 ## 5. 配对 Engine（终端 2）

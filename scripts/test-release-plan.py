@@ -36,7 +36,7 @@ class PlanTests(unittest.TestCase):
         if component == 'engine':
             fixtures.AssetTests().fixture(root)
         else:
-            packages = ['react', 'react-dom', 'scheduler', 'qrcode-generator', 'vite', '@vitejs/plugin-react', 'ws', 'zod']
+            packages = ['react', 'react-dom', 'scheduler', 'qrcode-generator', 'three', 'vite', '@vitejs/plugin-react', 'ws', 'zod']
             inventory = [{'name': name, 'license': 'MIT'} for name in packages] + [{'name': 'node', 'version': '24.21.0', 'license': 'MIT'}]
             legal = {'LICENSES/inventory.json': json.dumps(inventory).encode(), 'LICENSES/runtimes/node/LICENSE': b'Fixture Node license'}
             legal.update({f'LICENSES/fonts/{name}-OFL.txt': b'Fixture font license' for name in ['Geist', 'Geist-Mono', 'Bricolage-Grotesque']})

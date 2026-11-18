@@ -390,6 +390,7 @@ export function warningText(warning: string, lang: Lang, detail?: GatewayWarning
   switch (detail?.code) {
     case "INSECURE_HTTP": return t("common.httpWarning");
     case "NO_TRUSTED_PROXIES": return t("common.proxyWarning");
+    case "ADMIN_WITHOUT_TOTP": return t("common.adminTotpWarning");
     case "AUDIT_STORAGE_FAILURE":
       if (detail.params?.path !== undefined)
         return t("common.storageWarning", { path: detail.params.path });

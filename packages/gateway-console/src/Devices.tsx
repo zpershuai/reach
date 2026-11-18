@@ -4,6 +4,7 @@ import { memo, useCallback, useState, type FormEvent } from "react";
 import { api, errorText } from "./api";
 import { DeviceGlyph, executionState, glyphKinds, glyphLabels } from "./Glyph";
 import { consoleStore } from "./store";
+import { useSession } from "./session";
 import type { Activity, Engine, Snapshot } from "./types";
 import {
   CopyButton,
@@ -54,6 +55,7 @@ export const DeviceDrawer = memo(function DeviceDrawer({
   sensitive: SensitiveAction;
 }) {
   const { t, lang } = useT();
+  const { isAdmin } = useSession();
   const now = useNow();
   const [displayName, setName] = useState(engine.displayName);
   const [kind, setKind] = useState(engine.deviceOverride?.kind ?? "");
@@ -176,6 +178,7 @@ export const DeviceDrawer = memo(function DeviceDrawer({
         <h4>{t("devices.recent")}</h4>
         <MiniLog rows={recent} showEngine={false} />
       </section>
+      {isAdmin && (
       <section>
         <h4>{t("devices.display")}</h4>
         <form onSubmit={(event) => void save(event)}>
@@ -222,7 +225,8 @@ export const DeviceDrawer = memo(function DeviceDrawer({
           </div>
         </form>
       </section>
-      {engine.origin === "console" ? (
+      )}
+      {!isAdmin ? null : engine.origin === "console" ? (
         <section>
           <h4>{t("devices.credentials")}</h4>
           {token && (
@@ -518,6 +522,7 @@ export function DevicesView({
   onAdd: () => void;
 }) {
   const { t, lang } = useT();
+  const { isAdmin } = useSession();
   const [selected, setSelected] = useState(initialId ?? "");
   const closeDrawer = useCallback(() => setSelected(""), []);
   const device = snapshot.engines.find((engine) => engine.id === selected);
@@ -526,9 +531,11 @@ export function DevicesView({
       <section className="panel">
         <div className="panel-head">
           <h2>{t("devices.title")}</h2>
-          <button className="btn small primary" onClick={onAdd}>
-            {t("devices.add")}
-          </button>
+          {isAdmin && (
+            <button className="btn small primary" onClick={onAdd}>
+              {t("devices.add")}
+            </button>
+          )}
         </div>
         {snapshot.engines.length ? (
           <div className="device-grid">

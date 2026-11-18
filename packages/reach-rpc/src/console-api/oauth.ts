@@ -2,7 +2,7 @@ import { messages, resolveLang, type Lang, type MessageKey } from "./oauth-messa
 import { createHash, createHmac, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { ConsoleAuth } from "./auth.js";
-import { ConsoleError } from "./auth.js";
+import { ConsoleError, profile } from "./auth.js";
 import type { ConsoleConfig } from "./config.js";
 import { credentialDigest } from "./credentials.js";
 import { MAX_HTTP_BODY_BYTES } from "../gateway-policy.js";
@@ -300,7 +300,7 @@ export class OAuthServer {
     if (params.get("code_challenge_method") !== "S256" || !/^[A-Za-z0-9_-]{43}$/.test(challenge)) { fail("invalid_request", "PKCE with code_challenge_method=S256 is required"); return; }
     const resource = params.get("resource");
     if (resource !== null && resource.replace(/\/$/, "") !== this.resource && resource.replace(/\/$/, "") !== this.issuer) { fail("invalid_target", "Unknown resource"); return; }
-    if (!this.store.db.prepare("SELECT id FROM admin WHERE id=1").get()) { this.page(response, lang, 503, "notSetup", `<p>${escapeHtml(messages[lang].notSetupNote)}</p>`); return; }
+    if (!this.auth.users.any()) { this.page(response, lang, 503, "notSetup", `<p>${escapeHtml(messages[lang].notSetupNote)}</p>`); return; }
     // Keeps an unapproved registration alive while its owner is using it.
     this.store.db.prepare("UPDATE oauth_clients SET last_used_at=? WHERE id=? AND approved_at IS NULL").run(this.now(), client.id);
     const signed = this.signRequest({ clientId: client.id, redirectUri, state, challenge, expiresAt: this.now() + pendingTtlMs });
@@ -326,10 +326,20 @@ export class OAuthServer {
       redirect(response, this.callback(pending.redirectUri, { error: "access_denied", error_description: "The Gateway owner denied access", state: pending.state }));
       return;
     }
-    if (!await this.auth.verifyOwner(request, "/oauth/authorize", body.password, body.code)) {
+    const peer = this.auth.peers.resolve(request);
+    this.auth.checkLimit(peer);
+    // Only admins approve: the role is checked after the password and before any second factor is
+    // asked for or consumed, and a read-only account fails exactly like wrong credentials.
+    const check = await this.auth.verifyAccount(peer, "/oauth/authorize", body.username, body.password, body.code, { role: "admin" });
+    if (check.status === "totp_required") {
+      this.consent(response, lang, signed, client, pending.redirectUri, "codeRequired");
+      return;
+    }
+    if (check.status !== "ok") {
       this.consent(response, lang, signed, client, pending.redirectUri, "wrongCode");
       return;
     }
+    const approver = profile(check.user);
     let permissions: ClientPermission[];
     try {
       const rows: unknown[] = [];
@@ -363,7 +373,7 @@ export class OAuthServer {
     for (const [key, value] of this.codes) if (value.expiresAt <= this.now()) this.codes.delete(key);
     const code = randomBytes(32).toString("base64url");
     this.codes.set(credentialDigest(code), { clientId: client.id, redirectUri: pending.redirectUri, challenge: pending.challenge, expiresAt: this.now() + codeTtlMs, revision: approved.policyRevision });
-    this.auth.action(`oauth.authorize:${client.name}`);
+    this.auth.action(`oauth.authorize:${client.name}`, approver);
     redirect(response, this.callback(pending.redirectUri, { code, state: pending.state }));
   }
 
@@ -489,8 +499,9 @@ export class OAuthServer {
       <form method="post" action="/oauth/authorize">
         <input type="hidden" name="request" value="${escapeHtml(id)}">
         ${choices || `<p>${text("noEngines")}</p>`}
-        <label>${text("password")}<input type="password" name="password" autocomplete="current-password" required autofocus></label>
-        <label>${text("code")}<input name="code" autocomplete="one-time-code" inputmode="text" required></label>
+        <label>${text("username")}<input name="username" autocomplete="username" autocapitalize="none" spellcheck="false" required autofocus></label>
+        <label>${text("password")}<input type="password" name="password" autocomplete="current-password" required></label>
+        <label>${text("code")}<input name="code" autocomplete="one-time-code" inputmode="text"></label>
         <div class="actions">
           <button type="submit" name="decision" value="approve">${text("approve")}</button>
           <button type="submit" name="decision" value="deny" formnovalidate class="secondary">${text("deny")}</button>

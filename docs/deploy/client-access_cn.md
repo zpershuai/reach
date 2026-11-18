@@ -19,7 +19,7 @@ Delegated 和 OAuth 管理要求启用 `REACH_DATA_DIR`。凭据只保存摘要�
 
 ## 创建日常使用的客户端
 
-1. 用密码和 TOTP 登录 `/console/`，打开 **Clients → Client identities & permissions**。
+1. 以管理员身份登录 `/console/`，打开 **Clients → Client identities & permissions**。
 2. 点 **Create delegated client**，设置名称和较短的 Credential expiry。
 3. 点 **Add resource**，明确选择 Engine ID 和 Engine 配置的工作区名称，例如 `engine-a`、`docs`。只勾选需要的 read/write/execute；默认全部不选。空策略可以创建身份，但无法发现或访问资源。
 4. 点 **Create client**，把单次展示的 token 保存在客户端私有设置或权限 `0600` 的文件里。关闭对话框后不能重新查询明文；丢失时轮换。
@@ -38,7 +38,7 @@ Delegated 和 OAuth 管理要求启用 `REACH_DATA_DIR`。凭据只保存摘要�
 
 保存为私有 `.reach/devices.json`，执行 `chmod 600 .reach/devices.json`，通过 `REACH_MCP_DEVICES_FILE` 指向它。`controllerToken` 是历史字段名称，不表示该 token 自动获得 Owner 权限。Connector 的本地工具列表不是安全边界，Gateway 始终复核实际凭据。
 
-OAuth 应用使用 [MCP OAuth 流程](mcp_cn.md#chatgpt-等-oauth-客户端remote-http)。批准页要求管理员密码和新鲜 TOTP/恢复码，并明确选择 Engine、workspace 和操作。没有选择不会发放授权码。已连接 Engine 的工作区来自它报告的列表；离线且未报告工作区时需输入 Engine 配置的准确名称，最终由 Engine 校验。新批准绝不继承 legacy 全局权限；重新批准已有应用也会用明确选择的策略替换原策略。
+OAuth 应用使用 [MCP OAuth 流程](mcp_cn.md#chatgpt-等-oauth-客户端remote-http)。批准页要求管理员用户名和密码（该账号开启了身份验证器时还需新鲜 TOTP/恢复码），并明确选择 Engine、workspace 和操作。没有选择不会发放授权码。已连接 Engine 的工作区来自它报告的列表；离线且未报告工作区时需输入 Engine 配置的准确名称，最终由 Engine 校验。新批准绝不继承 legacy 全局权限；重新批准已有应用也会用明确选择的策略替换原策略。
 
 ## 操作映射和发现
 

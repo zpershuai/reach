@@ -4,7 +4,9 @@ import { GATEWAY_VERSION } from "../version.js";
 import { MCP_VERSION } from "../mcp/version.js";
 import type { createMcpHttpHandler } from "../mcp/http.js";
 import type { ConsoleConfig } from "./config.js";
-import { ConsoleAuth, ConsoleError } from "./auth.js";
+import { ConsoleAuth, ConsoleError, type SessionUser } from "./auth.js";
+import { AccountRoutes, accountRouteNeedsRecent, isSelfServiceRoute } from "./accounts.js";
+import { UserStoreError } from "./users.js";
 import { ActivityLog, type ActivityFilters } from "./activity.js";
 import type { AuditWriter } from "./audit.js";
 import { GatewayEvents } from "./events.js";
@@ -48,7 +50,9 @@ export class ConsoleServer {
     private readonly access: ClientAccess,
     private readonly heartbeatInterval: number, private readonly updateEnabled: boolean,
     private readonly now = Date.now,
-  ) {}
+  ) { this.accounts = new AccountRoutes(auth, now); }
+
+  private readonly accounts: AccountRoutes;
 
   private settings(): Record<string, unknown> {
     const result: Record<string, unknown> = { retentionDays: this.config.retentionDays, theme: "system", heartbeatDisplay: true };
@@ -98,6 +102,9 @@ export class ConsoleServer {
     if (!this.config.trustedProxies.length) {
       warningDetails.push({ code: "NO_TRUSTED_PROXIES", message: "No trusted proxies configured; behind a proxy, per-client rate limiting may share one peer address." });
     }
+    if (this.auth.users.adminsWithoutTotp() > 0) {
+      warningDetails.push({ code: "ADMIN_WITHOUT_TOTP", message: "An enabled administrator account has no authenticator; enable TOTP in Settings > Account." });
+    }
     return { ts: now, eventId: this.events.replay(0).at(-1)?.id ?? 0, clients, engines, settings: this.settings(), activity: this.activity.query({ limit: 100 }).rows,
       gateway: { version: GATEWAY_VERSION, mcpVersion: MCP_VERSION, publicOrigin: this.config.publicOrigin, updateEnabled: this.updateEnabled, heartbeatInterval: this.heartbeatInterval, warnings: warningDetails.map(warning => warning.message), warningDetails },
       kpis: { clients: clients.length, registeredEngines: engines.length, onlineEngines: engines.filter(engine => engine.online).length,
@@ -113,14 +120,27 @@ export class ConsoleServer {
       const mutation = !["GET", "HEAD"].includes(request.method ?? "");
       const recent = request.method === "DELETE" && path.startsWith("engines/")
         || request.method === "POST" && (path === "engines" || /^engines\/[^/]+\/rotate$/.test(path) || /^clients\/[^/]+\/disconnect$/.test(path)) || request.method === "DELETE" && path.startsWith("oauth/")
-        || mutation && (path === "access-clients" || path.startsWith("access-clients/"));
-      this.auth.require(request, mutation, recent);
+        || mutation && (path === "access-clients" || path.startsWith("access-clients/"))
+        || accountRouteNeedsRecent(path, request.method ?? "");
+      // Deny by default: every mutation, and user management even when reading, needs the admin role.
+      const adminOnly = mutation && !isSelfServiceRoute(path) || path === "users" || path.startsWith("users/");
+      const authorize = () => this.auth.require(request, mutation, recent, adminOnly ? "admin" : "any");
+      const session = authorize();
+      const actor: SessionUser = session.user;
+      const act = (action: string): void => this.auth.action(action, actor);
+      // Reading the body yields to other requests; a revocation or demotion meanwhile must stop the write.
+      const readBody = async (): Promise<unknown> => {
+        const value = await readJsonBody(request);
+        authorize();
+        return value;
+      };
+      if (await this.accounts.handle(path, request, response, session, authorize)) return;
       const method = request.method;
       if (method === "GET" && path === "access-clients") { sendJson(response, 200, { clients: this.access.list() }); return; }
       if (method === "POST" && path === "access-clients") {
-        const body = z.object({ name, expiresAt: z.number().int(), permissions: z.unknown().optional() }).strict().parse(await readJsonBody(request));
+        const body = z.object({ name, expiresAt: z.number().int(), permissions: z.unknown().optional() }).strict().parse(await readBody());
         const result = this.access.create(body.name, body.expiresAt, body.permissions);
-        this.auth.action(`client.create:${result.client.id}`);
+        act(`client.create:${result.client.id}`);
         sendJson(response, 201, result); return;
       }
       const accessRoute = /^access-clients\/([^/]+)(?:\/(rotate|policy|review-global))?$/.exec(path);
@@ -129,23 +149,23 @@ export class ConsoleServer {
         const action = accessRoute[2];
         if (method === "GET" && !action) { sendJson(response, 200, { client: this.access.get(id) }); return; }
         if (method === "DELETE" && !action) {
-          this.access.revoke(id); this.auth.action(`client.revoke:${id}`);
+          this.access.revoke(id); act(`client.revoke:${id}`);
           sendJson(response, 200, { revoked: id }); return;
         }
         if (method === "POST" && action === "rotate") {
-          const body = z.object({ expiresAt: z.number().int() }).strict().parse(await readJsonBody(request));
+          const body = z.object({ expiresAt: z.number().int() }).strict().parse(await readBody());
           const result = this.access.rotate(id, body.expiresAt);
-          this.auth.action(`client.rotate:${id}`); sendJson(response, 200, result); return;
+          act(`client.rotate:${id}`); sendJson(response, 200, result); return;
         }
         if (method === "PATCH" && action === "policy") {
-          const body = z.object({ permissions: z.unknown() }).strict().parse(await readJsonBody(request));
+          const body = z.object({ permissions: z.unknown() }).strict().parse(await readBody());
           const client = this.access.setPolicy(id, body.permissions);
-          this.auth.action(`client.policy:${id}`); sendJson(response, 200, { client }); return;
+          act(`client.policy:${id}`); sendJson(response, 200, { client }); return;
         }
         if (method === "POST" && action === "review-global") {
-          z.object({ confirm: z.literal(true) }).strict().parse(await readJsonBody(request));
+          z.object({ confirm: z.literal(true) }).strict().parse(await readBody());
           const client = this.access.reviewLegacy(id);
-          this.auth.action(`client.review-global:${id}`); sendJson(response, 200, { client }); return;
+          act(`client.review-global:${id}`); sendJson(response, 200, { client }); return;
         }
       }
       if (method === "GET" && path === "events") { serveEvents(this.events, request, response, () => Boolean(this.auth.session(request))); return; }
@@ -155,15 +175,15 @@ export class ConsoleServer {
         if (path === "activity") sendJson(response, 200, this.activity.query(filters));
         else {
           const format = z.enum(["csv", "jsonl"]).parse(url.searchParams.get("format"));
-          await this.activity.export(response, format, filters, this.events);
+          await this.activity.export(response, format, filters, this.events, actor.username);
         }
         return;
       }
       if (method === "GET" && path === "engines") { sendJson(response, 200, { engines: this.engines() }); return; }
       if (method === "POST" && path === "engines") {
-        const body = z.object({ id: z.string(), displayName: name }).strict().parse(await readJsonBody(request));
+        const body = z.object({ id: z.string(), displayName: name }).strict().parse(await readBody());
         const result = this.registry.add(body.id, body.displayName);
-        this.auth.action(`engine.add:${body.id}`);
+        act(`engine.add:${body.id}`);
         sendJson(response, 201, { engine: this.engines().find(engine => engine.id === body.id), token: result.token, publicOrigin: this.config.publicOrigin });
         return;
       }
@@ -171,44 +191,45 @@ export class ConsoleServer {
       if (engineRoute) {
         const id = decodeURIComponent(engineRoute[1]);
         if (method === "PATCH" && !engineRoute[2]) {
-          this.registry.update(id, enginePatch.parse(await readJsonBody(request)));
-          this.auth.action(`engine.update:${id}`);
+          this.registry.update(id, enginePatch.parse(await readBody()));
+          act(`engine.update:${id}`);
           sendJson(response, 200, { engine: this.engines().find(engine => engine.id === id) }); return;
         }
         if (method === "POST" && engineRoute[2]) {
-          const token = this.registry.rotate(id); this.auth.action(`engine.rotate:${id}`); sendJson(response, 200, { token }); return;
+          const token = this.registry.rotate(id); act(`engine.rotate:${id}`); sendJson(response, 200, { token }); return;
         }
         if (method === "DELETE" && !engineRoute[2]) {
-          this.registry.remove(id); this.auth.action(`engine.remove:${id}`); sendJson(response, 200, { removed: id }); return;
+          this.registry.remove(id); act(`engine.remove:${id}`); sendJson(response, 200, { removed: id }); return;
         }
       }
       if (method === "GET" && path === "clients") { sendJson(response, 200, { clients: this.clients() }); return; }
       const disconnect = /^clients\/([^/]+)\/disconnect$/.exec(path);
       if (method === "POST" && disconnect) {
         const label = decodeURIComponent(disconnect[1]);
-        await this.mcp.disconnect(label); this.auth.action(`client.disconnect:${label}`); sendJson(response, 200, { disconnected: label }); return;
+        await this.mcp.disconnect(label); act(`client.disconnect:${label}`); sendJson(response, 200, { disconnected: label }); return;
       }
       if (method === "GET" && path === "oauth") { sendJson(response, 200, { clients: this.oauth.clients() }); return; }
       const oauthClient = /^oauth\/([^/]+)$/.exec(path);
       if (method === "DELETE" && oauthClient) {
         const id = decodeURIComponent(oauthClient[1]);
         if (!this.oauth.revoke(id)) { sendJson(response, 404, { error: "Unknown OAuth application", code: "OAUTH_APPLICATION_NOT_FOUND" }); return; }
-        this.auth.action(`oauth.revoke:${id}`); sendJson(response, 200, { revoked: id }); return;
+        act(`oauth.revoke:${id}`); sendJson(response, 200, { revoked: id }); return;
       }
       if (method === "GET" && path === "settings") { sendJson(response, 200, this.settings()); return; }
       if (method === "PATCH" && path === "settings") {
-        const settings = settingsPatch.parse(await readJsonBody(request));
-        if (settings.retentionDays !== undefined) this.auth.require(request, true, true);
+        const settings = settingsPatch.parse(await readBody());
+        if (settings.retentionDays !== undefined) this.auth.require(request, true, true, "admin");
         this.store.transaction(() => {
           const upsert = this.store.db.prepare("INSERT INTO settings VALUES (?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value");
           for (const [key, value] of Object.entries(settings)) upsert.run(key, JSON.stringify(value));
         });
-        this.auth.action("settings.update"); sendJson(response, 200, this.settings()); return;
+        act("settings.update"); sendJson(response, 200, this.settings()); return;
       }
       sendJson(response, 404, { error: "not found", code: "NOT_FOUND" });
     } catch (error) {
       if (response.headersSent) { response.destroy(); return; }
-      if (error instanceof ConsoleError) sendJson(response, error.status, { error: error.message, code: error.code, ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}) });
+      if (error instanceof UserStoreError) sendJson(response, error.status, { error: error.message, code: error.code });
+      else if (error instanceof ConsoleError) sendJson(response, error.status, { error: error.message, code: error.code, ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}) });
       else if (error instanceof RegistryError) sendJson(response, error.status, { error: error.message, code: error.code });
       else if (error instanceof ClientAccessError) sendJson(response, error.status, { error: error.message, code: error.code });
       else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB", code: "BODY_TOO_LARGE" });

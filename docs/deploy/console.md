@@ -2,7 +2,7 @@
 
 English | [简体中文](console_cn.md)
 
-The console shares Gateway's listener at `/console/`; its API is `/api/console/`. One owner account signs in with password and TOTP. Controller/Engine tokens grant no console access, and console cookies grant no RPC access. Client labels are self-reported, unverified audit metadata.
+The console shares Gateway's listener at `/console/`; its API is `/api/console/`. Console accounts are stored in the Gateway database. Each has a username, a password, a role (`admin` or read-only `user`) and an optional authenticator (TOTP). Controller/Engine tokens grant no console access, and console cookies grant no RPC access. Client labels are self-reported, unverified audit metadata.
 
 ## Enable and perform initial setup
 
@@ -31,13 +31,31 @@ docker compose up -d gateway
 docker compose logs gateway
 ```
 
-When there is no administrator and no explicit `REACH_ADMIN_SETUP_TOKEN`, Gateway writes a random setup token to `REACH_DATA_DIR/admin-setup-token`. It must be a regular `0600` file owned by the current user. The data directory cannot be a symlink or world-writable without sticky bit; group-writable volumes such as Kubernetes `fsGroup` are supported. Restarts reuse the file. Symlinks, unsafe modes and corrupt files prevent startup without being overwritten. With an existing administrator, a leftover setup file is unusable; if safe deletion fails Gateway starts and logs `CONSOLE_SETUP_TOKEN_NOT_REMOVED` so you can delete it manually.
+When there is no console account and no explicit `REACH_ADMIN_SETUP_TOKEN`, Gateway writes a random setup token to `REACH_DATA_DIR/admin-setup-token`. It must be a regular `0600` file owned by the current user. The data directory cannot be a symlink or world-writable without sticky bit; group-writable volumes such as Kubernetes `fsGroup` are supported. Restarts reuse the file. Symlinks, unsafe modes and corrupt files prevent startup without being overwritten. With an existing account, a leftover setup file is unusable; if safe deletion fails Gateway starts and logs `CONSOLE_SETUP_TOKEN_NOT_REMOVED` so you can delete it manually.
 
 Logs explain how to read it privately but never print it. Read it in your private terminal, for example with `docker compose exec -T gateway sh -c 'cat "$REACH_DATA_DIR/admin-setup-token"'`, or from the configured data directory for a direct process. Never redirect it into service logs, public issues or the repository. Alternatively set `REACH_ADMIN_SETUP_TOKEN` in private env.
 
-Open `https://gateway.example.com/console/`, enter the token, scan the authenticator QR, choose a password of at least 12 characters and confirm TOTP. Save the ten one-time recovery codes. Creating the administrator invalidates the setup token and deletes the generated file. Existing administrators do not get a new token. Older log-only temporary tokens no longer work: use the private file or explicit env for initial setup.
+Open `https://gateway.example.com/console/`, enter the token, choose an administrator username (3–64 letters, digits, `.`, `_` or `-`) and a password of at least 12 characters. Creating the first administrator invalidates the setup token and deletes the generated file; existing installations do not get a new token. Overview warns while any enabled administrator has no authenticator: on a public origin, enable one in **Settings → Account** (scan the QR, confirm a code, save the ten one-time recovery codes). Older log-only temporary tokens no longer work: use the private file or explicit env for initial setup.
 
-Session cookies are HttpOnly, SameSite=Strict, Path=/ and Secure on HTTPS. Sessions expire after 12 idle hours or seven days total; sign-out revokes immediately. Adding/removing devices, rotating tokens, disconnecting clients and changing retention require password confirmation within ten minutes. A new browser requires password plus fresh TOTP; a recovery code replaces TOTP once.
+Session cookies are HttpOnly, SameSite=Strict, Path=/ and Secure on HTTPS. Sessions expire after 12 idle hours or seven days total; sign-out revokes immediately. Adding/removing devices, rotating tokens, disconnecting clients, changing retention, managing users and changing an authenticator require password confirmation within ten minutes. Signing in needs the username and password, plus a fresh TOTP code only for accounts that enabled one; a recovery code replaces TOTP once.
+
+## Accounts and roles
+
+- `admin` accounts have full control, manage users in **Users**, and are the only accounts that can approve MCP OAuth applications.
+- `user` accounts are read-only: they see Overview, Topology, Clients, Devices and Activity, and every other change is rejected with `ROLE_FORBIDDEN`. Their theme choice is kept in their own browser.
+- Every account can change its own password and enable or disable its own authenticator in **Settings → Account**.
+- Disabling or deleting an account, resetting its password or removing its authenticator signs it out everywhere. The last enabled administrator cannot be demoted, disabled or deleted.
+- Audit entries for console actions name the acting username.
+
+### Host-side password reset
+
+If every administrator is locked out (forgotten password or lost authenticator and recovery codes), reset an account on the Gateway host. The command reads the new password from an interactive prompt, or from the first line of standard input when not run in a terminal; it never takes the password as an argument. It sets the password, clears the authenticator and recovery codes, enables the account and revokes its sessions:
+
+```sh
+docker compose exec gateway node dist/gateway-main.js admin reset-password admin
+```
+
+For a direct process, run `node packages/reach-rpc/dist/gateway-main.js admin reset-password <username>` with the same `REACH_DATA_DIR`. It is safe while Gateway is running and is recorded in Activity as `Host CLI`.
 
 ## Language
 
@@ -93,7 +111,7 @@ Activity stores metadata only, never file contents, search patterns, process arg
 
 ## Backup, recovery and rollback
 
-`reach.db` contains administrator TOTP secrets, sessions, recovery-code hashes, Engine-token digests, device data and audit paths. Protect it as private credentials. Forward migrations store client policy and authenticated-principal audit fields; older versions cannot open newer schemas. Database mode is 0600. Keep databases, backups, real installation records and recovery codes out of public repositories. Within a source checkout, private state belongs only in ignored `.reach/`; deployment state/backups belong outside the repository.
+`reach.db` contains account password hashes and TOTP secrets, sessions, recovery-code hashes, Engine-token digests, device data and audit paths. Protect it as private credentials. Forward migrations store client policy and authenticated-principal audit fields; older versions cannot open newer schemas. Database mode is 0600. Keep databases, backups, real installation records and recovery codes out of public repositories. Within a source checkout, private state belongs only in ignored `.reach/`; deployment state/backups belong outside the repository.
 
 The simplest consistent backup stops Gateway and copies the whole directory, including remaining WAL/SHM files. Configure a private backup location:
 
@@ -109,8 +127,12 @@ docker compose up -d gateway
 
 Back up private env, `engines.json` and Compose separately. Online backups require SQLite backup API or a consistent snapshot; copying only live `reach.db` loses WAL state.
 
-To restore, stop Gateway, save the current directory, extract the chosen backup, restore uid/gid 1000, directory 0700 and database 0600, then start a compatible Gateway. Verify owner login, registration and activity queries. Do not replace an existing installation with an empty directory to repair login.
+To restore, stop Gateway, save the current directory, extract the chosen backup, restore uid/gid 1000, directory 0700 and database 0600, then start a compatible Gateway. Verify administrator login, registration and activity queries. Do not replace an existing installation with an empty directory to repair login.
 
 Release helpers preserve `data/`, env, registry and Compose without automatically enabling or migrating existing installations. Database migrations are forward-only; older binaries reject newer schemas. Before rollback to a pre-console version, migrate console devices to private `engines.json` with newly issued tokens and update Engines, since original tokens cannot be recovered from digests. Preserve the database backup, remove `REACH_DATA_DIR` or deploy the old image, and keep env/seed configuration. Reinstalling a supported version with the original data restores console access.
+
+### Upgrading to multi-account consoles
+
+The first start of a Gateway with console accounts migrates the single owner administrator to the account `admin` with role `admin`, keeping its password, authenticator and unused recovery codes. Open sessions are signed out once. Sign in with username `admin`, the existing password and an authenticator code. Back up the data directory before upgrading: older Gateways cannot open the migrated database, so rolling back means restoring that backup and losing changes made since.
 
 See [Client permissions: upgrades and rollback](client-access.md) for separate policy and legacy-migration recovery requirements.

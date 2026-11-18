@@ -148,7 +148,7 @@ def collect(component, output, source=ROOT, cargo_home=None, archives=None, npm_
                    "where offered; all collected upstream license notices are retained.\n")
     else:
         npm_source = npm_source or source
-        for name in ["react", "react-dom", "scheduler", "qrcode-generator", "vite", "@vitejs/plugin-react", "ws", "zod"]:
+        for name in ["react", "react-dom", "scheduler", "qrcode-generator", "three", "vite", "@vitejs/plugin-react", "ws", "zod"]:
             candidates = [npm_source / f"packages/{package}/node_modules/{name}"
                           for package in ["gateway-console", "reach-rpc"]]
             package = next((p for p in candidates if (p / "package.json").exists()), None)

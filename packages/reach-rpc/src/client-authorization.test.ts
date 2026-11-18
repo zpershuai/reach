@@ -16,7 +16,6 @@ import { HttpGatewayClient } from "./mcp/gateway.js";
 import { McpServer } from "./mcp/server.js";
 import { GrantStore } from "./grants.js";
 import { fileURLToPath } from "node:url";
-import { totp } from "./console-api/credentials.js";
 import { ClientAuthorization } from "./client-authorization.js";
 import type { EngineApi, EngineStatus } from "./mcp/in-process.js";
 
@@ -67,8 +66,7 @@ async function fixture(options: { realClock?: boolean; executorLifetime?: number
   };
   const setup = async () => {
     await consoleCall("me");
-    const enrollment = await consoleCall("setup", { token: "fixture-setup" });
-    await consoleCall("setup", { token: "fixture-setup", password: "a long fixture password", code: totp(enrollment.secret, clock()) });
+    await consoleCall("setup", { token: "fixture-setup", username: "owner", password: "a long fixture password" });
   };
   const sockets: WebSocket[] = [];
   const forwarded: Array<Record<string, any>> = [];
