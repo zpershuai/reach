@@ -1,32 +1,46 @@
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import { BlockList, isIP } from "node:net";
-import { AdminCredentials, credentialDigest, hashPassword, newTotpSecret, verifyPassword, verifyTotp } from "./credentials.js";
+import { credentialDigest, hashPassword, normalizeUsername, validPassword, verifyPassword, type UserRole } from "./credentials.js";
 import type { ConsoleConfig } from "./config.js";
 import type { GatewayEvents } from "./events.js";
 import { PayloadTooLargeError, readJsonBody, sendJson } from "./http.js";
 import type { ConsoleStore } from "./store.js";
 import { loadSetupToken, removeSetupToken } from "./setup-token.js";
+import { UserStore, UserStoreError, type ConsoleUser } from "./users.js";
 
-const LEFTOVER_SETUP_TOKEN = "CONSOLE_SETUP_TOKEN_NOT_REMOVED: the administrator exists, so the leftover REACH_DATA_DIR/admin-setup-token is unusable; delete it manually";
+const LEFTOVER_SETUP_TOKEN = "CONSOLE_SETUP_TOKEN_NOT_REMOVED: an account exists, so the leftover REACH_DATA_DIR/admin-setup-token is unusable; delete it manually";
 
 const idleMs = 12 * 60 * 60 * 1000;
 const absoluteMs = 7 * 24 * 60 * 60 * 1000;
-const recentMs = 10 * 60 * 1000;
+export const recentMs = 10 * 60 * 1000;
 
 export class ConsoleError extends Error {
   constructor(readonly status: number, message: string, readonly code: string, readonly retryAfter?: number) { super(message); }
 }
 
-export interface AdminSession {
+export interface SessionUser { id: number; username: string; role: UserRole; totpEnabled: boolean }
+
+export interface ConsoleSession {
   digest: string;
   csrfToken: string;
   createdAt: number;
   lastSeenAt: number;
   reauthenticatedAt: number;
+  user: SessionUser;
+  pendingTotpSecret?: string;
 }
 
-interface Bootstrap { csrfToken: string; expiresAt: number; secret?: string }
+/** Audit caller for actions without a signed-in account. */
+export type Actor = SessionUser | "Setup" | "Host CLI";
+
+export type AccountCheck = { status: "ok"; user: ConsoleUser } | { status: "totp_required"; user: ConsoleUser } | { status: "fail" };
+
+interface Bootstrap { csrfToken: string; expiresAt: number }
+
+export function profile(user: SessionUser | ConsoleUser): SessionUser {
+  return { id: user.id, username: user.username, role: user.role, totpEnabled: user.totpEnabled };
+}
 
 function cookie(request: IncomingMessage, name: string): string | undefined {
   return request.headers.cookie?.split(";").map(value => value.trim()).find(value => value.startsWith(`${name}=`))?.slice(name.length + 1);
@@ -101,9 +115,11 @@ export class AuthRateLimiter {
 export class ConsoleAuth {
   private setupDigest: string | undefined;
   private readonly bootstraps = new Map<string, Bootstrap>();
-  private readonly credentials: AdminCredentials;
+  readonly users: UserStore;
   readonly peers: PeerResolver;
   private readonly limiter: AuthRateLimiter;
+  /** Verified for unknown usernames so their timing matches a wrong password. */
+  private readonly dummyHash = hashPassword(randomBytes(16).toString("hex"));
 
   constructor(
     private readonly store: ConsoleStore,
@@ -112,36 +128,42 @@ export class ConsoleAuth {
     private readonly now = Date.now,
     private readonly logger: (message: string) => void = console.log,
   ) {
-    this.credentials = new AdminCredentials(store);
+    this.users = new UserStore(store, now);
     this.peers = new PeerResolver(config.trustedProxies);
     this.limiter = new AuthRateLimiter(now);
-    if (!this.hasAdmin()) {
+    if (!this.users.any()) {
       const token = config.setupToken || loadSetupToken(store.directory);
       this.setupDigest = credentialDigest(token);
       if (!config.setupToken) logger("Reach console setup credential: read REACH_DATA_DIR/admin-setup-token privately");
     } else if (!removeSetupToken(store.directory)) logger(LEFTOVER_SETUP_TOKEN);
   }
 
-  private hasAdmin(): boolean { return Boolean(this.store.db.prepare("SELECT id FROM admin WHERE id=1").get()); }
-
-  session(request: IncomingMessage): AdminSession | undefined {
+  session(request: IncomingMessage): ConsoleSession | undefined {
     const id = cookie(request, "reach_console");
     if (!id || !/^[a-f0-9]{64}$/.test(id)) return undefined;
     const digest = credentialDigest(id);
-    const row = this.store.db.prepare("SELECT * FROM console_sessions WHERE digest=?").get(digest);
+    const row = this.store.db.prepare(`SELECT s.*, u.username, u.role, u.disabled, u.totp_secret IS NOT NULL AS totp_enabled
+      FROM console_sessions s JOIN users u ON u.id = s.user_id WHERE s.digest=?`).get(digest);
     if (!row) return undefined;
-    if (this.now() - Number(row.last_seen_at) >= idleMs || this.now() - Number(row.created_at) >= absoluteMs) {
+    if (Number(row.disabled) === 1 || this.now() - Number(row.last_seen_at) >= idleMs || this.now() - Number(row.created_at) >= absoluteMs) {
       this.store.db.prepare("DELETE FROM console_sessions WHERE digest=?").run(digest);
       return undefined;
     }
     this.store.db.prepare("UPDATE console_sessions SET last_seen_at=? WHERE digest=?").run(this.now(), digest);
-    return { digest, csrfToken: String(row.csrf_token), createdAt: Number(row.created_at), lastSeenAt: this.now(), reauthenticatedAt: Number(row.reauthenticated_at) };
+    const pending = row.pending_totp_secret !== null && Number(row.pending_totp_expires_at) > this.now() ? String(row.pending_totp_secret) : undefined;
+    return {
+      digest, csrfToken: String(row.csrf_token), createdAt: Number(row.created_at), lastSeenAt: this.now(), reauthenticatedAt: Number(row.reauthenticated_at),
+      user: { id: Number(row.user_id), username: String(row.username), role: row.role === "admin" ? "admin" : "user", totpEnabled: Number(row.totp_enabled) === 1 },
+      ...(pending ? { pendingTotpSecret: pending } : {}),
+    };
   }
 
-  require(request: IncomingMessage, mutation = false, recent = false): AdminSession {
+  /** Authenticates a console API request; `role: "admin"` rejects read-only accounts with ROLE_FORBIDDEN. */
+  require(request: IncomingMessage, mutation = false, recent = false, role: "any" | "admin" = "any"): ConsoleSession {
     const session = this.session(request);
     if (!session) throw new ConsoleError(401, "Sign in required", "SIGN_IN_REQUIRED");
     if (mutation) this.checkCsrf(request, session.csrfToken);
+    if (role === "admin" && session.user.role !== "admin") throw new ConsoleError(403, "Your account is read-only", "ROLE_FORBIDDEN");
     if (recent && this.now() - session.reauthenticatedAt >= recentMs) throw new ConsoleError(403, "Re-authentication required", "REAUTH_REQUIRED");
     return session;
   }
@@ -170,32 +192,69 @@ export class ConsoleAuth {
     return next;
   }
 
-  private signIn(request: IncomingMessage, response: ServerResponse, recoveryCodes?: string[]): void {
+  private signIn(request: IncomingMessage, response: ServerResponse, user: ConsoleUser): void {
     const id = randomBytes(32).toString("hex");
     const csrfToken = randomBytes(32).toString("hex");
-    this.store.db.prepare("INSERT INTO console_sessions VALUES (?,1,?,?,?,?)").run(credentialDigest(id), csrfToken, this.now(), this.now(), this.now());
+    this.store.db.prepare("INSERT INTO console_sessions (digest,user_id,csrf_token,created_at,last_seen_at,reauthenticated_at) VALUES (?,?,?,?,?,?)")
+      .run(credentialDigest(id), user.id, csrfToken, this.now(), this.now(), this.now());
+    this.users.recordLogin(user.id);
     const bootstrapId = cookie(request, "reach_console_bootstrap");
     if (bootstrapId) this.bootstraps.delete(credentialDigest(bootstrapId));
     response.setHeader("set-cookie", [this.cookieValue("reach_console", id, absoluteMs / 1000), this.cookieValue("reach_console_bootstrap", "", 0)]);
-    sendJson(response, 200, { authenticated: true, admin: { id: 1 }, csrfToken, ...(recoveryCodes ? { recoveryCodes } : {}) });
+    sendJson(response, 200, { authenticated: true, user: profile(user), csrfToken });
   }
 
-  /** Verifies password and second factor for a non-console flow, sharing sign-in rate limits and audit. */
-  async verifyOwner(request: IncomingMessage, route: string, password: unknown, code: unknown): Promise<boolean> {
+  /** Counts a failed credential check toward rate limits and audits it. */
+  failed(peer: string, route: string): void {
+    this.limiter.failed(peer);
+    this.events.authFailed(route, peer);
+  }
+
+  checkLimit(peer: string): void { this.limiter.check(peer); }
+
+  /**
+   * The one credential check shared by sign-in, OAuth approval and re-authentication. Unknown and disabled
+   * accounts, wrong passwords and wrong codes all fail alike; only `fail` counts toward rate limits.
+   * `totp_required` is returned only after a correct password when no code was supplied.
+   */
+  async verifyAccount(peer: string, route: string, username: unknown, password: unknown, code: unknown,
+    options: { requireFactor?: boolean; role?: UserRole } = {}): Promise<AccountCheck> {
+    const name = normalizeUsername(username);
+    const candidate = name ? this.users.credentialsFor(name) : undefined;
+    const usable = typeof password === "string" && password.length <= 1024;
+    const passwordOk = usable && await verifyPassword(password, candidate?.passwordHash ?? await this.dummyHash) && Boolean(candidate);
+    // The account may have changed while scrypt ran: decide on its current row, and only if the
+    // password that was checked is still its password (a reset in between invalidates this attempt).
+    const account = passwordOk && name ? this.users.credentialsFor(name) : undefined;
+    let result: AccountCheck = { status: "fail" };
+    if (account && account.id === candidate!.id && account.passwordHash === candidate!.passwordHash && !account.disabled
+      && (!options.role || account.role === options.role)) {
+      const factor = typeof code === "string" ? code.trim().replace(/\s+/g, "").toUpperCase() : "";
+      if (options.requireFactor === false || !account.totpEnabled) result = { status: "ok", user: account };
+      else if (!factor) result = { status: "totp_required", user: account };
+      else if (this.users.credentials.acceptFactor(account.id, factor, this.now())) result = { status: "ok", user: account };
+    }
+    if (result.status === "fail") this.failed(peer, route);
+    return result;
+  }
+
+  /** Verifies the signed-in user's current password, sharing rate limits; marks the session re-authenticated. */
+  async confirmPassword(request: IncomingMessage, session: ConsoleSession, password: unknown, route: string): Promise<void> {
     const peer = this.peers.resolve(request);
     this.limiter.check(peer);
-    const admin = this.store.db.prepare("SELECT password_hash FROM admin WHERE id=1").get();
-    const ok = Boolean(admin) && typeof password === "string" && password.length <= 1024 && await verifyPassword(password, String(admin!.password_hash))
-      && typeof code === "string" && this.credentials.acceptFactor(code.trim().replace(/\s+/g, "").toUpperCase(), this.now());
-    if (!ok) {
-      this.limiter.failed(peer);
-      this.events.authFailed(route, peer);
-    }
-    return ok;
+    const result = await this.verifyAccount(peer, route, session.user.username, password, undefined, { requireFactor: false });
+    if (result.status !== "ok" || result.user.id !== session.user.id) throw new ConsoleError(401, "Invalid credentials", "INVALID_CREDENTIALS");
+    this.store.db.prepare("UPDATE console_sessions SET reauthenticated_at=? WHERE digest=?").run(this.now(), session.digest);
   }
 
-  action(action: string): void {
-    this.events.emit("admin.action", { caller: { type: "console", label: "Administrator", verified: false }, action, outcome: "ok" });
+  setPendingTotp(session: ConsoleSession, secret: string | null): void {
+    this.store.db.prepare("UPDATE console_sessions SET pending_totp_secret=?, pending_totp_expires_at=? WHERE digest=?")
+      .run(secret, secret ? this.now() + recentMs : null, session.digest);
+  }
+
+  action(action: string, actor: Actor): void {
+    const label = typeof actor === "string" ? actor : actor.username;
+    this.events.emit("admin.action", { caller: { type: "console", label, verified: true }, action, outcome: "ok" });
   }
 
   async handle(path: string, request: IncomingMessage, response: ServerResponse): Promise<boolean> {
@@ -204,66 +263,57 @@ export class ConsoleAuth {
     try {
       if (path === "me" && request.method === "GET") {
         const session = this.session(request);
-        sendJson(response, 200, session ? { authenticated: true, admin: { id: 1 }, csrfToken: session.csrfToken }
-          : { authenticated: false, setupRequired: !this.hasAdmin(), csrfToken: this.bootstrap(request, response).csrfToken });
+        sendJson(response, 200, session ? { authenticated: true, user: session.user, csrfToken: session.csrfToken }
+          : { authenticated: false, setupRequired: !this.users.any(), csrfToken: this.bootstrap(request, response).csrfToken });
         return true;
       }
       if (request.method !== "POST" || path === "me") throw new ConsoleError(405, "Method not allowed", "METHOD_NOT_ALLOWED");
-      if (path === "setup" && this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists", "ADMIN_EXISTS");
+      if (path === "setup" && this.users.any()) throw new ConsoleError(409, "Administrator already exists", "ADMIN_EXISTS");
       const peer = this.peers.resolve(request);
       if (["setup", "login", "reauth"].includes(path)) this.limiter.check(peer);
-      let session: AdminSession | undefined;
-      let bootstrap: Bootstrap | undefined;
+      let session: ConsoleSession | undefined;
       if (path === "logout" || path === "reauth") session = this.require(request, true);
-      else { bootstrap = this.bootstrap(request); this.checkCsrf(request, bootstrap.csrfToken); }
+      else this.checkCsrf(request, this.bootstrap(request).csrfToken);
       const value = await readJsonBody(request);
       if (!value || typeof value !== "object" || Array.isArray(value)) throw new ConsoleError(400, "Invalid request", "INVALID_REQUEST");
       const body = value as Record<string, unknown>;
-      const fail = (status = 401): never => {
-        this.limiter.failed(peer);
-        this.events.authFailed(`/api/console/${path}`, peer);
-        throw new ConsoleError(status, "Invalid credentials", "INVALID_CREDENTIALS");
-      };
+      const route = `/api/console/${path}`;
       if (path === "setup") {
-        if (!this.setupDigest || typeof body.token !== "string" || !equal(credentialDigest(body.token), this.setupDigest)) fail(403);
-        if (body.password === undefined) {
-          bootstrap!.secret ??= newTotpSecret();
-          const secret = bootstrap!.secret;
-          sendJson(response, 200, { secret, otpauthUrl: `otpauth://totp/Reach:Administrator?secret=${secret}&issuer=Reach&algorithm=SHA1&digits=6&period=30` });
-          return true;
+        if (!this.setupDigest || typeof body.token !== "string" || !equal(credentialDigest(body.token), this.setupDigest)) {
+          this.failed(peer, route);
+          throw new ConsoleError(403, "Invalid credentials", "INVALID_CREDENTIALS");
         }
-        if (typeof body.password !== "string" || body.password.length < 12 || body.password.length > 1024) throw new ConsoleError(400, "Password must contain 12 to 1024 characters", "PASSWORD_LENGTH");
-        const step = bootstrap!.secret && typeof body.code === "string" ? verifyTotp(bootstrap!.secret, body.code, -1, this.now()) : undefined;
-        if (step === undefined) fail(403);
+        const username = normalizeUsername(body.username);
+        if (!username) throw new ConsoleError(400, "Username must be 3 to 64 letters, digits, '.', '_' or '-'", "USERNAME_INVALID");
+        if (!validPassword(body.password)) throw new ConsoleError(400, "Password must contain 12 to 1024 characters", "PASSWORD_LENGTH");
         const passwordHash = await hashPassword(body.password);
-        if (this.hasAdmin()) throw new ConsoleError(409, "Administrator already exists", "ADMIN_EXISTS");
-        const recovery = this.credentials.createAdmin(passwordHash, bootstrap!.secret!, step!, this.now());
+        if (this.users.any()) throw new ConsoleError(409, "Administrator already exists", "ADMIN_EXISTS");
+        const user = this.users.create(username, passwordHash, "admin");
         this.setupDigest = undefined;
         if (!removeSetupToken(this.store.directory)) this.logger(LEFTOVER_SETUP_TOKEN);
-        this.action("admin.setup");
-        this.signIn(request, response, recovery);
+        this.action(`admin.setup:${user.username}`, "Setup");
+        this.signIn(request, response, user);
       } else if (path === "login") {
-        const admin = this.store.db.prepare("SELECT password_hash FROM admin WHERE id=1").get();
-        if (!admin || typeof body.password !== "string" || body.password.length > 1024 || !await verifyPassword(body.password, String(admin.password_hash))) fail();
-        if (typeof body.code !== "string" || !this.credentials.acceptFactor(body.code, this.now())) fail();
-        this.action("admin.login");
-        this.signIn(request, response);
+        const result = await this.verifyAccount(peer, route, body.username, body.password, body.code);
+        if (result.status === "totp_required") throw new ConsoleError(401, "Authentication code required", "TOTP_REQUIRED");
+        if (result.status === "fail") throw new ConsoleError(401, "Invalid credentials", "INVALID_CREDENTIALS");
+        this.action("admin.login", profile(result.user));
+        this.signIn(request, response, result.user);
       } else if (path === "logout") {
         this.store.db.prepare("DELETE FROM console_sessions WHERE digest=?").run(session!.digest);
         response.setHeader("set-cookie", this.cookieValue("reach_console", "", 0));
-        this.action("admin.logout");
+        this.action("admin.logout", session!.user);
         sendJson(response, 200, { authenticated: false });
       } else if (path === "reauth") {
-        const admin = this.store.db.prepare("SELECT password_hash FROM admin WHERE id=1").get();
-        if (!admin || typeof body.password !== "string" || body.password.length > 1024 || !await verifyPassword(body.password, String(admin.password_hash))) fail();
-        this.store.db.prepare("UPDATE console_sessions SET reauthenticated_at=? WHERE digest=?").run(this.now(), session!.digest);
-        this.action("admin.reauth");
+        await this.confirmPassword(request, session!, body.password, route);
+        this.action("admin.reauth", session!.user);
         sendJson(response, 200, { authenticated: true });
       }
     } catch (error) {
-      if (error instanceof ConsoleError) {
-        if (error.retryAfter) response.setHeader("retry-after", error.retryAfter);
-        sendJson(response, error.status, { error: error.message, code: error.code, ...(error.retryAfter ? { retryAfter: error.retryAfter } : {}) });
+      if (error instanceof ConsoleError || error instanceof UserStoreError) {
+        const retryAfter = error instanceof ConsoleError ? error.retryAfter : undefined;
+        if (retryAfter) response.setHeader("retry-after", retryAfter);
+        sendJson(response, error.status, { error: error.message, code: error.code, ...(retryAfter ? { retryAfter } : {}) });
       } else if (error instanceof PayloadTooLargeError) sendJson(response, 413, { error: "Body exceeds 64 KiB", code: "BODY_TOO_LARGE" });
       else sendJson(response, 400, { error: "Invalid console request", code: "INVALID_REQUEST" });
     }

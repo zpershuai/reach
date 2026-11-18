@@ -118,6 +118,44 @@ const migrations = [
     SELECT 'oauth:' || id, 'oauth', id, name, created_at, 1, 1
     FROM oauth_clients WHERE approved_at IS NOT NULL;`,
   `ALTER TABLE activity ADD COLUMN principal_id TEXT;`,
+  // Single owner administrator becomes user 1 ("admin"); sessions are discarded rather than rewritten.
+  // AUTOINCREMENT: an account id is never reused, so a stale page cannot act on a later account.
+  `CREATE TABLE users (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    username TEXT NOT NULL,
+    username_key TEXT NOT NULL UNIQUE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK (role IN ('admin', 'user')),
+    totp_secret TEXT,
+    last_totp_step INTEGER NOT NULL DEFAULT -1,
+    disabled INTEGER NOT NULL DEFAULT 0 CHECK (disabled IN (0, 1)),
+    created_at INTEGER NOT NULL,
+    last_login_at INTEGER,
+    password_changed_at INTEGER NOT NULL
+  );
+  INSERT INTO users (id, username, username_key, password_hash, role, totp_secret, last_totp_step, created_at, password_changed_at)
+    SELECT id, 'admin', 'admin', password_hash, 'admin', totp_secret, last_totp_step, created_at, created_at FROM admin;
+  CREATE TABLE user_recovery_codes (
+    digest TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE
+  );
+  INSERT INTO user_recovery_codes (digest, user_id) SELECT digest, admin_id FROM recovery_codes;
+  DROP TABLE recovery_codes;
+  ALTER TABLE user_recovery_codes RENAME TO recovery_codes;
+  DROP TABLE console_sessions;
+  CREATE TABLE console_sessions (
+    digest TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    csrf_token TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    last_seen_at INTEGER NOT NULL,
+    reauthenticated_at INTEGER NOT NULL,
+    pending_totp_secret TEXT,
+    pending_totp_expires_at INTEGER
+  );
+  CREATE INDEX console_sessions_user ON console_sessions(user_id);
+  CREATE INDEX recovery_codes_user ON recovery_codes(user_id);
+  DROP TABLE admin;`,
 ];
 
 /** Owns the database connection; callers close it after draining audit writes. */

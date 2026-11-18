@@ -19,7 +19,7 @@ Delegated/OAuth administration requires `REACH_DATA_DIR`. Credentials are stored
 
 ## Create an everyday client
 
-1. Sign into `/console/` with password/TOTP and open **Clients → Client identities & permissions**.
+1. Sign into `/console/` as an administrator and open **Clients → Client identities & permissions**.
 2. Choose **Create delegated client**, a name and short Credential expiry.
 3. **Add resource** with exact Engine/workspace, e.g. `engine-a`, `docs`. Select only necessary read/write/execute; all default off. An empty policy can create an identity but discover/access nothing.
 4. **Create client** and save the once-shown token in private client settings or a `0600` file. Plaintext cannot be retrieved after closing; rotate if lost.
@@ -38,7 +38,7 @@ Delegated/OAuth administration requires `REACH_DATA_DIR`. Credentials are stored
 
 Save as private `.reach/devices.json`, run `chmod 600 .reach/devices.json` and point `REACH_MCP_DEVICES_FILE` to it. The historical field name does not grant Owner authority. Local Connector tool lists are not security boundaries; Gateway checks actual credentials.
 
-OAuth applications use the [MCP OAuth flow](mcp.md). Approval requires admin password plus fresh TOTP/recovery code and explicit Engine/workspace/operation selection. No selection issues no code. Connected Engine workspaces come from reported names; offline/unreported ones require the exact configured name, ultimately checked by Engine. New approvals never inherit legacy-global authority; reapproval replaces existing policy with explicit selections.
+OAuth applications use the [MCP OAuth flow](mcp.md). Approval requires an administrator username and password, a fresh TOTP or recovery code when that account has an authenticator, and explicit Engine/workspace/operation selection. No selection issues no code. Connected Engine workspaces come from reported names; offline/unreported ones require the exact configured name, ultimately checked by Engine. New approvals never inherit legacy-global authority; reapproval replaces existing policy with explicit selections.
 
 ## Operation mapping and discovery
 

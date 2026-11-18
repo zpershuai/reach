@@ -5,7 +5,8 @@ import { boundedMetadata, diagnosticCode, diagnosticRoute } from "../diagnostics
 export interface CallerContext {
   type: "controller" | "mcp-http" | "engine" | "console";
   label: string;
-  verified: false;
+  /** True only for console account actions, whose label comes from the authenticated session. */
+  verified: boolean;
   mcpSessionId?: string;
   /** Server-derived identity; label and clientInfo remain untrusted display metadata. */
   principalId?: string;
@@ -70,7 +71,7 @@ export function eventMetadata(fields: GatewayEventFields): GatewayEventFields {
   }
   if (fields.code !== undefined) result.code = diagnosticCode(fields.code);
   if (fields.caller) result.caller = {
-    type: fields.caller.type, label: boundedMetadata(fields.caller.label, 64) ?? "Client", verified: false,
+    type: fields.caller.type, label: boundedMetadata(fields.caller.label, 64) ?? "Client", verified: fields.caller.type === "console" && fields.caller.verified === true,
     ...(fields.caller.principalId ? { principalId: boundedMetadata(fields.caller.principalId, 128) } : {}),
     ...(fields.caller.mcpSessionId ? { mcpSessionId: boundedMetadata(fields.caller.mcpSessionId, 128) } : {}),
   };

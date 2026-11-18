@@ -48,7 +48,11 @@ export async function api<T = Record<string, unknown>>(
     }
   }
   if (!response.ok) {
-    if (response.status === 401 && !["login", "reauth"].includes(path))
+    // The role changed in another session: refresh identity so every view drops its admin controls,
+    // however the calling component handles the error itself.
+    if (data.code === "ROLE_FORBIDDEN") window.dispatchEvent(new Event("reach:identity"));
+    // Credential checks inside a valid session (wrong current password, wrong code) are not sign-outs.
+    if (response.status === 401 && !["login", "reauth"].includes(path) && !["INVALID_CREDENTIALS", "TOTP_REQUIRED"].includes(String(data.code)))
       window.dispatchEvent(new Event("reach:unauthorized"));
     throw new ApiError(
       typeof data.error === "string"

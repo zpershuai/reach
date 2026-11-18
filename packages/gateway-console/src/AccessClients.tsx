@@ -5,6 +5,7 @@ import { api, errorText } from "./api";
 import type { SensitiveAction } from "./Devices";
 import type { Activity, Engine } from "./types";
 import { CopyButton, Modal, formatAgo } from "./ui";
+import { useSession } from "./session";
 
 const operationKeys = {
   read: "clients.read",
@@ -83,6 +84,7 @@ export function AccessClients({
   revision?: number;
 }) {
   const { t, lang } = useT();
+  const { isAdmin } = useSession();
   const now = useNow();
   const suggestionsId = useId();
   const [clients, setClients] = useState<AccessClient[]>([]);
@@ -154,9 +156,11 @@ export function AccessClients({
     <section className="panel">
       <div className="panel-head">
         <h2>{t("clients.title")}</h2>
-        <button className="btn" onClick={() => start({ kind: "create" })}>
-          {t("clients.create")}
-        </button>
+        {isAdmin && (
+          <button className="btn" onClick={() => start({ kind: "create" })}>
+            {t("clients.create")}
+          </button>
+        )}
       </div>
       <div className="note">{t("clients.identityNote")}</div>
       {Boolean(error) && (
@@ -241,7 +245,7 @@ export function AccessClients({
                 </td>
                 <td>{credentialStatus(client)}</td>
                 <td>
-                  {client.revokedAt === null && (
+                  {isAdmin && client.revokedAt === null && (
                     <>
                       <button
                         className="btn small"

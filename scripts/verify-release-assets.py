@@ -85,7 +85,7 @@ def gateway(directory, version, node_version=None):
     expected_node = node_version or json.loads((ROOT / 'scripts/node-runtime.json').read_text())['version'].removeprefix('v')
     if node is None or node['version'].removeprefix('v') != expected_node:
         raise ValueError('Node notice version differs')
-    for name in ['react', 'react-dom', 'scheduler', 'qrcode-generator', 'vite', '@vitejs/plugin-react', 'ws', 'zod']:
+    for name in ['react', 'react-dom', 'scheduler', 'qrcode-generator', 'three', 'vite', '@vitejs/plugin-react', 'ws', 'zod']:
         if not any(item['name'] == name and item.get('license') for item in inventory) or not any(path.startswith('LICENSES/npm/' + name.replace('/', '--') + '/') for path in legal):
             raise ValueError('Missing npm dependency notice')
 

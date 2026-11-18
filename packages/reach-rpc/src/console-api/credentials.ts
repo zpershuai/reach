@@ -79,38 +79,45 @@ export function credentialDigest(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
-export class AdminCredentials {
+export type UserRole = "admin" | "user";
+export const userRoles: readonly UserRole[] = ["admin", "user"];
+
+/** Returns the display username, or undefined when it is not 3-64 of `[A-Za-z0-9._-]`. */
+export function normalizeUsername(value: unknown): string | undefined {
+  if (typeof value !== "string") return undefined;
+  const username = value.trim();
+  return /^[A-Za-z0-9._-]{3,64}$/.test(username) ? username : undefined;
+}
+
+export function usernameKey(username: string): string { return username.toLowerCase(); }
+
+export function validPassword(value: unknown): value is string {
+  return typeof value === "string" && value.length >= 12 && value.length <= 1024;
+}
+
+/** Per-user second factors: TOTP replay state and hashed single-use recovery codes. */
+export class AccountCredentials {
   constructor(private readonly store: ConsoleStore) {}
 
-  issueRecoveryCodes(): string[] {
-    return this.store.transaction(() => this.replaceRecoveryCodes());
-  }
-
-  createAdmin(passwordHash: string, secret: string, step: number, now: number): string[] {
-    return this.store.transaction(() => {
-      this.store.db.prepare("INSERT INTO admin(id,password_hash,totp_secret,last_totp_step,created_at) VALUES (1,?,?,?,?)").run(passwordHash, secret, step, now);
-      return this.replaceRecoveryCodes();
-    });
-  }
-
-  private replaceRecoveryCodes(): string[] {
+  /** Replaces the user's recovery codes; call inside a transaction when combined with other writes. */
+  replaceRecoveryCodes(userId: number): string[] {
     const codes = new Set<string>();
     while (codes.size < 10) codes.add(base32(randomBytes(7)).slice(0, 10));
-    this.store.db.exec("DELETE FROM recovery_codes");
-    const insert = this.store.db.prepare("INSERT INTO recovery_codes(digest,admin_id) VALUES (?,1)");
-    for (const code of codes) insert.run(credentialDigest(code));
+    this.store.db.prepare("DELETE FROM recovery_codes WHERE user_id=?").run(userId);
+    const insert = this.store.db.prepare("INSERT INTO recovery_codes(digest,user_id) VALUES (?,?)");
+    for (const code of codes) insert.run(credentialDigest(code), userId);
     return [...codes];
   }
 
   /** Call only after verifying the password. Updates replay state atomically. */
-  acceptFactor(code: string, timeMs: number): boolean {
-    const admin = this.store.db.prepare("SELECT totp_secret,last_totp_step FROM admin WHERE id=1").get();
-    if (!admin) return false;
+  acceptFactor(userId: number, code: string, timeMs: number): boolean {
+    const user = this.store.db.prepare("SELECT totp_secret,last_totp_step FROM users WHERE id=?").get(userId);
+    if (!user || user.totp_secret === null) return false;
     if (/^[A-Z2-7]{10}$/.test(code)) {
-      return this.store.db.prepare("DELETE FROM recovery_codes WHERE digest=? AND admin_id=1").run(credentialDigest(code)).changes === 1;
+      return this.store.db.prepare("DELETE FROM recovery_codes WHERE digest=? AND user_id=?").run(credentialDigest(code), userId).changes === 1;
     }
-    const step = verifyTotp(String(admin.totp_secret), code, Number(admin.last_totp_step), timeMs);
+    const step = verifyTotp(String(user.totp_secret), code, Number(user.last_totp_step), timeMs);
     if (step === undefined) return false;
-    return this.store.db.prepare("UPDATE admin SET last_totp_step=? WHERE id=1 AND last_totp_step < ?").run(step, step).changes === 1;
+    return this.store.db.prepare("UPDATE users SET last_totp_step=? WHERE id=? AND last_totp_step < ?").run(step, userId, step).changes === 1;
   }
 }

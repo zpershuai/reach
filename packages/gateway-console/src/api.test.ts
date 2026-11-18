@@ -52,7 +52,7 @@ it("localizes known codes and preserves unknown server diagnostics", () => {
       new ApiError("Invalid credentials", 401, "INVALID_CREDENTIALS"),
       i18n.t,
     ),
-  ).toBe("密码或验证码错误");
+  ).toBe("用户名、密码或验证码错误");
   expect(
     errorText(
       new ApiError("Specific Gateway diagnostic", 400, "FUTURE_CODE"),
@@ -141,4 +141,22 @@ it.each(["fetch", "body"])("localizes network failures during %s and follows lan
 
 it("translates the malformed-auth-request code", () => {
   expect(errorText(new ApiError("Invalid request", 400, "INVALID_REQUEST"), i18n.getFixedT("zh-CN"))).toBe("控制台请求无效");
+});
+it("refreshes identity on any ROLE_FORBIDDEN, and a wrong current password is not a sign-out", async () => {
+  const identity = vi.fn();
+  const unauthorized = vi.fn();
+  window.addEventListener("reach:identity", identity);
+  window.addEventListener("reach:unauthorized", unauthorized);
+  try {
+    const json = (status: number, code: string) =>
+      new Response(JSON.stringify({ error: code, code }), { status, headers: { "content-type": "application/json" } });
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValueOnce(json(403, "ROLE_FORBIDDEN")).mockResolvedValueOnce(json(401, "INVALID_CREDENTIALS")));
+    await expect(api("engines/x", { displayName: "x" }, "PATCH")).rejects.toMatchObject({ code: "ROLE_FORBIDDEN" });
+    expect(identity).toHaveBeenCalledOnce();
+    await expect(api("account/password", { current: "x", password: "y" })).rejects.toMatchObject({ code: "INVALID_CREDENTIALS" });
+    expect(unauthorized).not.toHaveBeenCalled();
+  } finally {
+    window.removeEventListener("reach:identity", identity);
+    window.removeEventListener("reach:unauthorized", unauthorized);
+  }
 });

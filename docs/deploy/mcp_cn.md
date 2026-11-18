@@ -62,7 +62,7 @@ ChatGPT 自定义连接器（Developer mode / Apps）不能填写静态 `Authori
 接入步骤：
 
 1. 在 ChatGPT 中新建连接器，MCP 服务器 URL 填 `https://reach.example.com/mcp`，认证方式选 **OAuth**，客户端 ID/密钥留空（由动态注册生成）。
-2. ChatGPT 打开 Gateway 的批准页，显示应用名称和回调域名。明确选择 Engine、workspace 和 read/write/execute；默认全部不选，未选择不会签发权限。输入管理员密码和当前 TOTP 验证码（或一次性恢复码）后点 **Approve**；**Deny** 返回 `access_denied`。每个 TOTP 码只能用一次，刚登录过控制台时请等待下一个验证码。
+2. ChatGPT 打开 Gateway 的批准页，显示应用名称和回调域名。明确选择 Engine、workspace 和 read/write/execute；默认全部不选，未选择不会签发权限。输入管理员用户名和密码（该账号开启了身份验证器时还需当前 TOTP 验证码或一次性恢复码）后点 **Approve**，只读的 `user` 账号无法批准；**Deny** 返回 `access_denied`。每个 TOTP 码只能用一次，刚登录过控制台时请等待下一个验证码。
 3. 之后 ChatGPT 自动用 refresh token 续期。控制台“Clients → Authorized apps”列出已批准的应用，**Revoke** 立即删除其全部令牌（需近期重新验证密码）。
 
 批准页与控制台登录共享失败限流和审计；批准、撤销分别记录为 `oauth.authorize:<name>`、`oauth.revoke:<id>`。令牌仅以 SHA-256 摘要存于 `reach.db`。匿名注册按客户端地址限流（每小时 20 次）；未批准的注册闲置 1 小时后过期，最多保留 256 个，满额时拒绝新注册而不淘汰正在批准的记录。批准页的待处理请求由 Gateway 签名并随表单提交，不占服务端容量，10 分钟后失效。每个 MCP 会话绑定创建它的身份（Owner、delegated 或某个 OAuth 客户端），换用其他凭证访问该会话返回 404；同一客户端刷新令牌后会话仍可继续使用。若 ChatGPT 访问 `/mcp` 时带有 `Origin`，仍需按下文配置 `REACH_MCP_ALLOWED_ORIGINS`。反向代理需将 `/.well-known/oauth-*` 与 `/oauth/*` 转发到 Gateway（仓库的 Caddy 配置已整站转发）。

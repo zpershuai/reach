@@ -204,11 +204,11 @@ it("switches an already displayed known error and health warnings", async () => 
     ),
   );
   render(<AuthScreen setup={false} onAuthenticated={() => {}} />);
+  fireEvent.change(screen.getByLabelText("Username"), {
+    target: { value: "owner" },
+  });
   fireEvent.change(screen.getByLabelText("Password"), {
     target: { value: "in-memory-password" },
-  });
-  fireEvent.change(screen.getByLabelText("Authenticator or recovery code"), {
-    target: { value: "wrong" },
   });
   fireEvent.submit(
     screen.getByRole("button", { name: "Sign in →" }).closest("form")!,
@@ -217,7 +217,7 @@ it("switches an already displayed known error and health warnings", async () => 
     "Invalid credentials",
   );
   fireEvent.click(screen.getByRole("button", { name: "中" }));
-  expect(screen.getByRole("alert")).toHaveTextContent("密码或验证码错误");
+  expect(screen.getByRole("alert")).toHaveTextContent("用户名、密码或验证码错误");
 });
 
 it("renders the Chinese device list and drawer without English UI", () => {

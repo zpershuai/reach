@@ -4,6 +4,7 @@ import { memo } from "react";
 import { api } from "../api";
 import type { SensitiveAction } from "../Devices";
 import { consoleStore } from "../store";
+import { useSession } from "../session";
 import type { Activity, Client, Snapshot } from "../types";
 import { Drawer, MiniLog, formatAgo, formatNumber, warningText } from "../ui";
 
@@ -19,6 +20,7 @@ export const ClientDrawer = memo(function ClientDrawer({
   onClose: () => void;
 }) {
   const { t, lang } = useT();
+  const { isAdmin } = useSession();
   const now = useNow();
   return (
     <Drawer
@@ -72,7 +74,7 @@ export const ClientDrawer = memo(function ClientDrawer({
           )}
         />
       </section>
-      {client.type === "mcp-http" && client.activeSessions > 0 && (
+      {isAdmin && client.type === "mcp-http" && client.activeSessions > 0 && (
         <section className="actions">
           <button
             className="btn small"

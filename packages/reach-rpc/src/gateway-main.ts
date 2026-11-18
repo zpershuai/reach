@@ -5,6 +5,7 @@ import { z } from "zod";
 import { GATEWAY_VERSION } from "./version.js";
 import { parseConsoleConfig } from "./console-api/config.js";
 import { attachHttpDiagnostics, ConfigurationError } from "./diagnostics.js";
+import { runAdminCommand } from "./console-api/admin-cli.js";
 
 if (process.argv.includes("--version") || process.argv.includes("-V")) {
   console.log(GATEWAY_VERSION);
@@ -85,7 +86,15 @@ function start(): void {
   });
 }
 
-try {
+if (process.argv[2] === "admin") {
+  // Host-side account recovery; runs against REACH_DATA_DIR without starting the server.
+  runAdminCommand(process.argv.slice(3), { stdin: process.stdin, stdout: process.stdout, stderr: process.stderr, env: process.env })
+    .then(code => { process.exitCode = code; })
+    .catch(error => {
+      console.error(error instanceof ConfigurationError ? `ADMIN_RESET_FAILED: ${error.message}` : `ADMIN_RESET_FAILED: ${error instanceof Error ? error.name : "unknown error"}`);
+      process.exitCode = 1;
+    });
+} else try {
   start();
 } catch (error) {
   // Reach-authored configuration messages name the setting, never its value; anything else

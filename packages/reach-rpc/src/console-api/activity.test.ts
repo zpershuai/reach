@@ -21,7 +21,7 @@ test("excludes auth failures before pagination and from exports", async () => {
   for (let i = 0; i < 80; i++) events.emit("auth.failed", { path: "/unknown" });
   writer.flush();
   const server = createServer((_request, response) => {
-    void activity.export(response, "csv", { excludeAuthFailed: "1" }, events).catch(() => response.destroy());
+    void activity.export(response, "csv", { excludeAuthFailed: "1" }, events, "fixture-admin").catch(() => response.destroy());
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");
@@ -65,7 +65,7 @@ test("activity filters, pagination, streamed exports and daily retention share t
   emit(now, "engine-a", "write", "error");
   writer.flush();
   const server = createServer((request, response) => {
-    void activity.export(response, request.url === "/csv" ? "csv" : "jsonl", { engineId: "engine-a", outcome: "not_ok" }, events).catch(() => response.destroy());
+    void activity.export(response, request.url === "/csv" ? "csv" : "jsonl", { engineId: "engine-a", outcome: "not_ok" }, events, "fixture-admin").catch(() => response.destroy());
   });
   server.listen(0, "127.0.0.1");
   await once(server, "listening");

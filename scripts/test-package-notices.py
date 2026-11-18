@@ -66,7 +66,7 @@ class NoticeTests(unittest.TestCase):
         (root / 'scripts').mkdir(); (root / 'scripts/node-runtime.json').write_text('{"version":"v24.21.0"}')
         fonts = root / 'packages/gateway-console/public/fonts'; fonts.mkdir(parents=True)
         for family in ['Geist','Geist-Mono','Bricolage-Grotesque']: (fonts / (family+'-OFL.txt')).write_text('Fixture OFL text')
-        for name in ['react','react-dom','scheduler','qrcode-generator','vite','@vitejs/plugin-react','ws','zod']:
+        for name in ['react','react-dom','scheduler','qrcode-generator','three','vite','@vitejs/plugin-react','ws','zod']:
             package = root / 'packages/gateway-console/node_modules' / name; package.mkdir(parents=True)
             (package / 'package.json').write_text(json.dumps({'name':name,'version':'1.2.3','license':'MIT'}))
             (package / 'LICENSE').write_text('Fixture upstream license')

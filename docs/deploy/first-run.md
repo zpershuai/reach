@@ -13,7 +13,7 @@ Run every step as an ordinary non-root account. Reach does not need root, and a 
 | Git, curl, Python 3 | Python generates the private config below |
 | Node.js 24 with npm | CI verifies with the exact version in `scripts/toolchain.json` |
 | Rust toolchain with cargo | CI verifies with the exact version in `scripts/toolchain.json`; other versions are untested |
-| A browser and a TOTP authenticator app | Required for the one-time administrator setup in the console |
+| A browser | Required for the one-time administrator setup in the console; a TOTP authenticator app is optional |
 
 ## 1. Build
 
@@ -83,8 +83,8 @@ It prints `Reach gateway v… listening on http://127.0.0.1:8787` and a reminder
 ## 4. Create the administrator
 
 1. Print the one-time setup credential in your own terminal: `cat ~/reach-demo/gateway-data/admin-setup-token`. Do not paste it into logs, issues or chats.
-2. Open `http://127.0.0.1:8787/console/`, enter the setup credential, scan the TOTP secret into your authenticator, then choose a password of at least 12 characters and confirm a TOTP code.
-3. Save the recovery codes privately. The setup file is deleted after a successful setup.
+2. Open `http://127.0.0.1:8787/console/`, enter the setup credential, then choose an administrator username and a password of at least 12 characters. The setup file is deleted after a successful setup.
+3. Optional: enable an authenticator in **Settings → Account** and save its recovery codes privately. Do this before exposing the console publicly.
 4. Switch with EN / 中, or choose Language in navigation or Settings. It applies immediately, preserves input and remembers the browser choice without reauthentication. OAuth approval uses the console language cookie first, then browser language.
 
 ## 5. Pair the Engine (terminal 2)

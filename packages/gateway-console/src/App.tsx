@@ -11,6 +11,8 @@ import { navigate, useRoute } from "./router";
 import { consoleStore, useConsole } from "./store";
 import { TopologyView } from "./Topology";
 import { ClientsView, Overview, SettingsView, SkillsView } from "./Views";
+import { SessionProvider, setLocalTheme, useLocalTheme, type SessionUser } from "./session";
+import { UsersView } from "./Users";
 
 const navigation = [
   ["overview", "nav.overview"],
@@ -20,12 +22,18 @@ const navigation = [
   ["activity", "nav.activity"],
   ["skills", "nav.skills"],
   ["settings", "nav.settings"],
+  ["users", "nav.users"],
 ] as const;
+/** Views only administrators can open; others fall back to Overview. */
+const adminOnly = new Set<string>(["users"]);
 function ThemeToggle({
   theme,
+  shared,
   onError,
 }: {
   theme: Snapshot["settings"]["theme"];
+  /** False for read-only accounts, whose choice stays in this browser. */
+  shared: boolean;
   onError: (error: unknown) => void;
 }) {
   const { t } = useT();
@@ -38,6 +46,10 @@ function ThemeToggle({
   async function cycle(): Promise<void> {
     const previous = current;
     setCurrent(next);
+    if (!shared) {
+      setLocalTheme(next);
+      return;
+    }
     setBusy(true);
     document.documentElement.dataset.theme = next;
     try {
@@ -77,7 +89,9 @@ export function App() {
   const [identity, setIdentity] = useState<{
     authenticated: boolean;
     setupRequired?: boolean;
+    user?: SessionUser;
   }>();
+  const ownTheme = useLocalTheme();
   const [error, setError] = useState<unknown>();
   const [reauth, setReauth] = useState(false);
   const [adding, setAdding] = useState(false);
@@ -86,7 +100,10 @@ export function App() {
   const pending = useRef<(() => Promise<void>) | undefined>(undefined);
   const state = useConsole();
   const route = useRoute();
-  const section = route.split("/")[0];
+  const isAdmin = identity?.user?.role !== "user";
+  const requested = route.split("/")[0];
+  const section = !isAdmin && adminOnly.has(requested) ? "overview" : requested;
+  const visibleNavigation = navigation.filter(([path]) => isAdmin || !adminOnly.has(path));
   useEffect(() => {
     const list = navList.current;
     if (!list) return;
@@ -135,9 +152,12 @@ export function App() {
       consoleStore.stop();
       void loadIdentity();
     };
+    const changed = () => void loadIdentity();
     window.addEventListener("reach:unauthorized", expired);
+    window.addEventListener("reach:identity", changed);
     return () => {
       window.removeEventListener("reach:unauthorized", expired);
+      window.removeEventListener("reach:identity", changed);
       consoleStore.stop();
     };
   }, []);
@@ -146,10 +166,10 @@ export function App() {
       void consoleStore.start().catch((error) => setError(error));
     else consoleStore.stop();
   }, [identity?.authenticated]);
+  const theme = (isAdmin ? undefined : ownTheme) ?? state.snapshot?.settings.theme ?? "system";
   useEffect(() => {
-    document.documentElement.dataset.theme =
-      state.snapshot?.settings.theme ?? "system";
-  }, [state.snapshot?.settings.theme]);
+    document.documentElement.dataset.theme = theme;
+  }, [theme]);
   // Stable so memoized drawers do not re-render on every live event.
   const sensitive = useCallback<SensitiveAction>(async (operation) => {
     try {
@@ -184,7 +204,7 @@ export function App() {
       />
     );
   const snapshot = state.snapshot;
-  const title = navigation.find((item) => item[0] === section)?.[1];
+  const title = visibleNavigation.find((item) => item[0] === section)?.[1];
   const counts: Record<string, string | undefined> = {
     clients: snapshot ? formatNumber(snapshot.clients.length, lang) : undefined,
     devices: snapshot ? formatNumber(snapshot.engines.length, lang) : undefined,
@@ -192,6 +212,7 @@ export function App() {
   };
   const warnings = snapshot?.gateway.warnings.length ?? 0;
   return (
+    <SessionProvider value={identity.user}>
     <div className="app">
       <nav className="nav" aria-label={t("nav.main")}>
         <a
@@ -206,7 +227,7 @@ export function App() {
           <span>Gateway</span>
         </a>
         <ul ref={navList}>
-          {navigation.map(([path, label]) => (
+          {visibleNavigation.map(([path, label]) => (
             <li key={path}>
               <a
                 className="nav-item"
@@ -253,16 +274,21 @@ export function App() {
           </div>
         )}
         <div className="nav-foot">
-          <button
-            className="btn primary add-device"
-            aria-label={t("nav.add")}
-            disabled={!snapshot}
-            onClick={() => setAdding(true)}
-          >
-            <span className="add-device-label">{t("nav.add")}</span>
-          </button>
+          {isAdmin && (
+            <button
+              className="btn primary add-device"
+              aria-label={t("nav.add")}
+              disabled={!snapshot}
+              onClick={() => setAdding(true)}
+            >
+              <span className="add-device-label">{t("nav.add")}</span>
+            </button>
+          )}
           <div className="owner">
-            <span>{t("nav.administrator")}</span>
+            <span className="owner-name" title={identity.user ? t("nav.signedInAs", { name: identity.user.username }) : undefined}>
+              {identity.user?.username ?? t("nav.administrator")}
+              {!isAdmin && <span className="pill">{t("nav.readOnly")}</span>}
+            </span>
             <button
               className="btn ghost small"
               onClick={() =>
@@ -295,7 +321,7 @@ export function App() {
           <div className="tools appearance">
             <LanguageToggle />
             {snapshot && (
-              <ThemeToggle theme={snapshot.settings.theme} onError={setError} />
+              <ThemeToggle theme={theme} shared={isAdmin} onError={setError} />
             )}
           </div>
         </header>
@@ -343,7 +369,8 @@ export function App() {
               <SettingsView snapshot={snapshot} sensitive={sensitive} />
             )}
             {section === "skills" && <SkillsView />}
-            {!navigation.some((item) => item[0] === section) && (
+            {section === "users" && isAdmin && <UsersView sensitive={sensitive} />}
+            {!visibleNavigation.some((item) => item[0] === section) && (
               <section className="panel empty">
                 <p>{t("nav.missingPage")}</p>
                 <button className="btn" onClick={() => navigate("overview")}>
@@ -377,5 +404,6 @@ export function App() {
         />
       )}
     </div>
+    </SessionProvider>
   );
 }
